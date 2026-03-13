@@ -1,0 +1,18 @@
+[package]
+name = "relationship-demo"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "relationship-demo"
+path = "src/main.rs"
+
+[dependencies]
+exoskeleton-core = { workspace = true }
+exoskeleton-host = { workspace = true }
+exoskeleton-relationship = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+worldinterface-connector = { workspace = true }

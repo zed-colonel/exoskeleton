@@ -1,0 +1,29 @@
+[package]
+name = "exoskeleton-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP daemon for remote inspection of a running Exoskeleton vessel"
+readme = "../../README.md"
+keywords = ["http-daemon", "inspection", "prometheus"]
+categories = ["web-programming::http-server"]
+
+[dependencies]
+exoskeleton-core = { workspace = true }
+exoskeleton-host = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+prometheus = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+exoskeleton-relationship = { workspace = true }
+exoskeleton-threads = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

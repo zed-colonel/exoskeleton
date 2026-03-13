@@ -1,0 +1,21 @@
+[package]
+name = "exoskeleton-relationship"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Relationship Ledger + Snapshot + Align step logic for Exoskeleton"
+readme = "../../README.md"
+keywords = ["relationship", "trust", "alignment"]
+categories = ["asynchronous"]
+
+[dependencies]
+exoskeleton-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

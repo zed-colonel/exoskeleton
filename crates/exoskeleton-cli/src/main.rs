@@ -1,0 +1,229 @@
+//! CLI binary for Exoskeleton (`exo`).
+//!
+//! Provides two modes of operation:
+//! - `exo start` — boots a Vessel and HTTP daemon in-process (foreground)
+//! - All other commands — HTTP client queries against a running daemon
+
+mod client;
+mod commands;
+mod format;
+
+use clap::{Parser, Subcommand};
+
+use crate::client::{CliError, DaemonClient};
+
+/// Exoskeleton CLI -- persistent, governable AI runtime.
+#[derive(Parser)]
+#[command(name = "exo", about = "Exoskeleton CLI", version)]
+struct Cli {
+    /// Daemon address for client commands.
+    #[arg(long, env = "EXO_DAEMON_ADDR", default_value = "http://127.0.0.1:7600")]
+    addr: String,
+
+    /// Output raw JSON instead of human-readable format.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the Vessel and HTTP daemon (foreground).
+    Start {
+        /// Path to vessel.toml configuration file.
+        #[arg(long)]
+        config: Option<String>,
+
+        /// Override the data directory.
+        #[arg(long)]
+        data_dir: Option<String>,
+
+        /// Override the vessel mission.
+        #[arg(long)]
+        mission: Option<String>,
+
+        /// Daemon listen address (host:port).
+        #[arg(long)]
+        listen: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error).
+        #[arg(long, default_value = "info")]
+        log_level: String,
+    },
+
+    /// Show current state snapshot.
+    Inspect {
+        #[command(subcommand)]
+        subcommand: Option<InspectSubcommand>,
+    },
+
+    /// Manage cognitive threads.
+    Thread {
+        #[command(subcommand)]
+        subcommand: ThreadSubcommand,
+    },
+
+    /// Manage relationships.
+    Relationship {
+        #[command(subcommand)]
+        subcommand: RelationshipSubcommand,
+    },
+
+    /// Show budget status (cognitive + tool).
+    Budget,
+
+    /// Show recent events from the event ledger.
+    Events {
+        /// Maximum number of events to show.
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Show dual engine health and status.
+    Engines,
+
+    /// Send a message to the vessel.
+    Send {
+        /// Message content.
+        message: String,
+
+        /// Source principal ID (UUID). Generates a new one if omitted.
+        #[arg(long)]
+        source: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InspectSubcommand {
+    /// Show detail for a specific tick.
+    Tick {
+        /// Tick ID (UUID).
+        id: String,
+    },
+    /// Show recent tick history.
+    Ticks {
+        /// Maximum number of ticks to show.
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThreadSubcommand {
+    /// List all registered threads.
+    List,
+    /// Show detail for a specific thread.
+    Inspect {
+        /// Thread ID (UUID or prefix).
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RelationshipSubcommand {
+    /// Show the current relationship snapshot.
+    Show,
+    /// Show relationship history for a principal.
+    History {
+        /// Principal ID (UUID).
+        principal_id: String,
+
+        /// Maximum number of records to show.
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    let result = match cli.command {
+        Commands::Start {
+            config,
+            data_dir,
+            mission,
+            listen,
+            log_level,
+        } => commands::start::run_start(config, data_dir, mission, listen, log_level).await,
+
+        // All remaining commands are client commands that talk to a running daemon.
+        _ => run_client_command(&cli).await,
+    };
+
+    if let Err(e) = result {
+        match &e {
+            CliError::Connection(_) => {
+                eprintln!("error: cannot connect to daemon at {}", cli.addr);
+                eprintln!(
+                    "hint: is the vessel running? start it with: exo start --config vessel.toml"
+                );
+            }
+            _ => {
+                eprintln!("error: {e}");
+            }
+        }
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch client commands (everything except `start`).
+async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
+    let client = DaemonClient::new(&cli.addr);
+
+    match &cli.command {
+        Commands::Inspect { subcommand } => match subcommand {
+            Some(InspectSubcommand::Tick { id }) => {
+                commands::inspect::run_inspect_tick(&client, id, cli.json).await
+            }
+            Some(InspectSubcommand::Ticks { limit }) => {
+                commands::inspect::run_inspect_ticks(&client, *limit, cli.json).await
+            }
+            None => commands::inspect::run_inspect(&client, cli.json).await,
+        },
+
+        Commands::Thread { subcommand } => match subcommand {
+            ThreadSubcommand::List => commands::thread::run_thread_list(&client, cli.json).await,
+            ThreadSubcommand::Inspect { id } => {
+                commands::thread::run_thread_inspect(&client, id, cli.json).await
+            }
+        },
+
+        Commands::Relationship { subcommand } => match subcommand {
+            RelationshipSubcommand::Show => {
+                commands::relationship::run_relationship_show(&client, cli.json).await
+            }
+            RelationshipSubcommand::History {
+                principal_id,
+                limit,
+            } => {
+                commands::relationship::run_relationship_history(
+                    &client,
+                    principal_id,
+                    *limit,
+                    cli.json,
+                )
+                .await
+            }
+        },
+
+        Commands::Budget => commands::budget::run_budget(&client, cli.json).await,
+
+        Commands::Events { limit } => commands::events::run_events(&client, *limit, cli.json).await,
+
+        Commands::Engines => commands::engines::run_engines(&client, cli.json).await,
+
+        Commands::Send { message, source } => {
+            let actual_source = match source {
+                Some(ref s) => s.clone(),
+                None => uuid::Uuid::new_v4().to_string(),
+            };
+
+            commands::send::run_send(&client, &actual_source, message, cli.json).await
+        }
+
+        Commands::Start { .. } => unreachable!("start is handled in main()"),
+    }
+}

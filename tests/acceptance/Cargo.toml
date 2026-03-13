@@ -1,0 +1,26 @@
+[package]
+name = "exoskeleton-acceptance"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dev-dependencies]
+exoskeleton-core = { workspace = true }
+exoskeleton-memory = { workspace = true }
+exoskeleton-relationship = { workspace = true }
+exoskeleton-threads = { workspace = true }
+exoskeleton-host = { workspace = true }
+exoskeleton-daemon = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+axum = { workspace = true }
+rusqlite = { workspace = true }
+worldinterface-connector = { workspace = true }
+worldinterface-host = { workspace = true }

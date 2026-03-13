@@ -1,0 +1,20 @@
+[package]
+name = "exoskeleton-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Context Compiler + episodic/long-term memory tiers for Exoskeleton"
+readme = "../../README.md"
+keywords = ["context-compiler", "memory", "token-budget"]
+categories = ["asynchronous"]
+
+[dependencies]
+exoskeleton-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

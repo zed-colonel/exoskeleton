@@ -1,0 +1,41 @@
+[package]
+name = "exoskeleton-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vessel runtime: dual-engine bootstrap, master loop kernel, and LLM handler"
+readme = "../../README.md"
+keywords = ["vessel", "dual-engine", "master-loop", "podaara"]
+categories = ["asynchronous"]
+
+[dependencies]
+exoskeleton-core = { workspace = true }
+exoskeleton-memory = { workspace = true }
+exoskeleton-relationship = { workspace = true }
+exoskeleton-threads = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+toml = { workspace = true }
+reqwest = { workspace = true }
+prometheus = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+
+# ActionQueue crates — Cognitive AQ engine (direct ownership, I9)
+actionqueue-core = { workspace = true }
+actionqueue-runtime = { workspace = true }
+actionqueue-executor-local = { workspace = true }
+actionqueue-storage = { workspace = true }
+actionqueue-budget = { workspace = true }
+
+# WorldInterface crates — WI Host / Tool AQ (delegation, I9)
+worldinterface-core = { workspace = true }
+worldinterface-connector = { workspace = true }
+worldinterface-host = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }

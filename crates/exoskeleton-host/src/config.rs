@@ -1,0 +1,1088 @@
+//! Vessel runtime configuration.
+//!
+//! [`VesselConfig`] is the runtime representation with typed fields (Duration,
+//! NonZeroUsize). [`VesselConfigFile`] is the TOML-friendly intermediate that
+//! deserializes from files and converts to `VesselConfig` via `TryFrom`.
+//!
+//! Each engine has independent configuration settings (I9: cognitive and tool
+//! execution isolated).
+
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use exoskeleton_core::llm::LlmBackend;
+use exoskeleton_core::{ExoError, VesselId};
+use serde::{Deserialize, Serialize};
+
+/// Wire format of the LLM API for local models.
+///
+/// Most local inference servers support the OpenAI Chat Completions format.
+/// Ollama also has a native format at `/api/chat`. For maximum compatibility,
+/// default to `OpenAICompat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LocalApiFormat {
+    /// OpenAI-compatible Chat Completions API (`/v1/chat/completions`).
+    /// Works with: Ollama (v0.1.24+), vLLM, LM Studio, llama.cpp server.
+    #[serde(rename = "openai_compat")]
+    OpenAICompat,
+    /// Ollama native API (`/api/chat`).
+    #[serde(rename = "ollama")]
+    Ollama,
+}
+
+/// Frontier model provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontierProvider {
+    /// Anthropic Messages API.
+    Anthropic,
+    /// OpenAI Chat Completions API.
+    OpenAI,
+}
+
+/// Configuration for a local LLM backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalModelConfig {
+    /// Base URL of the local inference server.
+    /// Examples: "http://localhost:11434" (Ollama), "http://localhost:8080" (vLLM).
+    pub endpoint: String,
+    /// Model name/tag. Examples: "llama3.2:latest", "qwen2.5-coder:7b".
+    pub model: String,
+    /// Which API format the server speaks.
+    #[serde(default = "default_openai_compat")]
+    pub api_format: LocalApiFormat,
+}
+
+fn default_openai_compat() -> LocalApiFormat {
+    LocalApiFormat::OpenAICompat
+}
+
+/// Configuration for a frontier LLM backend.
+///
+/// API keys are read from environment variables at call time (I4: least
+/// privilege). The `api_key_env` field holds the NAME of the env var,
+/// not the key itself. Keys MUST NEVER be stored in config files,
+/// task payloads, artifacts, or logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrontierModelConfig {
+    /// Which provider's API to use.
+    pub provider: FrontierProvider,
+    /// Model identifier. Examples: "claude-sonnet-4-20250514", "gpt-4o".
+    pub model: String,
+    /// Name of the environment variable holding the API key.
+    /// Examples: "ANTHROPIC_API_KEY", "OPENAI_API_KEY".
+    /// The key is read from this env var at call time — never stored.
+    pub api_key_env: String,
+    /// Optional custom endpoint URL override.
+    /// If `None`, uses the provider's default endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+fn default_local_backend() -> LlmBackend {
+    LlmBackend::Local
+}
+fn default_max_output_tokens() -> u64 {
+    4096
+}
+fn default_llm_timeout_secs() -> u64 {
+    120
+}
+
+/// LLM backend configuration.
+///
+/// At least one of `local` or `frontier` must be configured. The
+/// `default_backend` determines which is used when a request doesn't
+/// specify a backend explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// Local model configuration. `None` if no local model available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalModelConfig>,
+    /// Frontier model configuration. `None` if no frontier model available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<FrontierModelConfig>,
+    /// Which backend to use when requests don't specify one.
+    #[serde(default = "default_local_backend")]
+    pub default_backend: LlmBackend,
+    /// Default max output tokens for requests that don't specify one.
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u64,
+    /// Request timeout in seconds. Applied per HTTP request.
+    #[serde(default = "default_llm_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            local: None,
+            frontier: None,
+            default_backend: LlmBackend::Local,
+            max_output_tokens: 4096,
+            timeout_secs: 120,
+        }
+    }
+}
+
+/// Top-level configuration for an Exoskeleton Vessel.
+///
+/// Each engine has independent configuration (I9: cognitive and tool execution
+/// isolated). The Vessel maps these into `RuntimeConfig` (for the Cognitive AQ)
+/// and `HostConfig` (for the WI Host / Tool AQ).
+#[derive(Debug, Clone)]
+pub struct VesselConfig {
+    /// Unique identity of this vessel instance.
+    pub vessel_id: VesselId,
+    /// Root data directory. All engine-specific subdirectories are created under this.
+    pub data_dir: PathBuf,
+    /// The vessel's primary objective.
+    pub mission: String,
+
+    // ── Cognitive AQ settings (I9: independent) ──
+    /// Cognitive AQ dispatch tick interval.
+    /// How often the Cognitive AQ scheduler checks for promotable/dispatchable tasks.
+    /// Default: 100ms.
+    pub cognitive_tick_interval: Duration,
+    /// Cognitive AQ worker count (max concurrent executing runs).
+    /// Default: 4.
+    pub cognitive_dispatch_concurrency: NonZeroUsize,
+    /// Cognitive AQ lease timeout in seconds.
+    /// Must account for worst-case Act step duration (IBP §4.6) — during Act,
+    /// the cognitive task is in Running state while waiting for Tool AQ completion.
+    /// Default: 600 (10 minutes).
+    pub cognitive_lease_timeout_secs: u64,
+
+    // ── Tool AQ settings (I9: independent, passed to WI Host) ──
+    /// Tool AQ (WI Host) dispatch tick interval.
+    /// Default: 50ms.
+    pub tool_tick_interval: Duration,
+    /// Tool AQ (WI Host) worker count.
+    /// Default: 4.
+    pub tool_dispatch_concurrency: NonZeroUsize,
+
+    // ── Lifecycle settings ──
+    /// How long to wait for graceful shutdown of each engine.
+    /// Default: 30 seconds.
+    pub shutdown_timeout: Duration,
+
+    // ── LLM settings (Sprint 4) ──
+    /// LLM backend configuration: local/frontier models, timeouts, defaults.
+    pub llm_config: LlmConfig,
+
+    // ── Master loop settings (Sprint 5) ──
+    /// How often the master loop runs a PODAARA tick (seconds).
+    /// Default: 60 seconds.
+    pub master_loop_interval_secs: u64,
+
+    /// Directory for the file-based inbox.
+    /// Default: {data_dir}/inbox/
+    pub inbox_dir: Option<PathBuf>,
+
+    // ── Budget settings (Sprint 9) ──
+    /// Cognitive AQ budget configuration. `None` disables budget enforcement.
+    pub cognitive_budget: Option<exoskeleton_core::CognitiveBudgetConfig>,
+    /// Tool AQ budget configuration. `None` disables tool rate limiting.
+    pub tool_budget: Option<exoskeleton_core::ToolBudgetConfig>,
+
+    // ── Daemon settings (Sprint 10) ──
+    /// Daemon HTTP listen address. `None` uses default 127.0.0.1:7600.
+    /// Set to 0.0.0.0:7600 for Docker/container deployment.
+    pub daemon_listen: Option<std::net::SocketAddr>,
+}
+
+impl Default for VesselConfig {
+    fn default() -> Self {
+        Self {
+            vessel_id: VesselId::new(),
+            data_dir: PathBuf::from("data"),
+            mission: String::new(), // Must be overridden — validate() rejects empty
+            cognitive_tick_interval: Duration::from_millis(100),
+            cognitive_dispatch_concurrency: NonZeroUsize::new(4).unwrap(),
+            cognitive_lease_timeout_secs: 600,
+            tool_tick_interval: Duration::from_millis(50),
+            tool_dispatch_concurrency: NonZeroUsize::new(4).unwrap(),
+            shutdown_timeout: Duration::from_secs(30),
+            llm_config: LlmConfig::default(),
+            master_loop_interval_secs: 60,
+            inbox_dir: None,
+            cognitive_budget: None,
+            tool_budget: None,
+            daemon_listen: None,
+        }
+    }
+}
+
+impl VesselConfig {
+    /// Validate the configuration. Returns `ExoError::Config` on failure.
+    pub fn validate(&self) -> Result<(), ExoError> {
+        if self.mission.is_empty() {
+            return Err(ExoError::Config("mission must not be empty".into()));
+        }
+        if self.cognitive_tick_interval.is_zero() {
+            return Err(ExoError::Config(
+                "cognitive_tick_interval must be > 0".into(),
+            ));
+        }
+        if self.cognitive_tick_interval > Duration::from_secs(60) {
+            return Err(ExoError::Config(
+                "cognitive_tick_interval must be <= 60s".into(),
+            ));
+        }
+        if self.cognitive_lease_timeout_secs < 3 {
+            return Err(ExoError::Config(
+                "cognitive_lease_timeout_secs must be >= 3".into(),
+            ));
+        }
+        if self.tool_tick_interval.is_zero() {
+            return Err(ExoError::Config("tool_tick_interval must be > 0".into()));
+        }
+        if self.tool_tick_interval > Duration::from_secs(60) {
+            return Err(ExoError::Config("tool_tick_interval must be <= 60s".into()));
+        }
+        if self.shutdown_timeout.is_zero() {
+            return Err(ExoError::Config("shutdown_timeout must be > 0".into()));
+        }
+
+        // LLM config validation
+        if self.llm_config.timeout_secs < 1 {
+            return Err(ExoError::Config("llm timeout_secs must be >= 1".into()));
+        }
+        if self.llm_config.timeout_secs >= self.cognitive_lease_timeout_secs {
+            return Err(ExoError::Config(
+                "llm timeout_secs must be < cognitive_lease_timeout_secs".into(),
+            ));
+        }
+
+        if self.llm_config.default_backend == LlmBackend::Local && self.llm_config.local.is_none() {
+            tracing::warn!("default_backend is Local but no local model configured");
+        }
+        if self.llm_config.default_backend == LlmBackend::Frontier
+            && self.llm_config.frontier.is_none()
+        {
+            tracing::warn!("default_backend is Frontier but no frontier model configured");
+        }
+
+        // Budget config validation (Sprint 9)
+        if let Some(ref cb) = self.cognitive_budget {
+            cb.validate()?;
+        }
+        if let Some(ref tb) = self.tool_budget {
+            tb.validate()?;
+        }
+
+        // Master loop config validation
+        if self.master_loop_interval_secs < 1 {
+            return Err(ExoError::Config(
+                "master_loop_interval_secs must be >= 1".into(),
+            ));
+        }
+        if self.master_loop_interval_secs >= self.cognitive_lease_timeout_secs {
+            return Err(ExoError::Config(
+                "master_loop_interval_secs must be < cognitive_lease_timeout_secs".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Load configuration from a TOML file, applying environment variable overrides.
+    ///
+    /// Env vars (all optional, override TOML values):
+    /// - `EXO_DATA_DIR` -> `data_dir`
+    /// - `EXO_MISSION` -> `mission`
+    /// - `EXO_VESSEL_ID` -> `vessel_id` (UUID string)
+    /// - `EXO_COGNITIVE_TICK_INTERVAL_MS` -> `cognitive_tick_interval`
+    /// - `EXO_COGNITIVE_DISPATCH_CONCURRENCY` -> `cognitive_dispatch_concurrency`
+    /// - `EXO_TOOL_TICK_INTERVAL_MS` -> `tool_tick_interval`
+    /// - `EXO_TOOL_DISPATCH_CONCURRENCY` -> `tool_dispatch_concurrency`
+    pub fn from_file(path: &Path) -> Result<Self, ExoError> {
+        let toml_str = std::fs::read_to_string(path)
+            .map_err(|e| ExoError::Config(format!("failed to read config file: {e}")))?;
+        let file: VesselConfigFile = toml::from_str(&toml_str)
+            .map_err(|e| ExoError::Config(format!("invalid TOML: {e}")))?;
+        let mut config = Self::try_from(file)?;
+        config.apply_env_overrides()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Apply environment variable overrides to an already-constructed config.
+    fn apply_env_overrides(&mut self) -> Result<(), ExoError> {
+        if let Ok(val) = std::env::var("EXO_DATA_DIR") {
+            self.data_dir = PathBuf::from(val);
+        }
+        if let Ok(val) = std::env::var("EXO_MISSION") {
+            self.mission = val;
+        }
+        if let Ok(val) = std::env::var("EXO_VESSEL_ID") {
+            self.vessel_id = val
+                .parse()
+                .map_err(|e| ExoError::Config(format!("invalid EXO_VESSEL_ID: {e}")))?;
+        }
+        if let Ok(val) = std::env::var("EXO_COGNITIVE_TICK_INTERVAL_MS") {
+            let ms: u64 = val.parse().map_err(|e| {
+                ExoError::Config(format!("invalid EXO_COGNITIVE_TICK_INTERVAL_MS: {e}"))
+            })?;
+            self.cognitive_tick_interval = Duration::from_millis(ms);
+        }
+        if let Ok(val) = std::env::var("EXO_COGNITIVE_DISPATCH_CONCURRENCY") {
+            let n: usize = val.parse().map_err(|e| {
+                ExoError::Config(format!("invalid EXO_COGNITIVE_DISPATCH_CONCURRENCY: {e}"))
+            })?;
+            self.cognitive_dispatch_concurrency = NonZeroUsize::new(n).ok_or_else(|| {
+                ExoError::Config("EXO_COGNITIVE_DISPATCH_CONCURRENCY must be > 0".into())
+            })?;
+        }
+        if let Ok(val) = std::env::var("EXO_TOOL_TICK_INTERVAL_MS") {
+            let ms: u64 = val
+                .parse()
+                .map_err(|e| ExoError::Config(format!("invalid EXO_TOOL_TICK_INTERVAL_MS: {e}")))?;
+            self.tool_tick_interval = Duration::from_millis(ms);
+        }
+        if let Ok(val) = std::env::var("EXO_TOOL_DISPATCH_CONCURRENCY") {
+            let n: usize = val.parse().map_err(|e| {
+                ExoError::Config(format!("invalid EXO_TOOL_DISPATCH_CONCURRENCY: {e}"))
+            })?;
+            self.tool_dispatch_concurrency = NonZeroUsize::new(n).ok_or_else(|| {
+                ExoError::Config("EXO_TOOL_DISPATCH_CONCURRENCY must be > 0".into())
+            })?;
+        }
+        if let Ok(val) = std::env::var("EXO_DAEMON_LISTEN") {
+            self.daemon_listen = Some(
+                val.parse()
+                    .map_err(|e| ExoError::Config(format!("invalid EXO_DAEMON_LISTEN: {e}")))?,
+            );
+        }
+        Ok(())
+    }
+}
+
+// ── TOML deserialization types ──
+
+fn default_60() -> u64 {
+    60
+}
+fn default_100() -> u64 {
+    100
+}
+fn default_50() -> u64 {
+    50
+}
+fn default_4() -> usize {
+    4
+}
+fn default_600() -> u64 {
+    600
+}
+
+/// TOML-friendly configuration file format.
+///
+/// All Duration values are represented as integer milliseconds.
+/// All NonZeroUsize values are represented as plain usize (validated on conversion).
+/// Optional fields use serde defaults.
+#[derive(Debug, Deserialize)]
+pub struct VesselConfigFile {
+    /// `[vessel]` section.
+    pub vessel: VesselSection,
+    /// `[cognitive]` section. Uses defaults if omitted.
+    #[serde(default)]
+    pub cognitive: CognitiveSection,
+    /// `[tool]` section. Uses defaults if omitted.
+    #[serde(default)]
+    pub tool: ToolSection,
+    /// `[llm]` section. Uses defaults if omitted.
+    #[serde(default)]
+    pub llm: LlmConfig,
+    /// `[daemon]` section. Uses defaults if omitted.
+    #[serde(default)]
+    pub daemon: Option<DaemonSection>,
+}
+
+/// The `[daemon]` section of the TOML config file.
+#[derive(Debug, Deserialize)]
+pub struct DaemonSection {
+    /// Listen address as "host:port" string. Default: 127.0.0.1:7600.
+    pub listen: Option<String>,
+}
+
+/// The `[vessel]` section of the TOML config file.
+#[derive(Debug, Deserialize)]
+pub struct VesselSection {
+    /// UUID string. Generated if omitted.
+    pub vessel_id: Option<String>,
+    /// The vessel's primary objective.
+    pub mission: String,
+    /// Root data directory.
+    pub data_dir: PathBuf,
+    /// Master loop interval in seconds. Default: 60.
+    #[serde(default = "default_60")]
+    pub master_loop_interval_secs: u64,
+    /// Directory for the file-based inbox. Default: {data_dir}/inbox/
+    #[serde(default)]
+    pub inbox_dir: Option<PathBuf>,
+}
+
+/// The `[cognitive]` section of the TOML config file.
+#[derive(Debug, Deserialize)]
+pub struct CognitiveSection {
+    /// Tick interval in milliseconds. Default: 100.
+    #[serde(default = "default_100")]
+    pub tick_interval_ms: u64,
+    /// Worker count. Default: 4.
+    #[serde(default = "default_4")]
+    pub dispatch_concurrency: usize,
+    /// Lease timeout in seconds. Default: 600.
+    #[serde(default = "default_600")]
+    pub lease_timeout_secs: u64,
+    /// `[cognitive.budget]` section. `None` disables budget enforcement.
+    #[serde(default)]
+    pub budget: Option<exoskeleton_core::CognitiveBudgetConfig>,
+}
+
+impl Default for CognitiveSection {
+    fn default() -> Self {
+        Self {
+            tick_interval_ms: 100,
+            dispatch_concurrency: 4,
+            lease_timeout_secs: 600,
+            budget: None,
+        }
+    }
+}
+
+/// The `[tool]` section of the TOML config file.
+#[derive(Debug, Deserialize)]
+pub struct ToolSection {
+    /// Tick interval in milliseconds. Default: 50.
+    #[serde(default = "default_50")]
+    pub tick_interval_ms: u64,
+    /// Worker count. Default: 4.
+    #[serde(default = "default_4")]
+    pub dispatch_concurrency: usize,
+    /// `[tool.budget]` section. `None` disables tool rate limiting.
+    #[serde(default)]
+    pub budget: Option<exoskeleton_core::ToolBudgetConfig>,
+}
+
+impl Default for ToolSection {
+    fn default() -> Self {
+        Self {
+            tick_interval_ms: 50,
+            dispatch_concurrency: 4,
+            budget: None,
+        }
+    }
+}
+
+impl TryFrom<VesselConfigFile> for VesselConfig {
+    type Error = ExoError;
+
+    fn try_from(file: VesselConfigFile) -> Result<Self, Self::Error> {
+        let vessel_id = match file.vessel.vessel_id {
+            Some(s) => s
+                .parse::<VesselId>()
+                .map_err(|e| ExoError::Config(format!("invalid vessel_id: {e}")))?,
+            None => VesselId::new(),
+        };
+
+        let cognitive_dispatch_concurrency = NonZeroUsize::new(file.cognitive.dispatch_concurrency)
+            .ok_or_else(|| ExoError::Config("cognitive.dispatch_concurrency must be > 0".into()))?;
+
+        let tool_dispatch_concurrency = NonZeroUsize::new(file.tool.dispatch_concurrency)
+            .ok_or_else(|| ExoError::Config("tool.dispatch_concurrency must be > 0".into()))?;
+
+        Ok(VesselConfig {
+            vessel_id,
+            data_dir: file.vessel.data_dir,
+            mission: file.vessel.mission,
+            cognitive_tick_interval: Duration::from_millis(file.cognitive.tick_interval_ms),
+            cognitive_dispatch_concurrency,
+            cognitive_lease_timeout_secs: file.cognitive.lease_timeout_secs,
+            tool_tick_interval: Duration::from_millis(file.tool.tick_interval_ms),
+            tool_dispatch_concurrency,
+            shutdown_timeout: Duration::from_secs(30),
+            llm_config: file.llm,
+            master_loop_interval_secs: file.vessel.master_loop_interval_secs,
+            inbox_dir: file.vessel.inbox_dir,
+            cognitive_budget: file.cognitive.budget,
+            tool_budget: file.tool.budget,
+            daemon_listen: file
+                .daemon
+                .and_then(|d| d.listen)
+                .map(|s| {
+                    s.parse::<std::net::SocketAddr>().map_err(|e| {
+                        ExoError::Config(format!("invalid daemon listen address: {e}"))
+                    })
+                })
+                .transpose()?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── T-1: VesselConfig Validation ──
+
+    #[test]
+    fn config_default_has_expected_values() {
+        let config = VesselConfig::default();
+        assert_eq!(config.cognitive_tick_interval, Duration::from_millis(100));
+        assert_eq!(config.cognitive_dispatch_concurrency.get(), 4);
+        assert_eq!(config.cognitive_lease_timeout_secs, 600);
+        assert_eq!(config.tool_tick_interval, Duration::from_millis(50));
+        assert_eq!(config.tool_dispatch_concurrency.get(), 4);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn config_validate_rejects_empty_mission() {
+        let config = VesselConfig::default();
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_cognitive_tick_interval() {
+        let config = VesselConfig {
+            mission: "test".into(),
+            cognitive_tick_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn config_validate_rejects_excessive_cognitive_tick_interval() {
+        let config = VesselConfig {
+            mission: "test".into(),
+            cognitive_tick_interval: Duration::from_secs(61),
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_tool_tick_interval() {
+        let config = VesselConfig {
+            mission: "test".into(),
+            tool_tick_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn config_validate_rejects_low_lease_timeout() {
+        let config = VesselConfig {
+            mission: "test".into(),
+            cognitive_lease_timeout_secs: 2,
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_shutdown_timeout() {
+        let config = VesselConfig {
+            mission: "test".into(),
+            shutdown_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn config_validate_accepts_valid() {
+        let config = VesselConfig {
+            mission: "valid mission".into(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    // ── T-2: TOML Config Loading ──
+
+    #[test]
+    fn toml_full_config_parses() {
+        let toml_str = r#"
+[vessel]
+vessel_id = "550e8400-e29b-41d4-a716-446655440000"
+mission = "test mission"
+data_dir = "/tmp/exo"
+
+[cognitive]
+tick_interval_ms = 200
+dispatch_concurrency = 8
+lease_timeout_secs = 300
+
+[tool]
+tick_interval_ms = 25
+dispatch_concurrency = 2
+
+[llm]
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.mission, "test mission");
+        assert_eq!(config.data_dir, PathBuf::from("/tmp/exo"));
+        assert_eq!(config.cognitive_tick_interval, Duration::from_millis(200));
+        assert_eq!(config.cognitive_dispatch_concurrency.get(), 8);
+        assert_eq!(config.cognitive_lease_timeout_secs, 300);
+        assert_eq!(config.tool_tick_interval, Duration::from_millis(25));
+        assert_eq!(config.tool_dispatch_concurrency.get(), 2);
+    }
+
+    #[test]
+    fn toml_minimal_config_uses_defaults() {
+        let toml_str = r#"
+[vessel]
+mission = "minimal"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.mission, "minimal");
+        assert_eq!(config.cognitive_tick_interval, Duration::from_millis(100));
+        assert_eq!(config.cognitive_dispatch_concurrency.get(), 4);
+        assert_eq!(config.cognitive_lease_timeout_secs, 600);
+        assert_eq!(config.tool_tick_interval, Duration::from_millis(50));
+        assert_eq!(config.tool_dispatch_concurrency.get(), 4);
+    }
+
+    #[test]
+    fn toml_invalid_toml_returns_error() {
+        let result = toml::from_str::<VesselConfigFile>("not valid toml {");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn toml_missing_mission_returns_error() {
+        let toml_str = r#"
+[vessel]
+data_dir = "/tmp/exo"
+"#;
+        let result = toml::from_str::<VesselConfigFile>(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn toml_zero_concurrency_returns_error() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[cognitive]
+dispatch_concurrency = 0
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let result = VesselConfig::try_from(file);
+        assert!(matches!(result, Err(ExoError::Config(_))));
+    }
+
+    #[test]
+    fn toml_vessel_id_parsed_when_present() {
+        let toml_str = r#"
+[vessel]
+vessel_id = "550e8400-e29b-41d4-a716-446655440000"
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(
+            config.vessel_id.to_string(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn toml_vessel_id_generated_when_absent() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        // Generated ID should be a non-nil UUID
+        assert_ne!(
+            config.vessel_id.to_string(),
+            "00000000-0000-0000-0000-000000000000"
+        );
+    }
+
+    #[test]
+    fn toml_invalid_vessel_id_returns_error() {
+        let toml_str = r#"
+[vessel]
+vessel_id = "not-a-uuid"
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let result = VesselConfig::try_from(file);
+        assert!(matches!(result, Err(ExoError::Config(_))));
+    }
+
+    // ── T-2 (Sprint 4): LLM Config Types ──
+
+    #[test]
+    fn llm_config_default() {
+        let config = LlmConfig::default();
+        assert!(config.local.is_none());
+        assert!(config.frontier.is_none());
+        assert_eq!(config.default_backend, LlmBackend::Local);
+        assert_eq!(config.max_output_tokens, 4096);
+        assert_eq!(config.timeout_secs, 120);
+    }
+
+    #[test]
+    fn llm_config_roundtrip() {
+        let config = LlmConfig {
+            local: Some(LocalModelConfig {
+                endpoint: "http://localhost:11434".into(),
+                model: "llama3.2:latest".into(),
+                api_format: LocalApiFormat::OpenAICompat,
+            }),
+            frontier: Some(FrontierModelConfig {
+                provider: FrontierProvider::Anthropic,
+                model: "claude-sonnet-4-20250514".into(),
+                api_key_env: "ANTHROPIC_API_KEY".into(),
+                endpoint: None,
+            }),
+            default_backend: LlmBackend::Local,
+            max_output_tokens: 8192,
+            timeout_secs: 60,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: LlmConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn local_model_config_roundtrip() {
+        let config = LocalModelConfig {
+            endpoint: "http://localhost:8080".into(),
+            model: "qwen2.5-coder:7b".into(),
+            api_format: LocalApiFormat::Ollama,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: LocalModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn local_api_format_roundtrip() {
+        for fmt in [LocalApiFormat::OpenAICompat, LocalApiFormat::Ollama] {
+            let json = serde_json::to_string(&fmt).unwrap();
+            let parsed: LocalApiFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(fmt, parsed);
+        }
+    }
+
+    #[test]
+    fn frontier_model_config_roundtrip() {
+        let config = FrontierModelConfig {
+            provider: FrontierProvider::OpenAI,
+            model: "gpt-4o".into(),
+            api_key_env: "OPENAI_API_KEY".into(),
+            endpoint: Some("https://custom.api.com".into()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: FrontierModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn frontier_provider_roundtrip() {
+        for provider in [FrontierProvider::Anthropic, FrontierProvider::OpenAI] {
+            let json = serde_json::to_string(&provider).unwrap();
+            let parsed: FrontierProvider = serde_json::from_str(&json).unwrap();
+            assert_eq!(provider, parsed);
+        }
+    }
+
+    #[test]
+    fn toml_full_llm_config() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[llm]
+default_backend = "local"
+max_output_tokens = 8192
+timeout_secs = 60
+
+[llm.local]
+endpoint = "http://localhost:11434"
+model = "llama3.2:latest"
+api_format = "openai_compat"
+
+[llm.frontier]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.llm_config.default_backend, LlmBackend::Local);
+        assert_eq!(config.llm_config.max_output_tokens, 8192);
+        assert_eq!(config.llm_config.timeout_secs, 60);
+        let local = config.llm_config.local.unwrap();
+        assert_eq!(local.endpoint, "http://localhost:11434");
+        assert_eq!(local.model, "llama3.2:latest");
+        assert_eq!(local.api_format, LocalApiFormat::OpenAICompat);
+        let frontier = config.llm_config.frontier.unwrap();
+        assert_eq!(frontier.provider, FrontierProvider::Anthropic);
+        assert_eq!(frontier.model, "claude-sonnet-4-20250514");
+        assert_eq!(frontier.api_key_env, "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn toml_minimal_llm_config() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[llm]
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.llm_config.default_backend, LlmBackend::Local);
+        assert_eq!(config.llm_config.max_output_tokens, 4096);
+        assert_eq!(config.llm_config.timeout_secs, 120);
+    }
+
+    #[test]
+    fn toml_local_only() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[llm]
+default_backend = "local"
+
+[llm.local]
+endpoint = "http://localhost:11434"
+model = "llama3.2:latest"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert!(config.llm_config.local.is_some());
+        assert!(config.llm_config.frontier.is_none());
+    }
+
+    #[test]
+    fn toml_frontier_only() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[llm]
+default_backend = "frontier"
+
+[llm.frontier]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert!(config.llm_config.local.is_none());
+        assert!(config.llm_config.frontier.is_some());
+    }
+
+    #[test]
+    fn toml_no_llm_section() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.llm_config.default_backend, LlmBackend::Local);
+        assert_eq!(config.llm_config.max_output_tokens, 4096);
+    }
+
+    #[test]
+    fn validate_timeout_bounds() {
+        // timeout_secs must be >= 1
+        let config = VesselConfig {
+            mission: "test".into(),
+            llm_config: LlmConfig {
+                timeout_secs: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+
+        // timeout_secs must be < cognitive_lease_timeout_secs
+        let config = VesselConfig {
+            mission: "test".into(),
+            cognitive_lease_timeout_secs: 60,
+            llm_config: LlmConfig {
+                timeout_secs: 60,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(config.validate(), Err(ExoError::Config(_))));
+
+        // Valid: timeout < lease timeout
+        let config = VesselConfig {
+            mission: "test".into(),
+            cognitive_lease_timeout_secs: 600,
+            llm_config: LlmConfig {
+                timeout_secs: 120,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    // ── T-11: Master Loop Config ──
+
+    #[test]
+    fn config_master_loop_interval_default() {
+        let config = VesselConfig::default();
+        assert_eq!(config.master_loop_interval_secs, 60);
+    }
+
+    #[test]
+    fn config_master_loop_interval_validation() {
+        // < 1 rejected
+        let config = VesselConfig {
+            mission: "test".into(),
+            master_loop_interval_secs: 0,
+            ..Default::default()
+        };
+        assert!(
+            matches!(config.validate(), Err(ExoError::Config(msg)) if msg.contains("master_loop_interval_secs must be >= 1"))
+        );
+
+        // >= lease_timeout rejected
+        let config = VesselConfig {
+            mission: "test".into(),
+            master_loop_interval_secs: 600, // == cognitive_lease_timeout_secs (default 600)
+            ..Default::default()
+        };
+        assert!(
+            matches!(config.validate(), Err(ExoError::Config(msg)) if msg.contains("master_loop_interval_secs must be < cognitive_lease_timeout_secs"))
+        );
+
+        // > lease_timeout also rejected
+        let config = VesselConfig {
+            mission: "test".into(),
+            master_loop_interval_secs: 601,
+            ..Default::default()
+        };
+        assert!(
+            matches!(config.validate(), Err(ExoError::Config(msg)) if msg.contains("master_loop_interval_secs must be < cognitive_lease_timeout_secs"))
+        );
+
+        // Valid: well under lease timeout
+        let config = VesselConfig {
+            mission: "test".into(),
+            master_loop_interval_secs: 60,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_inbox_dir_default() {
+        let config = VesselConfig::default();
+        assert!(config.inbox_dir.is_none());
+    }
+
+    #[test]
+    fn config_roundtrip_with_new_fields() {
+        let toml_str = r#"
+[vessel]
+mission = "test roundtrip"
+data_dir = "/tmp/exo"
+master_loop_interval_secs = 30
+inbox_dir = "/tmp/exo/my-inbox"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.master_loop_interval_secs, 30);
+        assert_eq!(config.inbox_dir, Some(PathBuf::from("/tmp/exo/my-inbox")));
+    }
+
+    #[test]
+    fn config_roundtrip_new_fields_defaults() {
+        // When master_loop fields are omitted, defaults are used
+        let toml_str = r#"
+[vessel]
+mission = "test defaults"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.master_loop_interval_secs, 60);
+        assert!(config.inbox_dir.is_none());
+    }
+
+    // ── T-4 (Sprint 10): Daemon Config ──
+
+    #[test]
+    fn toml_daemon_section_parses() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[daemon]
+listen = "0.0.0.0:7600"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        let addr: std::net::SocketAddr = "0.0.0.0:7600".parse().unwrap();
+        assert_eq!(config.daemon_listen, Some(addr));
+    }
+
+    #[test]
+    fn toml_no_daemon_section_defaults_to_none() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert!(config.daemon_listen.is_none());
+    }
+
+    #[test]
+    fn toml_invalid_daemon_listen_rejected() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[daemon]
+listen = "not-a-socket-addr"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let result = VesselConfig::try_from(file);
+        assert!(matches!(result, Err(ExoError::Config(msg)) if msg.contains("daemon listen")));
+    }
+
+    #[test]
+    fn daemon_listen_default_value() {
+        let config = VesselConfig::default();
+        assert!(config.daemon_listen.is_none());
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "exoskeleton-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core domain types for Exoskeleton — pure model, no I/O"
+readme = "../../README.md"
+keywords = ["ai-runtime", "agent", "domain-model", "substrate"]
+categories = ["asynchronous"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

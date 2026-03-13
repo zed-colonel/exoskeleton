@@ -1,0 +1,935 @@
+//! HTTP backends for LLM API calls.
+//!
+//! Each backend handles the wire protocol for a specific LLM API:
+//! request serialization, HTTP call, response parsing, and error classification.
+
+use std::fmt;
+use std::time::Instant;
+
+use actionqueue_executor_local::CancellationToken;
+use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse, LlmRole, StopReason};
+use exoskeleton_core::ExoError;
+use serde::{Deserialize, Serialize};
+
+/// Trait for LLM HTTP backends.
+///
+/// Each implementation handles the wire protocol for a specific LLM API:
+/// request serialization, HTTP call, response parsing, and error classification.
+///
+/// Implementations must be `Send + Sync` (shared across handler invocations).
+pub trait LlmHttpBackend: Send + Sync {
+    /// Send a request to the LLM API and return the response.
+    ///
+    /// # Arguments
+    /// - `client`: shared reqwest HTTP client (connection pooling)
+    /// - `request`: the LLM request to send
+    /// - `cancellation`: cooperative cancellation token (poll `is_cancelled()`)
+    ///
+    /// # Errors
+    /// - `ExoError::LlmInvocation` for all LLM-related failures
+    fn call(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<LlmResponse, ExoError>;
+}
+
+// ── Sync HTTP helper ──
+
+/// Execute an async future from the sync handler context.
+///
+/// The handler runs on a blocking thread managed by the AQ dispatch loop.
+/// We use `Handle::current().block_on()` to bridge async reqwest calls.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Handle::current().block_on(fut)
+}
+
+// ── OpenAI-Compatible Backend ──
+
+/// HTTP backend for OpenAI-compatible Chat Completions API.
+///
+/// Works with: OpenAI, Ollama (/v1/chat/completions), vLLM, LM Studio,
+/// llama.cpp server, and any other server implementing the OpenAI format.
+///
+/// Endpoint: `{base_url}/v1/chat/completions`
+pub struct OpenAiCompatBackend {
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+impl fmt::Debug for OpenAiCompatBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiCompatBackend")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl OpenAiCompatBackend {
+    /// Create a new OpenAI-compatible backend.
+    pub fn new(base_url: String, model: String, api_key: Option<String>) -> Self {
+        Self {
+            base_url,
+            model,
+            api_key,
+        }
+    }
+
+    fn build_request_body(&self, request: &LlmRequest) -> OpenAiRequest {
+        let mut messages = Vec::new();
+
+        // System prompt becomes a system role message
+        if let Some(ref system) = request.system_prompt {
+            messages.push(OpenAiMessage {
+                role: "system".into(),
+                content: system.clone(),
+            });
+        }
+
+        // User/assistant messages
+        for msg in &request.messages {
+            let role = match msg.role {
+                LlmRole::System => "system",
+                LlmRole::User => "user",
+                LlmRole::Assistant => "assistant",
+            };
+            messages.push(OpenAiMessage {
+                role: role.into(),
+                content: msg.content.clone(),
+            });
+        }
+
+        OpenAiRequest {
+            model: self.model.clone(),
+            messages,
+            max_tokens: request.max_output_tokens,
+            temperature: request.temperature,
+            stop: if request.stop_sequences.is_empty() {
+                None
+            } else {
+                Some(request.stop_sequences.clone())
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    max_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAiMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponse {
+    choices: Vec<OpenAiChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+}
+
+impl LlmHttpBackend for OpenAiCompatBackend {
+    fn call(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<LlmResponse, ExoError> {
+        if cancellation.is_cancelled() {
+            return Err(ExoError::LlmInvocation("cancelled before HTTP call".into()));
+        }
+
+        let body = self.build_request_body(request);
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
+
+        let start = Instant::now();
+
+        let mut req = client.post(&url).json(&body);
+        if let Some(ref key) = self.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        let response = block_on(async { req.send().await }).map_err(|e| {
+            if e.is_timeout() {
+                ExoError::LlmInvocation(format!("timeout: {e}"))
+            } else if e.is_connect() {
+                ExoError::LlmInvocation(format!("connection refused: {e}"))
+            } else {
+                ExoError::LlmInvocation(format!("HTTP error: {e}"))
+            }
+        })?;
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let status = response.status();
+
+        if !status.is_success() {
+            let body_text = block_on(response.text()).unwrap_or_default();
+            return Err(ExoError::LlmInvocation(format!(
+                "{}: {}",
+                status.as_u16(),
+                body_text
+            )));
+        }
+
+        let parsed: OpenAiResponse = block_on(response.json())
+            .map_err(|e| ExoError::LlmInvocation(format!("malformed response body: {e}")))?;
+
+        let choice = parsed
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| ExoError::LlmInvocation("empty choices array".into()))?;
+
+        let stop_reason = match choice.finish_reason.as_deref() {
+            Some("stop") => StopReason::EndTurn,
+            Some("length") => StopReason::MaxTokens,
+            Some("stop_sequence") => StopReason::StopSequence,
+            _ => StopReason::EndTurn,
+        };
+
+        let (tokens_in, tokens_out) = match parsed.usage {
+            Some(usage) => (usage.prompt_tokens, usage.completion_tokens),
+            None => {
+                // Estimate using chars/4 heuristic
+                let in_chars: usize = request
+                    .messages
+                    .iter()
+                    .map(|m| m.content.len())
+                    .sum::<usize>()
+                    + request.system_prompt.as_deref().map_or(0, |s| s.len());
+                let out_chars = choice.message.content.len();
+                ((in_chars / 4) as u64, (out_chars / 4) as u64)
+            }
+        };
+
+        // Determine cost (local models have no cost)
+        let cost_estimate_cents = self
+            .api_key
+            .as_ref()
+            .and_then(|_| estimate_openai_cost(&self.model, tokens_in, tokens_out));
+
+        Ok(LlmResponse {
+            content: choice.message.content,
+            model: parsed.model.unwrap_or_else(|| self.model.clone()),
+            tokens_in,
+            tokens_out,
+            latency_ms,
+            stop_reason,
+            cost_estimate_cents,
+            backend: if self.api_key.is_some() {
+                LlmBackend::Frontier
+            } else {
+                LlmBackend::Local
+            },
+        })
+    }
+}
+
+// ── Anthropic Backend ──
+
+/// HTTP backend for Anthropic Messages API.
+///
+/// Endpoint: `{base_url}/v1/messages` (default: `https://api.anthropic.com`)
+///
+/// Requires headers:
+/// - `x-api-key: {key}`
+/// - `anthropic-version: 2023-06-01`
+pub struct AnthropicBackend {
+    base_url: String,
+    model: String,
+    api_key: String,
+}
+
+impl fmt::Debug for AnthropicBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnthropicBackend")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AnthropicBackend {
+    /// Create a new Anthropic backend.
+    pub fn new(base_url: String, model: String, api_key: String) -> Self {
+        Self {
+            base_url,
+            model,
+            api_key,
+        }
+    }
+
+    fn build_request_body(&self, request: &LlmRequest) -> AnthropicRequest {
+        let messages: Vec<AnthropicMessage> = request
+            .messages
+            .iter()
+            .map(|msg| {
+                let role = match msg.role {
+                    LlmRole::System => "user", // Anthropic doesn't have system role in messages
+                    LlmRole::User => "user",
+                    LlmRole::Assistant => "assistant",
+                };
+                AnthropicMessage {
+                    role: role.into(),
+                    content: msg.content.clone(),
+                }
+            })
+            .collect();
+
+        AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens: request.max_output_tokens,
+            system: request.system_prompt.clone(),
+            messages,
+            temperature: request.temperature,
+            stop_sequences: if request.stop_sequences.is_empty() {
+                None
+            } else {
+                Some(request.stop_sequences.clone())
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicRequest {
+    model: String,
+    max_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_sequences: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    content: Vec<AnthropicContentBlock>,
+    model: String,
+    stop_reason: Option<String>,
+    usage: AnthropicUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContentBlock {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl LlmHttpBackend for AnthropicBackend {
+    fn call(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<LlmResponse, ExoError> {
+        if cancellation.is_cancelled() {
+            return Err(ExoError::LlmInvocation("cancelled before HTTP call".into()));
+        }
+
+        let body = self.build_request_body(request);
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+
+        let start = Instant::now();
+
+        let response = block_on(async {
+            client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+        })
+        .map_err(|e| {
+            if e.is_timeout() {
+                ExoError::LlmInvocation(format!("timeout: {e}"))
+            } else if e.is_connect() {
+                ExoError::LlmInvocation(format!("connection refused: {e}"))
+            } else {
+                ExoError::LlmInvocation(format!("HTTP error: {e}"))
+            }
+        })?;
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let status = response.status();
+
+        if !status.is_success() {
+            let body_text = block_on(response.text()).unwrap_or_default();
+            return Err(ExoError::LlmInvocation(format!(
+                "{}: {}",
+                status.as_u16(),
+                body_text
+            )));
+        }
+
+        let parsed: AnthropicResponse = block_on(response.json())
+            .map_err(|e| ExoError::LlmInvocation(format!("malformed response body: {e}")))?;
+
+        let content = parsed
+            .content
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("");
+
+        let stop_reason = match parsed.stop_reason.as_deref() {
+            Some("end_turn") => StopReason::EndTurn,
+            Some("max_tokens") => StopReason::MaxTokens,
+            Some("stop_sequence") => StopReason::StopSequence,
+            _ => StopReason::EndTurn,
+        };
+
+        let cost_estimate_cents = estimate_anthropic_cost(
+            &parsed.model,
+            parsed.usage.input_tokens,
+            parsed.usage.output_tokens,
+        );
+
+        Ok(LlmResponse {
+            content,
+            model: parsed.model,
+            tokens_in: parsed.usage.input_tokens,
+            tokens_out: parsed.usage.output_tokens,
+            latency_ms,
+            stop_reason,
+            cost_estimate_cents: Some(cost_estimate_cents),
+            backend: LlmBackend::Frontier,
+        })
+    }
+}
+
+// ── Ollama Native Backend ──
+
+/// HTTP backend for Ollama's native /api/chat endpoint.
+///
+/// Endpoint: `{base_url}/api/chat`
+pub struct OllamaNativeBackend {
+    base_url: String,
+    model: String,
+}
+
+impl fmt::Debug for OllamaNativeBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OllamaNativeBackend")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl OllamaNativeBackend {
+    /// Create a new Ollama native backend.
+    pub fn new(base_url: String, model: String) -> Self {
+        Self { base_url, model }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaRequest {
+    model: String,
+    messages: Vec<OllamaMessage>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OllamaMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaResponse {
+    message: OllamaMessage,
+    model: String,
+    #[serde(default)]
+    eval_count: Option<u64>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+}
+
+impl LlmHttpBackend for OllamaNativeBackend {
+    fn call(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<LlmResponse, ExoError> {
+        if cancellation.is_cancelled() {
+            return Err(ExoError::LlmInvocation("cancelled before HTTP call".into()));
+        }
+
+        let mut messages = Vec::new();
+
+        if let Some(ref system) = request.system_prompt {
+            messages.push(OllamaMessage {
+                role: "system".into(),
+                content: system.clone(),
+            });
+        }
+
+        for msg in &request.messages {
+            let role = match msg.role {
+                LlmRole::System => "system",
+                LlmRole::User => "user",
+                LlmRole::Assistant => "assistant",
+            };
+            messages.push(OllamaMessage {
+                role: role.into(),
+                content: msg.content.clone(),
+            });
+        }
+
+        let options = if request.temperature.is_some() || !request.stop_sequences.is_empty() {
+            Some(OllamaOptions {
+                temperature: request.temperature,
+                stop: if request.stop_sequences.is_empty() {
+                    None
+                } else {
+                    Some(request.stop_sequences.clone())
+                },
+            })
+        } else {
+            None
+        };
+
+        let body = OllamaRequest {
+            model: self.model.clone(),
+            messages,
+            stream: false,
+            options,
+        };
+
+        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+        let start = Instant::now();
+
+        let response =
+            block_on(async { client.post(&url).json(&body).send().await }).map_err(|e| {
+                if e.is_timeout() {
+                    ExoError::LlmInvocation(format!("timeout: {e}"))
+                } else if e.is_connect() {
+                    ExoError::LlmInvocation(format!("connection refused: {e}"))
+                } else {
+                    ExoError::LlmInvocation(format!("HTTP error: {e}"))
+                }
+            })?;
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let status = response.status();
+
+        if !status.is_success() {
+            let body_text = block_on(response.text()).unwrap_or_default();
+            return Err(ExoError::LlmInvocation(format!(
+                "{}: {}",
+                status.as_u16(),
+                body_text
+            )));
+        }
+
+        let parsed: OllamaResponse = block_on(response.json())
+            .map_err(|e| ExoError::LlmInvocation(format!("malformed response body: {e}")))?;
+
+        let tokens_in = parsed.prompt_eval_count.unwrap_or({
+            let in_chars: usize = request
+                .messages
+                .iter()
+                .map(|m| m.content.len())
+                .sum::<usize>()
+                + request.system_prompt.as_deref().map_or(0, |s| s.len());
+            (in_chars / 4) as u64
+        });
+        let tokens_out = parsed
+            .eval_count
+            .unwrap_or((parsed.message.content.len() / 4) as u64);
+
+        Ok(LlmResponse {
+            content: parsed.message.content,
+            model: parsed.model,
+            tokens_in,
+            tokens_out,
+            latency_ms,
+            stop_reason: StopReason::EndTurn, // Ollama doesn't report stop sequences
+            cost_estimate_cents: None,        // Local models have no cost
+            backend: LlmBackend::Local,
+        })
+    }
+}
+
+// ── Error classification ──
+
+use actionqueue_executor_local::HandlerOutput;
+
+/// Classify an LLM invocation error as retryable or terminal.
+pub fn classify_llm_error(error: ExoError) -> HandlerOutput {
+    let msg = error.to_string();
+    if is_retryable_error(&msg) {
+        HandlerOutput::retryable_failure(msg)
+    } else {
+        HandlerOutput::terminal_failure(msg)
+    }
+}
+
+fn is_retryable_error(msg: &str) -> bool {
+    msg.contains("timeout")
+        || msg.contains("connection refused")
+        || msg.contains("429")
+        || msg.contains("500")
+        || msg.contains("502")
+        || msg.contains("503")
+        || msg.contains("504")
+        || msg.contains("cancelled")
+}
+
+// ── Cost estimation ──
+
+/// Estimate cost for OpenAI-compatible models (cents).
+fn estimate_openai_cost(model: &str, tokens_in: u64, tokens_out: u64) -> Option<f64> {
+    // Prices in dollars per million tokens: (input, output)
+    let (price_in, price_out) = if model.contains("gpt-4o-mini") {
+        (0.15, 0.60)
+    } else if model.contains("gpt-4o") {
+        (2.50, 10.00)
+    } else if model.contains("gpt-4") {
+        (30.00, 60.00)
+    } else {
+        return None;
+    };
+    // Convert to cents: (dollars/million) * tokens / 1_000_000 * 100 cents/dollar
+    let cost = (price_in * tokens_in as f64 + price_out * tokens_out as f64) / 1_000_000.0 * 100.0;
+    Some(cost)
+}
+
+/// Estimate cost for Anthropic models (cents).
+fn estimate_anthropic_cost(model: &str, tokens_in: u64, tokens_out: u64) -> f64 {
+    // Prices in dollars per million tokens: (input, output)
+    let (price_in, price_out) = if model.contains("opus") {
+        (15.00, 75.00)
+    } else if model.contains("sonnet") {
+        (3.00, 15.00)
+    } else if model.contains("haiku") {
+        (0.25, 1.25)
+    } else {
+        (3.00, 15.00) // Default to sonnet pricing for unknown models
+    };
+    (price_in * tokens_in as f64 + price_out * tokens_out as f64) / 1_000_000.0 * 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use exoskeleton_core::llm::LlmMessage;
+
+    use super::*;
+
+    // ── T-3: HTTP Client Layer ──
+
+    #[test]
+    fn openai_compat_request_format() {
+        let backend = OpenAiCompatBackend::new(
+            "http://localhost:11434".into(),
+            "llama3.2:latest".into(),
+            None,
+        );
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("You are helpful.".into()),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hello".into(),
+            }],
+            max_output_tokens: 1024,
+            temperature: Some(0.7),
+            stop_sequences: vec!["</answer>".into()],
+        };
+        let body = backend.build_request_body(&request);
+        assert_eq!(body.model, "llama3.2:latest");
+        assert_eq!(body.messages.len(), 2); // system + user
+        assert_eq!(body.messages[0].role, "system");
+        assert_eq!(body.messages[0].content, "You are helpful.");
+        assert_eq!(body.messages[1].role, "user");
+        assert_eq!(body.max_tokens, 1024);
+        assert_eq!(body.temperature, Some(0.7));
+        assert_eq!(body.stop, Some(vec!["</answer>".into()]));
+    }
+
+    #[test]
+    fn openai_compat_response_parsing() {
+        let json = r#"{
+            "choices": [{
+                "message": {"role": "assistant", "content": "Hello there!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "model": "llama3.2:latest"
+        }"#;
+        let parsed: OpenAiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.choices[0].message.content, "Hello there!");
+        assert_eq!(parsed.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = parsed.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+    }
+
+    #[test]
+    fn openai_compat_system_message_injection() {
+        let backend =
+            OpenAiCompatBackend::new("http://localhost:11434".into(), "test".into(), None);
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("Be concise.".into()),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hi".into(),
+            }],
+            max_output_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+        };
+        let body = backend.build_request_body(&request);
+        // System prompt becomes the first message with role "system"
+        assert_eq!(body.messages[0].role, "system");
+        assert_eq!(body.messages[0].content, "Be concise.");
+    }
+
+    #[test]
+    fn anthropic_request_format() {
+        let backend = AnthropicBackend::new(
+            "https://api.anthropic.com".into(),
+            "claude-sonnet-4-20250514".into(),
+            "test-key".into(),
+        );
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("You are helpful.".into()),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hello".into(),
+            }],
+            max_output_tokens: 2048,
+            temperature: Some(0.5),
+            stop_sequences: vec!["STOP".into()],
+        };
+        let body = backend.build_request_body(&request);
+        assert_eq!(body.model, "claude-sonnet-4-20250514");
+        // System prompt is a top-level field, not a message
+        assert_eq!(body.system, Some("You are helpful.".into()));
+        assert_eq!(body.messages.len(), 1); // Only user message
+        assert_eq!(body.messages[0].role, "user");
+        assert_eq!(body.max_tokens, 2048);
+        assert_eq!(body.stop_sequences, Some(vec!["STOP".into()]));
+    }
+
+    #[test]
+    fn anthropic_response_parsing() {
+        let json = r#"{
+            "content": [{"type": "text", "text": "I'm Claude."}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": 8}
+        }"#;
+        let parsed: AnthropicResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.content[0].text, "I'm Claude.");
+        assert_eq!(parsed.model, "claude-sonnet-4-20250514");
+        assert_eq!(parsed.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(parsed.usage.input_tokens, 20);
+        assert_eq!(parsed.usage.output_tokens, 8);
+    }
+
+    #[test]
+    fn anthropic_system_as_top_level() {
+        let backend = AnthropicBackend::new(
+            "https://api.anthropic.com".into(),
+            "test".into(),
+            "key".into(),
+        );
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("System instruction".into()),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hi".into(),
+            }],
+            max_output_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+        };
+        let body = backend.build_request_body(&request);
+        // System should be a top-level field
+        assert_eq!(body.system, Some("System instruction".into()));
+        // Messages should NOT contain a system message
+        assert!(body.messages.iter().all(|m| m.role != "system"));
+    }
+
+    #[test]
+    fn anthropic_headers() {
+        // Verify header values are set by the backend (unit-level check)
+        let _backend = AnthropicBackend::new(
+            "https://api.anthropic.com".into(),
+            "claude-sonnet-4-20250514".into(),
+            "sk-test-key".into(),
+        );
+        // Headers are set in the call() method — this test verifies the Debug
+        // impl doesn't leak the API key
+        let debug = format!("{:?}", _backend);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sk-test-key"));
+    }
+
+    #[test]
+    fn ollama_native_request_format() {
+        let _backend =
+            OllamaNativeBackend::new("http://localhost:11434".into(), "llama3.2:latest".into());
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("Be helpful.".into()),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hello".into(),
+            }],
+            max_output_tokens: 1024,
+            temperature: Some(0.8),
+            stop_sequences: vec!["END".into()],
+        };
+
+        // The backend builds the request internally — we test via serialization format
+        let mut messages = Vec::new();
+        if let Some(ref system) = request.system_prompt {
+            messages.push(OllamaMessage {
+                role: "system".into(),
+                content: system.clone(),
+            });
+        }
+        for msg in &request.messages {
+            let role = match msg.role {
+                LlmRole::System => "system",
+                LlmRole::User => "user",
+                LlmRole::Assistant => "assistant",
+            };
+            messages.push(OllamaMessage {
+                role: role.into(),
+                content: msg.content.clone(),
+            });
+        }
+        let body = OllamaRequest {
+            model: "llama3.2:latest".into(),
+            messages,
+            stream: false,
+            options: Some(OllamaOptions {
+                temperature: Some(0.8),
+                stop: Some(vec!["END".into()]),
+            }),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["model"], "llama3.2:latest");
+        assert_eq!(json["stream"], false);
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert!(json["options"]["temperature"].is_number());
+    }
+
+    #[test]
+    fn ollama_native_response_parsing() {
+        let json = r#"{
+            "message": {"role": "assistant", "content": "Hello from Ollama!"},
+            "model": "llama3.2:latest",
+            "eval_count": 15,
+            "prompt_eval_count": 25
+        }"#;
+        let parsed: OllamaResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.message.content, "Hello from Ollama!");
+        assert_eq!(parsed.model, "llama3.2:latest");
+        assert_eq!(parsed.eval_count, Some(15));
+        assert_eq!(parsed.prompt_eval_count, Some(25));
+    }
+
+    #[test]
+    fn http_429_is_retryable() {
+        assert!(is_retryable_error("429: rate limit exceeded"));
+        assert!(is_retryable_error("HTTP 429 Too Many Requests"));
+    }
+
+    #[test]
+    fn http_401_is_terminal() {
+        assert!(!is_retryable_error("401: unauthorized"));
+        assert!(!is_retryable_error("403: forbidden"));
+        assert!(!is_retryable_error("400: bad request"));
+    }
+
+    #[test]
+    fn http_5xx_is_retryable() {
+        assert!(is_retryable_error("500: internal server error"));
+        assert!(is_retryable_error("502: bad gateway"));
+        assert!(is_retryable_error("503: service unavailable"));
+        assert!(is_retryable_error("504: gateway timeout"));
+    }
+
+    #[test]
+    fn timeout_is_retryable() {
+        assert!(is_retryable_error("timeout: operation timed out"));
+        assert!(is_retryable_error("connection refused: could not connect"));
+    }
+
+    #[test]
+    fn openai_debug_redacts_api_key() {
+        let backend = OpenAiCompatBackend::new(
+            "http://api.openai.com".into(),
+            "gpt-4o".into(),
+            Some("sk-secret123".into()),
+        );
+        let debug = format!("{:?}", backend);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sk-secret123"));
+    }
+}

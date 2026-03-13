@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/exoskeleton-core",
+    "crates/exoskeleton-memory",
+    "crates/exoskeleton-relationship",
+    "crates/exoskeleton-threads",
+    "crates/exoskeleton-host",
+    "crates/exoskeleton-daemon",
+    "crates/exoskeleton-cli",
+    "tests/acceptance",
+    "examples/relationship-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/zed-colonel/exoskeleton"
+authors = ["Keith <zed.colonel@gmail.com>"]
+
+[workspace.dependencies]
+# Internal crates
+exoskeleton-core = { path = "crates/exoskeleton-core" }
+exoskeleton-memory = { path = "crates/exoskeleton-memory" }
+exoskeleton-relationship = { path = "crates/exoskeleton-relationship" }
+exoskeleton-threads = { path = "crates/exoskeleton-threads" }
+exoskeleton-host = { path = "crates/exoskeleton-host" }
+exoskeleton-daemon = { path = "crates/exoskeleton-daemon" }
+
+# ActionQueue crates (from crates.io, with local overrides below)
+actionqueue-core = { version = "0.1.0", features = ["serde"] }
+actionqueue-workflow = "0.1.0"
+actionqueue-engine = "0.1.0"
+actionqueue-budget = "0.1.0"
+actionqueue-storage = "0.1.0"
+actionqueue-runtime = { version = "0.1.1", features = ["budget"] }
+actionqueue-executor-local = "0.1.1"
+
+# WorldInterface crates (local, not published)
+worldinterface-core = "0.1.0"
+worldinterface-connector = "0.1.0"
+worldinterface-host = "0.1.0"
+worldinterface-contextstore = "0.1.0"
+worldinterface-coordinator = "0.1.0"
+worldinterface-flowspec = "0.1.0"
+
+# Shared dependencies
+serde = { version = ">=1.0, <1.0.224", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "v5", "serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+axum = "0.7"
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", features = ["serde"] }
+toml = "0.8"
+sha2 = "0.10"
+reqwest = { version = "0.12", features = ["json"] }
+prometheus = "0.13"
+
+# Test dependencies
+tempfile = "3"
+proptest = "1.4"
+tokio-test = "0.4"

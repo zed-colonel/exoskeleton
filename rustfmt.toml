@@ -1,0 +1,3 @@
+max_width = 100
+# Requires nightly; ignored on stable with a warning
+group_imports = "StdExternalCrate"
