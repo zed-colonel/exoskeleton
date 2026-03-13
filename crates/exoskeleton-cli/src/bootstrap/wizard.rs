@@ -189,7 +189,7 @@ fn configure_local() -> Result<LocalConfig, CliError> {
     })
 }
 
-/// Default data directory: ~/.exo/vessels/<random-short-id>
+/// Default data directory: `~/.exo/vessels/<random-short-id>`
 fn dirs_default_data() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(home)

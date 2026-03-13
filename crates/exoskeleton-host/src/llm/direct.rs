@@ -11,9 +11,8 @@ use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse};
 use exoskeleton_core::ExoError;
 
-use crate::config::{FrontierProvider, LlmConfig, LocalApiFormat};
-
 use super::http::{AnthropicBackend, LlmHttpBackend, OllamaNativeBackend, OpenAiCompatBackend};
+use crate::config::{FrontierProvider, LlmConfig, LocalApiFormat};
 
 /// Make a direct LLM call without AQ infrastructure.
 ///

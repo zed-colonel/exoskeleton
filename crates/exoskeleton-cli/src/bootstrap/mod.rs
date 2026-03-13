@@ -20,10 +20,9 @@ use exoskeleton_host::config::{
 };
 use exoskeleton_host::direct_llm_call;
 
-use crate::client::CliError;
-
 use self::first_contact::FirstContactResult;
 use self::wizard::WizardResult;
+use crate::client::CliError;
 
 /// Run the full bootstrap process.
 ///

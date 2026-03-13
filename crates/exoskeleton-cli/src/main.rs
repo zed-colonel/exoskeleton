@@ -154,9 +154,10 @@ async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Bootstrap { data_dir, log_level } => {
-            bootstrap::run_bootstrap(data_dir, log_level).await
-        }
+        Commands::Bootstrap {
+            data_dir,
+            log_level,
+        } => bootstrap::run_bootstrap(data_dir, log_level).await,
 
         Commands::Start {
             config,
