@@ -63,7 +63,8 @@ Exoskeleton operates **two physically separate ActionQueue engines** (invariant 
 ### Observability
 
 - **HTTP daemon** -- axum-based REST API with 12 endpoints
-- **CLI** -- `exo` binary with `start`, `inspect`, `thread`, `relationship`, `budget`, `events`, `engines`, `send` commands
+- **CLI** -- `exo` binary with `bootstrap`, `start`, `inspect`, `thread`, `relationship`, `budget`, `events`, `engines`, `send` commands
+- **Docker** -- multi-stage build, 151MB image, compose profiles for single and multi-vessel
 - **Prometheus metrics** -- `exo_ticks_total`, `exo_tick_duration_seconds`, `exo_current_tick_number`
 - **8 SQLite stores** -- independently queryable, WAL-mode, backup-friendly
 
@@ -140,37 +141,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### CLI
+### Bootstrap + Run (local)
 
 ```bash
-# Start a vessel (foreground)
-exo start --config vessel.toml
+# 1. Bootstrap a new vessel (interactive wizard + first-contact conversation)
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY
+exo bootstrap
 
-# Inspect current state
-exo inspect
-exo inspect ticks --limit 10
+# 2. Start the vessel
+exo start --config ~/.exo/vessels/default/vessel.toml
+```
 
-# Manage threads
-exo thread list
-exo thread inspect <thread-id>
+The bootstrap wizard configures the LLM backend, verifies connectivity, and runs
+a first-contact conversation where you and the agent establish its name, purpose,
+and working relationship. The conversation becomes the agent's origin story.
 
-# View relationships and budget
-exo relationship show
-exo budget
+### Docker
 
-# Send a message
-exo send "Hello, vessel"
+```bash
+# Build the image
+docker build -f docker/Dockerfile.vessel -t exoskeleton:latest .
+```
 
-# View events and engine status
-exo events --limit 50
-exo engines
+**Option A: Bootstrap locally, run in Docker**
+
+```bash
+# Bootstrap on the host (writes config + data to a local directory)
+exo bootstrap
+
+# Run the container with the bootstrapped data
+docker run -d \
+  -v ~/.exo/vessels/default:/data \
+  -p 7600:7600 \
+  -e OPENAI_API_KEY \
+  --user "$(id -u):$(id -g)" \
+  exoskeleton:latest
+```
+
+**Option B: Bootstrap inside Docker**
+
+```bash
+# Bootstrap inside the container (interactive — needs -it)
+docker run -it --rm \
+  -v ~/.exo/my-vessel:/data \
+  -e OPENAI_API_KEY \
+  --user "$(id -u):$(id -g)" \
+  exoskeleton:latest bootstrap --data-dir /data
+
+# Then start the vessel
+docker run -d \
+  -v ~/.exo/my-vessel:/data \
+  -p 7600:7600 \
+  -e OPENAI_API_KEY \
+  --user "$(id -u):$(id -g)" \
+  exoskeleton:latest
+```
+
+> **Volume permissions:** The `--user "$(id -u):$(id -g)"` flag ensures the
+> container can write to SQLite databases in the mounted volume. Without it,
+> the default container user may lack write access.
+
+### CLI
+
+Once a vessel is running (locally or in Docker), interact with it via the CLI:
+
+```bash
+exo inspect                        # Current state snapshot
+exo inspect ticks --limit 10       # Recent PODAARA tick history
+exo send "Hello, vessel"           # Send a message (picked up next tick)
+exo thread list                    # View cognitive threads
+exo relationship show              # View relationship snapshot
+exo budget                         # View budget status
+exo events --limit 50              # Recent events
+exo engines                        # Dual engine health
 ```
 
 ### Build
 
 ```bash
 cargo build --workspace                               # Build all crates
-cargo test --workspace                                # Run all tests (~758)
+cargo test --workspace                                # Run all tests (~772)
 cargo clippy --all --all-targets -- -D warnings       # Lint (strict)
 cargo fmt --all -- --check                            # Format check
 cargo doc --workspace --no-deps                       # Build docs

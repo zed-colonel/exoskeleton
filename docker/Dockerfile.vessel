@@ -1,0 +1,79 @@
+# ── Stage 1: Builder ─────────────────────────────────────────────
+FROM rust:1.89-bookworm AS builder
+
+WORKDIR /build
+
+# Copy manifests first for dependency caching
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/exoskeleton-core/Cargo.toml crates/exoskeleton-core/Cargo.toml
+COPY crates/exoskeleton-memory/Cargo.toml crates/exoskeleton-memory/Cargo.toml
+COPY crates/exoskeleton-relationship/Cargo.toml crates/exoskeleton-relationship/Cargo.toml
+COPY crates/exoskeleton-threads/Cargo.toml crates/exoskeleton-threads/Cargo.toml
+COPY crates/exoskeleton-host/Cargo.toml crates/exoskeleton-host/Cargo.toml
+COPY crates/exoskeleton-daemon/Cargo.toml crates/exoskeleton-daemon/Cargo.toml
+COPY crates/exoskeleton-cli/Cargo.toml crates/exoskeleton-cli/Cargo.toml
+COPY tests/acceptance/Cargo.toml tests/acceptance/Cargo.toml
+COPY examples/relationship-demo/Cargo.toml examples/relationship-demo/Cargo.toml
+
+# Create stub lib.rs files so cargo can resolve the dependency graph for caching
+RUN mkdir -p crates/exoskeleton-core/src && echo "pub fn stub(){}" > crates/exoskeleton-core/src/lib.rs && \
+    mkdir -p crates/exoskeleton-memory/src && echo "pub fn stub(){}" > crates/exoskeleton-memory/src/lib.rs && \
+    mkdir -p crates/exoskeleton-relationship/src && echo "pub fn stub(){}" > crates/exoskeleton-relationship/src/lib.rs && \
+    mkdir -p crates/exoskeleton-threads/src && echo "pub fn stub(){}" > crates/exoskeleton-threads/src/lib.rs && \
+    mkdir -p crates/exoskeleton-host/src && echo "pub fn stub(){}" > crates/exoskeleton-host/src/lib.rs && \
+    mkdir -p crates/exoskeleton-daemon/src && echo "pub fn stub(){}" > crates/exoskeleton-daemon/src/lib.rs && \
+    mkdir -p crates/exoskeleton-cli/src && echo "fn main(){}" > crates/exoskeleton-cli/src/main.rs && \
+    mkdir -p tests/acceptance/src && echo "pub fn stub(){}" > tests/acceptance/src/lib.rs && \
+    mkdir -p examples/relationship-demo/src && echo "fn main(){}" > examples/relationship-demo/src/main.rs
+
+# Fetch and compile dependencies (cached unless Cargo.toml/lock changes)
+RUN cargo build --release --workspace 2>/dev/null || true
+
+# Now copy real source and build
+COPY crates/ crates/
+COPY tests/ tests/
+COPY examples/ examples/
+COPY clippy.toml rustfmt.toml ./
+
+# Touch source files to invalidate the stub build cache
+RUN find crates/ tests/ examples/ -name "*.rs" -exec touch {} +
+
+RUN cargo build --release --bin exo
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r exo && useradd -r -g exo -d /data -s /sbin/nologin exo
+
+# Copy binary
+COPY --from=builder /build/target/release/exo /usr/local/bin/exo
+
+# Data volume
+RUN mkdir -p /data && chown exo:exo /data
+VOLUME /data
+
+# Default environment
+ENV EXO_DATA_DIR=/data
+ENV EXO_DAEMON_LISTEN=0.0.0.0:7600
+ENV RUST_LOG=info
+
+EXPOSE 7600
+
+# Default to the non-root exo user. When mounting a host directory created
+# by `exo bootstrap` (owned by the host user), override with:
+#   docker run --user "$(id -u):$(id -g)" ...
+# or set user_id in docker-compose.yml. Without this, SQLite will fail
+# with "attempt to write a readonly database" on the mounted volume.
+USER exo
+WORKDIR /data
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/exo", "--addr", "http://127.0.0.1:7600", "engines"]
+
+ENTRYPOINT ["/usr/local/bin/exo"]
+CMD ["start", "--config", "/data/vessel.toml"]

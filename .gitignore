@@ -30,5 +30,6 @@ Thumbs.db
 .claude/
 CLAUDE.md
 
-# ── Development Plans (user-local) ─────────────────────────
+# ── Development data ────────────────────────────────────────────
 plans/
+dev-output/

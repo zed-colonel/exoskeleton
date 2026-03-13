@@ -4,6 +4,7 @@
 //! - `exo start` — boots a Vessel and HTTP daemon in-process (foreground)
 //! - All other commands — HTTP client queries against a running daemon
 
+mod bootstrap;
 mod client;
 mod commands;
 mod format;
@@ -30,6 +31,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Bootstrap a new Vessel: configure LLM, run first-contact conversation.
+    Bootstrap {
+        /// Override the data directory (skips the wizard prompt for this field).
+        /// Useful for Docker workflows where the data dir is always /data.
+        #[arg(long)]
+        data_dir: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error).
+        #[arg(long, default_value = "warn")]
+        log_level: String,
+    },
+
     /// Start the Vessel and HTTP daemon (foreground).
     Start {
         /// Path to vessel.toml configuration file.
@@ -141,6 +154,10 @@ async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
+        Commands::Bootstrap { data_dir, log_level } => {
+            bootstrap::run_bootstrap(data_dir, log_level).await
+        }
+
         Commands::Start {
             config,
             data_dir,
@@ -224,6 +241,7 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
             commands::send::run_send(&client, &actual_source, message, cli.json).await
         }
 
+        Commands::Bootstrap { .. } => unreachable!("bootstrap is handled in main()"),
         Commands::Start { .. } => unreachable!("start is handled in main()"),
     }
 }

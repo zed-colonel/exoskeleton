@@ -31,6 +31,7 @@ pub use inbox::{FileInbox, InMemoryInbox};
 pub use inspect::VesselInspector;
 pub use kernel::{KernelContext, WiHostSlot};
 pub use llm::client::LlmClient;
+pub use llm::direct::direct_llm_call;
 pub use llm::http::LlmHttpBackend;
 pub use llm::mock::{default_mock_response, MockLlmBackend};
 pub use metrics::ExoMetrics;

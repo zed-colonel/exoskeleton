@@ -8,5 +8,6 @@
 //! - LlmClient convenience wrapper for submitting LLM tasks
 
 pub mod client;
+pub mod direct;
 pub mod http;
 pub mod mock;

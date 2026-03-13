@@ -24,7 +24,7 @@ use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
 use exoskeleton_threads::ThreadRegistry;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use worldinterface_connector::connectors::default_registry;
+use worldinterface_connector::connectors::{DelayConnector, FsReadConnector, FsWriteConnector};
 use worldinterface_connector::registry::ConnectorRegistry;
 use worldinterface_core::descriptor::Descriptor;
 use worldinterface_host::config::HostConfig;
@@ -79,22 +79,22 @@ pub struct Vessel {
 }
 
 impl Vessel {
-    /// Start the Vessel with both engines using the default connector registry.
+    /// Start the Vessel with the async-safe connector registry.
     ///
-    /// The default registry includes: `delay`, `http.request`, `fs.read`, `fs.write`.
+    /// Includes connectors that are safe to run inside an existing tokio
+    /// runtime: `delay`, `fs.read`, `fs.write`. The `http.request` connector
+    /// is excluded because it creates an internal tokio runtime that panics
+    /// when dropped from within an async context.
     ///
     /// # Errors
     /// - `ExoError::Config` — invalid configuration
     /// - `ExoError::Engine` — bootstrap failure for either engine
     /// - `ExoError::Storage` — data directory creation failure
     pub async fn start(config: VesselConfig) -> Result<Self, ExoError> {
-        Self::start_with_registry(config, default_registry()).await
+        Self::start_with_registry(config, async_safe_registry()).await
     }
 
     /// Start the Vessel with a custom connector registry.
-    ///
-    /// Use this for testing (e.g., to exclude `http.request` which creates an
-    /// internal tokio runtime that conflicts with `#[tokio::test]`).
     pub async fn start_with_registry(
         config: VesselConfig,
         registry: ConnectorRegistry,
@@ -670,4 +670,15 @@ async fn schedule_master_loop(
         .map_err(|e| ExoError::Engine(format!("master loop task submission: {e}")))?;
 
     Ok(task_id)
+}
+
+/// Build a connector registry that is safe to use inside an existing tokio
+/// runtime. Excludes `http.request` which creates its own internal runtime
+/// and panics on drop when nested.
+fn async_safe_registry() -> ConnectorRegistry {
+    let mut registry = ConnectorRegistry::new();
+    registry.register(Arc::new(DelayConnector));
+    registry.register(Arc::new(FsReadConnector));
+    registry.register(Arc::new(FsWriteConnector));
+    registry
 }

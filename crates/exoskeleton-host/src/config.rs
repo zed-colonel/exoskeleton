@@ -38,6 +38,7 @@ pub enum FrontierProvider {
     /// Anthropic Messages API.
     Anthropic,
     /// OpenAI Chat Completions API.
+    #[serde(rename = "openai")]
     OpenAI,
 }
 

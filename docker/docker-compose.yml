@@ -1,0 +1,75 @@
+# Exoskeleton Docker Compose
+#
+# Profiles:
+#   docker compose --profile single up        Single vessel
+#   docker compose --profile multi up          Multiple vessels (future)
+#
+# Usage:
+#   1. Run `exo bootstrap` locally to generate vessel.toml + data
+#   2. Set required env vars (API keys, EXO_DATA_DIR, etc.)
+#   3. docker compose --profile single up
+#
+# Volume permissions:
+#   The data directory is created by `exo bootstrap` under the host user's
+#   UID. The container must run as the same UID to write to SQLite databases.
+#   Set EXO_USER_ID to your UID (run `id -u` to find it), or the container
+#   will default to the built-in `exo` user which may lack write access.
+
+services:
+  # ── Single Vessel ──────────────────────────────────────────────
+  vessel:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vessel
+    profiles: ["single"]
+    user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
+    ports:
+      - "${EXO_PORT:-7600}:7600"
+    volumes:
+      - ${EXO_DATA_DIR:-./data/vessel}:/data
+    environment:
+      - EXO_DATA_DIR=/data
+      - EXO_DAEMON_LISTEN=0.0.0.0:7600
+      - RUST_LOG=${RUST_LOG:-info}
+      # LLM API keys — pass through from host
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+    restart: unless-stopped
+
+  # ── Multi-vessel: Vessel A ─────────────────────────────────────
+  vessel-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vessel
+    profiles: ["multi"]
+    user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
+    ports:
+      - "7600:7600"
+    volumes:
+      - ${EXO_DATA_DIR_A:-./data/vessel-a}:/data
+    environment:
+      - EXO_DATA_DIR=/data
+      - EXO_DAEMON_LISTEN=0.0.0.0:7600
+      - RUST_LOG=${RUST_LOG:-info}
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+    restart: unless-stopped
+
+  # ── Multi-vessel: Vessel B ─────────────────────────────────────
+  vessel-b:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vessel
+    profiles: ["multi"]
+    user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
+    ports:
+      - "7601:7600"
+    volumes:
+      - ${EXO_DATA_DIR_B:-./data/vessel-b}:/data
+    environment:
+      - EXO_DATA_DIR=/data
+      - EXO_DAEMON_LISTEN=0.0.0.0:7600
+      - RUST_LOG=${RUST_LOG:-info}
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+    restart: unless-stopped
