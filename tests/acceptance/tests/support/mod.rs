@@ -41,6 +41,7 @@ pub fn test_config(dir: &Path) -> VesselConfig {
         cognitive_budget: None,
         tool_budget: None,
         daemon_listen: None,
+        cors_allowed_origins: vec![],
     }
 }
 

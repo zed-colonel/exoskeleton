@@ -1,0 +1,3 @@
+[submodule "observatory"]
+	path = observatory
+	url = git@github.com-personal:zed-colonel/observatory.git

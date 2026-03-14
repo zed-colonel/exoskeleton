@@ -36,6 +36,7 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         cognitive_budget: None,
         tool_budget: None,
         daemon_listen: None,
+        cors_allowed_origins: vec![],
     }
 }
 
@@ -63,6 +64,7 @@ pub fn make_snapshot(vessel_id: VesselId, tick_number: u64) -> StateSnapshot {
         relationship_snapshot_ref: None,
         budget_status: BudgetStatus::unlimited(),
         last_action_summary: None,
+        started_at: Some(Utc::now()),
         updated_at: Utc::now(),
     }
 }

@@ -38,6 +38,7 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
         inbox,
         vessel_id,
         event_tx,
+        cors_origins: vec![],
     })
 }
 
@@ -210,6 +211,7 @@ async fn metrics_endpoint_has_live_data() {
         inbox: vessel.inbox().clone(),
         vessel_id: vessel.vessel_id(),
         event_tx: vessel.event_sender().clone(),
+        cors_origins: vec![],
     });
     let app = build_router(state);
 

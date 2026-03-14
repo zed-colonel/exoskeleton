@@ -53,6 +53,45 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
         inbox,
         vessel_id: VesselId::new(),
         event_tx: tokio::sync::broadcast::channel(16).0,
+        cors_origins: vec![],
+    })
+}
+
+fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<AppState> {
+    let storage = StorageManager::open(dir).unwrap();
+    let thread_store = Arc::new(InMemoryThreadStore::new());
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
+        Arc::new(InMemoryRelationshipLedger::new());
+    let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
+    let inbox: Arc<dyn Inbox> = Arc::new(InMemoryInbox::new());
+    let config = exoskeleton_host::VesselConfig {
+        mission: "test".into(),
+        ..Default::default()
+    };
+
+    let inspector = VesselInspector::new(
+        storage,
+        thread_registry,
+        relationship_ledger,
+        None,
+        None,
+        wi_host_slot,
+        config,
+    );
+    let metrics = Arc::new(ExoMetrics::new().unwrap());
+    let cors_origins = origins
+        .into_iter()
+        .map(|o| o.parse().unwrap())
+        .collect();
+
+    Arc::new(AppState {
+        inspector,
+        metrics,
+        inbox,
+        vessel_id: VesselId::new(),
+        event_tx: tokio::sync::broadcast::channel(16).0,
+        cors_origins,
     })
 }
 
@@ -665,6 +704,107 @@ async fn get_artifact_encodes_binary_as_base64() {
             .expect("content should be valid base64");
         assert_eq!(decoded, binary_content);
     }
+}
+
+// ── U1: CORS tests ──
+
+#[tokio::test]
+async fn cors_allows_configured_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state_with_cors(dir.path(), vec!["http://localhost:5173"]);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/status")
+                .header("origin", "http://localhost:5173")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let acao = resp
+        .headers()
+        .get("access-control-allow-origin")
+        .expect("should have ACAO header");
+    assert_eq!(acao, "http://localhost:5173");
+}
+
+#[tokio::test]
+async fn cors_rejects_unconfigured_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state_with_cors(dir.path(), vec!["http://localhost:5173"]);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/status")
+                .header("origin", "http://evil.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        resp.headers().get("access-control-allow-origin").is_none(),
+        "should not have ACAO header for unconfigured origin"
+    );
+}
+
+#[tokio::test]
+async fn cors_allows_get_and_post_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state_with_cors(dir.path(), vec!["http://localhost:5173"]);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::options("/api/v1/status")
+                .header("origin", "http://localhost:5173")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let methods = resp
+        .headers()
+        .get("access-control-allow-methods")
+        .expect("should have allow-methods header")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(methods.contains("GET"), "should allow GET");
+    assert!(methods.contains("POST"), "should allow POST");
+}
+
+#[tokio::test]
+async fn cors_includes_max_age_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state_with_cors(dir.path(), vec!["http://localhost:5173"]);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::options("/api/v1/status")
+                .header("origin", "http://localhost:5173")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let max_age = resp
+        .headers()
+        .get("access-control-max-age")
+        .expect("should have max-age header")
+        .to_str()
+        .unwrap();
+    assert_eq!(max_age, "3600");
 }
 
 #[tokio::test]

@@ -1,15 +1,28 @@
 //! Router construction for the Exoskeleton HTTP daemon.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::http::{header, Method};
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::cors::CorsLayer;
 
 use crate::handlers;
 use crate::state::AppState;
 
 /// Build the axum router with all routes wired to handlers.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let cors = if state.cors_origins.is_empty() {
+        CorsLayer::new()
+    } else {
+        CorsLayer::new()
+            .allow_origin(state.cors_origins.clone())
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+            .max_age(Duration::from_secs(3600))
+    };
+
     Router::new()
         // API v1 endpoints
         .route("/api/v1/status", get(handlers::get_status))
@@ -42,4 +55,5 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ready", get(handlers::readyz))
         .route("/metrics", get(handlers::metrics))
         .with_state(state)
+        .layer(cors)
 }

@@ -41,6 +41,11 @@ pub struct StateSnapshot {
     /// `None` for the initial snapshot before any tick has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_action_summary: Option<String>,
+    /// When the vessel was started. Immutable after initial creation — preserved
+    /// through all subsequent tick snapshots. `None` for snapshots persisted
+    /// before this field was added (backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     /// When this snapshot was created/updated.
     pub updated_at: DateTime<Utc>,
 }
@@ -48,6 +53,7 @@ pub struct StateSnapshot {
 impl StateSnapshot {
     /// Create the initial snapshot for a new vessel.
     pub fn initial(vessel_id: VesselId, mission: String) -> Self {
+        let now = Utc::now();
         Self {
             vessel_id,
             tick_number: 0,
@@ -59,7 +65,8 @@ impl StateSnapshot {
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
             last_action_summary: None,
-            updated_at: Utc::now(),
+            started_at: Some(now),
+            updated_at: now,
         }
     }
 }
@@ -221,6 +228,7 @@ mod tests {
                 tool_invocations_remaining: 950,
             },
             last_action_summary: Some("Created file".into()),
+            started_at: Some(Utc::now()),
             updated_at: Utc::now(),
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -258,6 +266,7 @@ mod tests {
         assert!(snap.thread_summaries.is_empty());
         assert!(snap.relationship_snapshot_ref.is_none());
         assert!(snap.last_action_summary.is_none());
+        assert!(snap.started_at.is_some());
     }
 
     #[test]

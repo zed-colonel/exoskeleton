@@ -179,6 +179,7 @@ mod tests {
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
             last_action_summary: None,
+            started_at: Some(Utc::now()),
             updated_at: Utc::now(),
         }
     }
@@ -309,6 +310,7 @@ mod tests {
                 tool_invocations_remaining: 950,
             },
             last_action_summary: Some("Created file".into()),
+            started_at: Some(Utc::now()),
             updated_at: Utc::now(),
         };
 

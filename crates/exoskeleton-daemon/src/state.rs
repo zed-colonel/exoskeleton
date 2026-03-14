@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use axum::http::HeaderValue;
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{LiveEvent, VesselId};
 use exoskeleton_host::inspect::VesselInspector;
@@ -19,4 +20,6 @@ pub struct AppState {
     pub vessel_id: VesselId,
     /// Broadcast sender for WebSocket event distribution (D2).
     pub event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
+    /// CORS allowed origins (U1). Empty means no CORS (same-origin only).
+    pub cors_origins: Vec<HeaderValue>,
 }

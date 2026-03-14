@@ -13,6 +13,7 @@ pub mod state;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::http::HeaderValue;
 use exoskeleton_core::ExoError;
 use exoskeleton_host::config::VesselConfig;
 use exoskeleton_host::metrics::ExoMetrics;
@@ -37,6 +38,7 @@ pub struct ExoDaemon {
     vessel: Vessel,
     listen_addr: SocketAddr,
     metrics: Arc<ExoMetrics>,
+    cors_allowed_origins: Vec<String>,
 }
 
 impl ExoDaemon {
@@ -46,12 +48,14 @@ impl ExoDaemon {
     /// server. Call [`ExoDaemon::run_until_shutdown`] to begin serving.
     pub async fn start(config: DaemonConfig) -> Result<Self, ExoError> {
         let metrics = Arc::new(ExoMetrics::new()?);
+        let cors_allowed_origins = config.vessel.cors_allowed_origins.clone();
         let vessel = Vessel::start(config.vessel).await?;
 
         Ok(Self {
             vessel,
             listen_addr: config.listen_addr,
             metrics,
+            cors_allowed_origins,
         })
     }
 
@@ -62,12 +66,24 @@ impl ExoDaemon {
         let vessel_id = self.vessel.vessel_id();
         let event_tx = self.vessel.event_sender().clone();
 
+        let cors_origins: Vec<HeaderValue> = self
+            .cors_allowed_origins
+            .iter()
+            .filter_map(|origin| {
+                origin.parse::<HeaderValue>().ok().or_else(|| {
+                    tracing::warn!(%origin, "invalid CORS origin, skipping");
+                    None
+                })
+            })
+            .collect();
+
         let app_state = Arc::new(AppState {
             inspector,
             metrics: self.metrics,
             inbox,
             vessel_id,
             event_tx,
+            cors_origins,
         });
 
         let router = routes::build_router(app_state);

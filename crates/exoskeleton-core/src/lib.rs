@@ -80,6 +80,7 @@ mod tests {
                 relationship_snapshot_ref: None,
                 budget_status: BudgetStatus::unlimited(),
                 last_action_summary: None,
+                started_at: Some(Utc::now()),
                 updated_at: Utc::now(),
             };
             let json = serde_json::to_string(&snap).unwrap();

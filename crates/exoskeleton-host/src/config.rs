@@ -191,6 +191,11 @@ pub struct VesselConfig {
     /// Daemon HTTP listen address. `None` uses default 127.0.0.1:7600.
     /// Set to 0.0.0.0:7600 for Docker/container deployment.
     pub daemon_listen: Option<std::net::SocketAddr>,
+
+    // ── CORS settings (Phase U1) ──
+    /// Allowed origins for CORS requests. Empty disables CORS (same-origin only).
+    /// Set to `["http://localhost:5173"]` for Observatory development mode.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for VesselConfig {
@@ -211,6 +216,7 @@ impl Default for VesselConfig {
             cognitive_budget: None,
             tool_budget: None,
             daemon_listen: None,
+            cors_allowed_origins: Vec::new(),
         }
     }
 }
@@ -406,6 +412,9 @@ pub struct VesselConfigFile {
 pub struct DaemonSection {
     /// Listen address as "host:port" string. Default: 127.0.0.1:7600.
     pub listen: Option<String>,
+    /// CORS allowed origins. Empty or omitted disables CORS.
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 /// The `[vessel]` section of the TOML config file.
@@ -511,13 +520,18 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             tool_budget: file.tool.budget,
             daemon_listen: file
                 .daemon
-                .and_then(|d| d.listen)
+                .as_ref()
+                .and_then(|d| d.listen.as_ref())
                 .map(|s| {
                     s.parse::<std::net::SocketAddr>().map_err(|e| {
                         ExoError::Config(format!("invalid daemon listen address: {e}"))
                     })
                 })
                 .transpose()?,
+            cors_allowed_origins: file
+                .daemon
+                .map(|d| d.cors_allowed_origins)
+                .unwrap_or_default(),
         })
     }
 }
