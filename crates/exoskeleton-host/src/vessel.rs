@@ -19,7 +19,7 @@ use actionqueue_core::task::metadata::TaskMetadata;
 use actionqueue_core::task::run_policy::RunPolicy;
 use actionqueue_core::task::task_spec::{TaskPayload, TaskSpec};
 use exoskeleton_core::inbox::Inbox;
-use exoskeleton_core::{ArtifactStore, ExoError, VesselId};
+use exoskeleton_core::{ArtifactStore, ExoError, LiveEvent, VesselId};
 use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
 use exoskeleton_threads::ThreadRegistry;
 use tokio::sync::Mutex;
@@ -76,6 +76,8 @@ pub struct Vessel {
     budget_tracker: Option<Arc<Mutex<crate::budget::CognitiveBudgetTracker>>>,
     /// Tool budget gate (Sprint 10).
     tool_budget_gate: Option<Arc<Mutex<crate::budget::ToolBudgetGate>>>,
+    /// Broadcast sender for real-time events (D2).
+    event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
 }
 
 impl Vessel {
@@ -160,6 +162,9 @@ impl Vessel {
             )))
         });
 
+        // 7.6 Create broadcast channel for real-time events (D2)
+        let (event_tx, _) = tokio::sync::broadcast::channel::<LiveEvent>(256);
+
         let kernel_context = Arc::new(KernelContext {
             snapshot_store: storage.snapshot_store().clone(),
             event_ledger: storage.event_ledger().clone(),
@@ -178,6 +183,7 @@ impl Vessel {
             budget_tracker: budget_tracker.clone(),
             tool_budget_gate: tool_budget_gate.clone(),
             metrics: None,
+            event_tx: event_tx.clone(),
         });
 
         // 8. Register built-in cognitive threads (Sprint 7)
@@ -292,6 +298,17 @@ impl Vessel {
             "vessel started — both engines running, master loop scheduled"
         );
 
+        // D2: Broadcast VesselStarted LiveEvent (fires once at boot)
+        let initial_snapshot =
+            exoskeleton_core::StateSnapshot::initial(config.vessel_id, config.mission.clone());
+        let _ = event_tx.send(LiveEvent {
+            event_type: exoskeleton_core::EventType::VesselStarted,
+            tick_number: None,
+            summary: format!("Vessel {} started", config.vessel_id),
+            timestamp: chrono::Utc::now(),
+            snapshot: Some(initial_snapshot),
+        });
+
         Ok(Self {
             config,
             cognitive_engine: engine_slot,
@@ -307,6 +324,7 @@ impl Vessel {
             relationship_ledger,
             budget_tracker,
             tool_budget_gate,
+            event_tx,
         })
     }
 
@@ -488,6 +506,11 @@ impl Vessel {
     /// Access the inbox (for daemon write path).
     pub fn inbox(&self) -> &Arc<dyn Inbox> {
         &self.inbox
+    }
+
+    /// Access the broadcast sender for real-time events (D2).
+    pub fn event_sender(&self) -> &tokio::sync::broadcast::Sender<LiveEvent> {
+        &self.event_tx
     }
 
     /// Build a WI HostConfig from VesselConfig tool settings.

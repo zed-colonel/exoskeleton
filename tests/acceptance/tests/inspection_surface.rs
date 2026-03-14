@@ -30,11 +30,14 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
     let inbox = vessel.inbox().clone();
     let vessel_id = vessel.vessel_id();
 
+    let event_tx = vessel.event_sender().clone();
+
     Arc::new(AppState {
         inspector,
         metrics,
         inbox,
         vessel_id,
+        event_tx,
     })
 }
 
@@ -206,6 +209,7 @@ async fn metrics_endpoint_has_live_data() {
         metrics,
         inbox: vessel.inbox().clone(),
         vessel_id: vessel.vessel_id(),
+        event_tx: vessel.event_sender().clone(),
     });
     let app = build_router(state);
 
@@ -238,6 +242,175 @@ async fn healthz_returns_200() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+
+    support::shutdown_and_verify(vessel).await;
+}
+
+// ── T-39: WebSocket Liveness (D2 Acceptance Criterion H) ──
+// Verifies that subscribing to the broadcast channel yields TickCompleted events
+// within 2× master_loop_interval, and that disconnect/reconnect works.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_liveness_broadcast_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let vessel = support::boot_vessel(dir.path()).await;
+    let _ticks = support::wait_for_ticks(vessel.storage(), 2, TICK_TIMEOUT).await;
+
+    // First subscription — should receive events
+    let mut rx = vessel.event_sender().subscribe();
+
+    // Wait for at least one more tick to complete
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut got_tick_completed = false;
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) if event.event_type == exoskeleton_core::EventType::TickCompleted => {
+                        got_tick_completed = true;
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    assert!(
+        got_tick_completed,
+        "should receive TickCompleted within timeout"
+    );
+
+    // Disconnect (drop rx) and reconnect
+    drop(rx);
+    let mut rx2 = vessel.event_sender().subscribe();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut got_event_after_reconnect = false;
+    loop {
+        tokio::select! {
+            result = rx2.recv() => {
+                match result {
+                    Ok(_) => { got_event_after_reconnect = true; break; }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    assert!(
+        got_event_after_reconnect,
+        "should receive events after reconnect"
+    );
+
+    support::shutdown_and_verify(vessel).await;
+}
+
+// ── T-40: API Completeness (D2 Acceptance Criterion H) ──
+// Verifies all D2 endpoints return valid responses with correct shapes.
+
+#[tokio::test]
+async fn d2_api_completeness() {
+    let dir = tempfile::tempdir().unwrap();
+    let vessel = support::boot_vessel(dir.path()).await;
+    let _ticks = support::wait_for_ticks(vessel.storage(), 3, TICK_TIMEOUT).await;
+
+    let state = build_app_state(&vessel);
+
+    // 1. /api/v1/memory — should return object with episodic and/or long_term arrays
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(Request::get("/api/v1/memory").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json["episodic"].is_array(),
+        "memory should have episodic array"
+    );
+
+    // 2. /api/v1/snapshots — should return array of snapshots
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/snapshots?limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        !json.is_empty(),
+        "snapshots should have entries after 3 ticks"
+    );
+
+    // 3. /api/v1/inbox/history — should return array
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/inbox/history?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 4. /api/v1/config — should return sanitized config with expected fields
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(Request::get("/api/v1/config").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["mission"], "acceptance test");
+    assert!(json["vessel_id"].is_string());
+    assert!(json["llm_default_backend"].is_string());
+
+    support::shutdown_and_verify(vessel).await;
+}
+
+// ── T-41: Sanitization (D2 Acceptance Criterion H) ──
+// Verifies /api/v1/config does not leak API key values.
+
+#[tokio::test]
+async fn d2_config_sanitization() {
+    let dir = tempfile::tempdir().unwrap();
+    let vessel = support::boot_vessel(dir.path()).await;
+
+    let state = build_app_state(&vessel);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(Request::get("/api/v1/config").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_string(resp.into_body()).await;
+    // Must never contain actual API key values (sk-ant-*, sk-*, etc.)
+    assert!(
+        !body.contains("sk-"),
+        "config must not contain API key values"
+    );
+    // If frontier config present, should only have env var name, not value
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    if let Some(frontier) = json.get("llm_frontier") {
+        assert!(
+            frontier.get("api_key_env").is_some(),
+            "frontier config should have api_key_env field"
+        );
+        // The env var name itself (e.g. "ANTHROPIC_API_KEY") is safe
+    }
 
     support::shutdown_and_verify(vessel).await;
 }

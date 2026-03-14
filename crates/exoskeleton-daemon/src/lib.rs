@@ -60,12 +60,14 @@ impl ExoDaemon {
         let inspector = self.vessel.inspector();
         let inbox = self.vessel.inbox().clone();
         let vessel_id = self.vessel.vessel_id();
+        let event_tx = self.vessel.event_sender().clone();
 
         let app_state = Arc::new(AppState {
             inspector,
             metrics: self.metrics,
             inbox,
             vessel_id,
+            event_tx,
         });
 
         let router = routes::build_router(app_state);

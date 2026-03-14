@@ -14,7 +14,7 @@ use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::ThreadContribution;
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId,
+    Artifact, ArtifactId, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent,
     StateSnapshot, ThreadOutput, ThreadSpec, TickId,
 };
 use exoskeleton_memory::ApproximateTokenCounter;
@@ -188,6 +188,15 @@ pub fn execute_due_threads(
                     );
                 }
 
+                // D2: Broadcast ThreadRan LiveEvent
+                let _ = kernel.event_tx.send(LiveEvent {
+                    event_type: EventType::ThreadRan,
+                    tick_number: Some(snapshot.tick_number + 1),
+                    summary: format!("Thread '{}' completed", thread.name),
+                    timestamp: chrono::Utc::now(),
+                    snapshot: None,
+                });
+
                 contributions.push(ThreadContribution {
                     thread_id: output.thread_id,
                     artifact_id: output.artifact_id,
@@ -326,6 +335,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 

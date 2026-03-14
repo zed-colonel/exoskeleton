@@ -95,7 +95,7 @@ mod tests {
     use std::sync::Arc;
 
     use exoskeleton_core::tick::LlmCallRecord;
-    use exoskeleton_core::{ArtifactId, VesselId};
+    use exoskeleton_core::{ArtifactId, LiveEvent, VesselId};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::{InMemoryRelationshipLedger, RelationshipLedger};
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
@@ -132,6 +132,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 

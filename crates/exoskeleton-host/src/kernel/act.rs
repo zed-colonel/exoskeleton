@@ -10,7 +10,7 @@ use actionqueue_executor_local::CancellationToken;
 use chrono::Utc;
 use exoskeleton_core::tick::{ActionOutcome, ActionRecord};
 use exoskeleton_core::{
-    Artifact, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, TickId,
+    Artifact, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent, TickId,
 };
 
 use super::types::{ActResult, ActionExecution, AlignmentResult};
@@ -152,6 +152,15 @@ pub fn act(
             tracing::warn!(error = %e, "failed to log ActionExecuted event");
         }
 
+        // D2: Broadcast ActionExecuted LiveEvent
+        let _ = kernel.event_tx.send(LiveEvent {
+            event_type: EventType::ActionExecuted,
+            tick_number: None,
+            summary: event.summary.clone(),
+            timestamp: event.timestamp,
+            snapshot: None,
+        });
+
         // Record tool invocation in budget gate (Sprint 9)
         if let Some(ref gate) = kernel.tool_budget_gate {
             if let Ok(mut gate_guard) = gate.try_lock() {
@@ -264,6 +273,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 
@@ -305,6 +315,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 
@@ -700,6 +711,7 @@ mod tests {
             budget_tracker: kernel.budget_tracker.clone(),
             tool_budget_gate: kernel.tool_budget_gate.clone(),
             metrics: kernel.metrics.clone(),
+            event_tx: kernel.event_tx.clone(),
         }
     }
 }

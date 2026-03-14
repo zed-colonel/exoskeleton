@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use exoskeleton_core::inbox::Inbox;
-use exoskeleton_core::VesselId;
+use exoskeleton_core::{LiveEvent, VesselId};
 use exoskeleton_host::inspect::VesselInspector;
 use exoskeleton_host::metrics::ExoMetrics;
 
@@ -17,4 +17,6 @@ pub struct AppState {
     pub inbox: Arc<dyn Inbox>,
     /// The vessel's unique identity.
     pub vessel_id: VesselId,
+    /// Broadcast sender for WebSocket event distribution (D2).
+    pub event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
 }

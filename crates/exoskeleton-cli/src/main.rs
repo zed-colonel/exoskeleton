@@ -106,6 +106,43 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+
+    /// Fetch and display an artifact by ID.
+    Artifact {
+        /// Artifact ID (hex string).
+        id: String,
+    },
+
+    /// View memory (episodic summaries and long-term notes).
+    Memory {
+        /// Memory type filter: "episodic" or "long_term".
+        #[arg(long)]
+        r#type: Option<String>,
+
+        /// Maximum number of items to show.
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// View snapshot history or a specific snapshot.
+    Snapshots {
+        #[command(subcommand)]
+        subcommand: Option<SnapshotSubcommand>,
+
+        /// Maximum number of snapshots to show (for list mode).
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// View inbox message history.
+    InboxHistory {
+        /// Maximum number of entries to show.
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// View sanitized vessel configuration.
+    Config,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +183,15 @@ enum RelationshipSubcommand {
         /// Maximum number of records to show.
         #[arg(long, default_value = "50")]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotSubcommand {
+    /// View snapshot at a specific tick number.
+    At {
+        /// Tick number.
+        tick: u64,
     },
 }
 
@@ -241,6 +287,25 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
 
             commands::send::run_send(&client, &actual_source, message, cli.json).await
         }
+
+        Commands::Artifact { id } => commands::artifact::run_artifact(&client, id, cli.json).await,
+
+        Commands::Memory { r#type, limit } => {
+            commands::memory::run_memory(&client, r#type.as_deref(), *limit, cli.json).await
+        }
+
+        Commands::Snapshots { subcommand, limit } => match subcommand {
+            Some(SnapshotSubcommand::At { tick }) => {
+                commands::snapshot::run_snapshot_at(&client, *tick, cli.json).await
+            }
+            None => commands::snapshot::run_snapshots(&client, *limit, cli.json).await,
+        },
+
+        Commands::InboxHistory { limit } => {
+            commands::inbox_history::run_inbox_history(&client, *limit, cli.json).await
+        }
+
+        Commands::Config => commands::config::run_config(&client, cli.json).await,
 
         Commands::Bootstrap { .. } => unreachable!("bootstrap is handled in main()"),
         Commands::Start { .. } => unreachable!("start is handled in main()"),

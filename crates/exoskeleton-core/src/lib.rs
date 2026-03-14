@@ -26,7 +26,7 @@ pub use budget::{
 };
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
-pub use event::{EventEntry, EventLedger, EventType};
+pub use event::{EventEntry, EventLedger, EventType, LiveEvent};
 pub use id::{
     sha256_hex, ArtifactId, ArtifactIdError, EnvelopeId, LedgerEntryId, PrincipalId, ThreadId,
     TickId, VesselId,

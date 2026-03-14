@@ -26,6 +26,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/capabilities", get(handlers::get_capabilities))
         .route("/api/v1/engines", get(handlers::get_engines))
         .route("/api/v1/inbox", post(handlers::post_inbox))
+        // D2: New endpoints
+        .route("/api/v1/ws", get(handlers::ws_handler))
+        .route("/api/v1/artifacts/{id}", get(handlers::get_artifact))
+        .route("/api/v1/memory", get(handlers::get_memory))
+        .route("/api/v1/snapshots", get(handlers::get_snapshots))
+        .route(
+            "/api/v1/snapshots/at/{tick}",
+            get(handlers::get_snapshot_at_tick),
+        )
+        .route("/api/v1/inbox/history", get(handlers::get_inbox_history))
+        .route("/api/v1/config", get(handlers::get_config))
         // Operational endpoints
         .route("/healthz", get(handlers::healthz))
         .route("/ready", get(handlers::readyz))

@@ -20,6 +20,7 @@ prometheus = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -27,3 +28,4 @@ exoskeleton-relationship = { workspace = true }
 exoskeleton-threads = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+base64 = { workspace = true }

@@ -170,6 +170,76 @@ impl DaemonClient {
         Ok(value)
     }
 
+    /// GET /api/v1/artifacts/:id -> Artifact or None (404).
+    pub async fn artifact(&self, id: &str) -> Result<Option<serde_json::Value>, CliError> {
+        let path = format!("/api/v1/artifacts/{id}");
+        let resp = self.get_raw_allow_404(&path).await?;
+        match resp {
+            Some(r) => {
+                let value = serde_json::from_str(&r.body)
+                    .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// GET /api/v1/memory?type=X&limit=N -> MemoryResponse.
+    pub async fn memory(
+        &self,
+        memory_type: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value, CliError> {
+        let mut path = format!("/api/v1/memory?limit={limit}");
+        if let Some(mt) = memory_type {
+            path.push_str(&format!("&type={mt}"));
+        }
+        let resp = self.get_raw(&path).await?;
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// GET /api/v1/snapshots?limit=N -> Vec<StateSnapshot>.
+    pub async fn snapshots(&self, limit: usize) -> Result<Vec<serde_json::Value>, CliError> {
+        let path = format!("/api/v1/snapshots?limit={limit}");
+        let resp = self.get_raw(&path).await?;
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// GET /api/v1/snapshots/at/:tick -> StateSnapshot or None (404).
+    pub async fn snapshot_at(&self, tick: u64) -> Result<Option<serde_json::Value>, CliError> {
+        let path = format!("/api/v1/snapshots/at/{tick}");
+        let resp = self.get_raw_allow_404(&path).await?;
+        match resp {
+            Some(r) => {
+                let value = serde_json::from_str(&r.body)
+                    .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// GET /api/v1/inbox/history?limit=N -> Vec<InboxHistoryEntry>.
+    pub async fn inbox_history(&self, limit: usize) -> Result<Vec<serde_json::Value>, CliError> {
+        let path = format!("/api/v1/inbox/history?limit={limit}");
+        let resp = self.get_raw(&path).await?;
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// GET /api/v1/config -> SanitizedConfig.
+    pub async fn config(&self) -> Result<serde_json::Value, CliError> {
+        let resp = self.get_raw("/api/v1/config").await?;
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
     // ── Internal helpers ──
 
     /// Issue a GET and return status + body text. Errors on non-2xx.

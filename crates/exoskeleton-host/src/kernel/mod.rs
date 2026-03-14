@@ -19,7 +19,7 @@ use chrono::Utc;
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
     Artifact, ArtifactKind, ArtifactStore, EventEntry, EventLedger, EventType, LedgerEntryId,
-    SnapshotStore, StateSnapshot, TickId, TickStore, VesselId,
+    LiveEvent, SnapshotStore, StateSnapshot, TickId, TickStore, VesselId,
 };
 use exoskeleton_memory::{ContextCompiler, MemoryStore};
 use exoskeleton_relationship::RelationshipLedger;
@@ -62,6 +62,10 @@ pub struct KernelContext {
     pub tool_budget_gate: Option<Arc<tokio::sync::Mutex<ToolBudgetGate>>>,
     /// Prometheus metrics (Sprint 10). `None` in unit tests without metrics.
     pub metrics: Option<Arc<ExoMetrics>>,
+    /// Broadcast sender for real-time events (D2).
+    /// Capacity: 256 events. Slow receivers that fall behind will receive
+    /// a `RecvError::Lagged(n)` and can recover by re-polling REST endpoints.
+    pub event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
 }
 
 /// Run one complete PODAARA tick.
@@ -144,6 +148,15 @@ pub fn run_tick(
         tracing::warn!(error = %e, "failed to log TickStarted event");
     }
 
+    // D2: Broadcast TickStarted LiveEvent
+    let _ = kernel.event_tx.send(LiveEvent {
+        event_type: EventType::TickStarted,
+        tick_number: Some(tick_number),
+        summary: format!("Tick {tick_number} started"),
+        timestamp: started_at,
+        snapshot: None,
+    });
+
     // 6. Get previous_tick_id from tick_store
     let previous_tick_id = match kernel.tick_store.latest() {
         Ok(Some(record)) => Some(record.tick_id),
@@ -160,6 +173,26 @@ pub fn run_tick(
         Ok(p) => p,
         Err(e) => return HandlerOutput::retryable_failure(format!("Perceive failed: {e}")),
     };
+
+    // D2: Log and broadcast MessageReceived events for each new envelope
+    for msg in &perception.new_messages {
+        let msg_event = EventEntry {
+            id: LedgerEntryId::new(),
+            tick_id: Some(tick_id),
+            event_type: EventType::MessageReceived,
+            payload_ref: Some(msg.payload_ref.clone()),
+            summary: format!("Message received from {}", msg.source),
+            timestamp: msg.timestamp,
+        };
+        let _ = kernel.event_ledger.append(&msg_event);
+        let _ = kernel.event_tx.send(LiveEvent {
+            event_type: EventType::MessageReceived,
+            tick_number: Some(tick_number),
+            summary: msg_event.summary.clone(),
+            timestamp: msg.timestamp,
+            snapshot: None,
+        });
+    }
 
     // 7.5 Execute due threads (Sprint 6)
     let thread_contributions =
@@ -244,6 +277,21 @@ pub fn run_tick(
         if let Ok(mut guard) = tracker.try_lock() {
             guard.set_thrash_level(thrash_assessment.level);
         }
+    }
+
+    // D2: Broadcast thrash assessment if non-none
+    if thrash_assessment.level != exoskeleton_core::budget::ThrashLevel::None {
+        let _ = kernel.event_tx.send(LiveEvent {
+            event_type: EventType::BudgetConsumed,
+            tick_number: Some(tick_number),
+            summary: format!(
+                "Thrash level: {:?} ({})",
+                thrash_assessment.level,
+                thrash_assessment.indicators.join("; ")
+            ),
+            timestamp: Utc::now(),
+            snapshot: None,
+        });
     }
 
     // High thrash → suspend cognitive loop and alert human

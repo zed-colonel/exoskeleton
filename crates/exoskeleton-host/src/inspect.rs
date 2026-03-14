@@ -11,10 +11,11 @@ use exoskeleton_core::budget::ThrashLevel;
 use exoskeleton_core::relationship::{RelationshipRecord, RelationshipSnapshot};
 use exoskeleton_core::tick::TickRecord;
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactStore, EventEntry, EventLedger, ExoError, PrincipalId,
-    SnapshotStore, StateSnapshot, ThreadPriority, ThreadSchedule, ThreadStatus, TickId, TickStore,
-    VesselStatus,
+    Artifact, ArtifactId, ArtifactStore, EpisodicSummary, EventEntry, EventLedger, EventType,
+    ExoError, LongTermNote, PrincipalId, SnapshotStore, StateSnapshot, ThreadPriority,
+    ThreadSchedule, ThreadStatus, TickId, TickStore, VesselStatus,
 };
+use exoskeleton_memory::MemoryStore;
 use exoskeleton_relationship::{compile_relationship_snapshot, RelationshipLedger};
 use exoskeleton_threads::ThreadRegistry;
 use serde::{Deserialize, Serialize};
@@ -311,6 +312,93 @@ impl VesselInspector {
             Err(_) => vec![],
         }
     }
+
+    // ── D2: New inspection methods ──
+
+    /// Recent episodic summaries from memory store.
+    pub fn memory_episodic(&self, limit: usize) -> Result<Vec<EpisodicSummary>, ExoError> {
+        self.storage.memory_store().recent_episodic(limit)
+    }
+
+    /// All long-term notes from memory store.
+    pub fn memory_long_term(&self, limit: usize) -> Result<Vec<LongTermNote>, ExoError> {
+        self.storage.memory_store().all_long_term(limit)
+    }
+
+    /// Snapshot history (newest first).
+    pub fn snapshot_history(&self, limit: usize) -> Result<Vec<StateSnapshot>, ExoError> {
+        self.storage.snapshot_store().history(limit)
+    }
+
+    /// Snapshot at a specific tick number.
+    pub fn snapshot_at_tick(&self, tick_number: u64) -> Result<Option<StateSnapshot>, ExoError> {
+        self.storage.snapshot_store().at_tick(tick_number)
+    }
+
+    /// Inbox history reconstructed from MessageReceived events in the event ledger.
+    pub fn inbox_history(&self, limit: usize) -> Result<Vec<InboxHistoryEntry>, ExoError> {
+        let events = self
+            .storage
+            .event_ledger()
+            .by_type(EventType::MessageReceived, limit)?;
+        let mut entries = Vec::with_capacity(events.len());
+        for event in events {
+            // Try to reconstruct envelope details from the referenced artifact
+            let (source, content, envelope_id, in_reply_to) =
+                if let Some(ref artifact_id) = event.payload_ref {
+                    match self.storage.artifact_store().get(artifact_id) {
+                        Ok(Some(artifact)) => {
+                            // Artifact may contain an envelope or a payload
+                            if let Ok(envelope) = serde_json::from_slice::<
+                                exoskeleton_core::MessageEnvelope,
+                            >(&artifact.content)
+                            {
+                                (
+                                    Some(envelope.source),
+                                    None,
+                                    Some(envelope.id),
+                                    envelope.in_reply_to,
+                                )
+                            } else {
+                                // Raw payload content
+                                let text = String::from_utf8_lossy(&artifact.content).into_owned();
+                                (None, Some(text), None, None)
+                            }
+                        }
+                        _ => (None, None, None, None),
+                    }
+                } else {
+                    (None, None, None, None)
+                };
+
+            entries.push(InboxHistoryEntry {
+                envelope_id,
+                source,
+                content: content.unwrap_or_else(|| event.summary.clone()),
+                timestamp: event.timestamp,
+                in_reply_to,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Vessel configuration (for sanitized display).
+    pub fn config(&self) -> &VesselConfig {
+        &self.config
+    }
+}
+
+/// A reconstructed inbox history entry from event ledger data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxHistoryEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_id: Option<exoskeleton_core::EnvelopeId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<exoskeleton_core::PrincipalId>,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<exoskeleton_core::EnvelopeId>,
 }
 
 #[cfg(test)]

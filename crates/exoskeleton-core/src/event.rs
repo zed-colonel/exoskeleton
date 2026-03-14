@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::id::{ArtifactId, LedgerEntryId, TickId};
+use crate::snapshot::StateSnapshot;
 use crate::ExoError;
 
 /// One entry in the Event Ledger.
@@ -69,8 +70,32 @@ pub enum EventType {
     RelationshipUpdated,
     /// Budget was consumed (tokens, cost, time).
     BudgetConsumed,
+    /// A message was received via the inbox (D2).
+    MessageReceived,
     /// An error occurred.
     Error,
+}
+
+/// A real-time event emitted by the kernel for external observers.
+///
+/// Lighter than `EventEntry` — carries enough context for UI updates without
+/// requiring artifact retrieval. Observers needing full detail can follow up
+/// with REST calls using the embedded IDs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveEvent {
+    /// Event type tag (matches EventType variants for consistency).
+    pub event_type: EventType,
+    /// Tick number this event belongs to (None for system-level events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_number: Option<u64>,
+    /// Human-readable summary.
+    pub summary: String,
+    /// UTC timestamp.
+    pub timestamp: DateTime<Utc>,
+    /// Optional snapshot of current vessel status (included on tick_completed
+    /// and vessel_started events to avoid a follow-up REST call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<StateSnapshot>,
 }
 
 /// Append-only event ledger for the vessel's audit trail.
@@ -117,6 +142,7 @@ mod tests {
             EventType::ThreadRan,
             EventType::RelationshipUpdated,
             EventType::BudgetConsumed,
+            EventType::MessageReceived,
             EventType::Error,
         ];
         for event_type in &variants {
@@ -170,6 +196,101 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: EventEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, parsed);
+    }
+
+    // ── LiveEvent Tests (D2: T-1, T-2, T-3) ──
+
+    #[test]
+    fn live_event_serde_roundtrip() {
+        let event = LiveEvent {
+            event_type: EventType::TickStarted,
+            tick_number: Some(42),
+            summary: "Tick 42 started".into(),
+            timestamp: Utc::now(),
+            snapshot: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[test]
+    fn live_event_with_snapshot_serde() {
+        use crate::id::VesselId;
+        use crate::snapshot::{BudgetStatus, VesselStatus};
+
+        let snapshot = StateSnapshot {
+            vessel_id: VesselId::new(),
+            tick_number: 42,
+            mission: "test".into(),
+            plan: None,
+            status: VesselStatus::Idle,
+            working_context: String::new(),
+            thread_summaries: Vec::new(),
+            relationship_snapshot_ref: None,
+            budget_status: BudgetStatus::unlimited(),
+            last_action_summary: None,
+            updated_at: Utc::now(),
+        };
+        let event = LiveEvent {
+            event_type: EventType::TickCompleted,
+            tick_number: Some(42),
+            summary: "Tick 42 completed".into(),
+            timestamp: Utc::now(),
+            snapshot: Some(snapshot),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+        assert!(parsed.snapshot.is_some());
+    }
+
+    #[test]
+    fn live_event_without_snapshot_omits_field() {
+        let event = LiveEvent {
+            event_type: EventType::ActionExecuted,
+            tick_number: Some(5),
+            summary: "Action executed".into(),
+            timestamp: Utc::now(),
+            snapshot: None,
+        };
+        let value: serde_json::Value = serde_json::to_value(&event).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(!obj.contains_key("snapshot"));
+        assert!(!obj.contains_key("tick_number") || obj["tick_number"].is_number());
+    }
+
+    #[test]
+    fn live_event_without_tick_number_omits_field() {
+        let event = LiveEvent {
+            event_type: EventType::VesselStarted,
+            tick_number: None,
+            summary: "Vessel started".into(),
+            timestamp: Utc::now(),
+            snapshot: None,
+        };
+        let value: serde_json::Value = serde_json::to_value(&event).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(!obj.contains_key("tick_number"));
+        assert!(!obj.contains_key("snapshot"));
+    }
+
+    // ── T-4: EventLedger::by_type is object-safe ──
+
+    /// Verifies that `EventLedger` can be used as a trait object (`dyn EventLedger`).
+    /// If this function compiles, the trait is object-safe including `by_type`.
+    #[allow(dead_code)]
+    fn assert_event_ledger_object_safe(l: &dyn EventLedger) {
+        let _ = l.by_type(EventType::TickStarted, 1);
+        let _ = l.recent(1);
+        let _ = l.for_tick(TickId::new());
+    }
+
+    #[test]
+    fn event_ledger_by_type_is_object_safe() {
+        // The real test is that assert_event_ledger_object_safe compiles.
+        // If EventLedger were not object-safe, `&dyn EventLedger` would be rejected.
+        let _: fn(&dyn EventLedger) = assert_event_ledger_object_safe;
     }
 
     #[test]

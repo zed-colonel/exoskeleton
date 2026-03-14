@@ -66,7 +66,9 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use exoskeleton_core::{EventEntry, EventType, LedgerEntryId, StateSnapshot, VesselId};
+    use exoskeleton_core::{
+        EventEntry, EventType, LedgerEntryId, LiveEvent, StateSnapshot, VesselId,
+    };
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler, TokenCounter};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
@@ -102,6 +104,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 

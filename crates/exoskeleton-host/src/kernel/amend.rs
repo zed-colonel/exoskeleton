@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use exoskeleton_core::tick::{TickPhase, TickRecord};
 use exoskeleton_core::{
     Artifact, ArtifactId, ArtifactKind, EpisodicSummary, EventEntry, EventType, ExoError,
-    LedgerEntryId, LongTermNote, ThreadSchedule, TickId, VesselStatus,
+    LedgerEntryId, LiveEvent, LongTermNote, ThreadSchedule, TickId, VesselStatus,
 };
 use exoskeleton_memory::approximate_token_count;
 use exoskeleton_threads::builtin::memory_consolidation;
@@ -135,6 +135,15 @@ pub fn amend(
         if let Err(e) = kernel.event_ledger.append(&rel_event) {
             tracing::warn!(error = %e, "failed to log RelationshipUpdated event");
         }
+
+        // D2: Broadcast RelationshipUpdated LiveEvent
+        let _ = kernel.event_tx.send(LiveEvent {
+            event_type: EventType::RelationshipUpdated,
+            tick_number: Some(tick_number),
+            summary: rel_event.summary.clone(),
+            timestamp: rel_event.timestamp,
+            snapshot: None,
+        });
     }
 
     // Populate BudgetStatus from trackers (Sprint 9, I6)
@@ -230,6 +239,15 @@ pub fn amend(
         timestamp: Utc::now(),
     };
     kernel.event_ledger.append(&event)?;
+
+    // D2: Broadcast TickCompleted LiveEvent with snapshot
+    let _ = kernel.event_tx.send(LiveEvent {
+        event_type: EventType::TickCompleted,
+        tick_number: Some(tick_number),
+        summary: event.summary.clone(),
+        timestamp: event.timestamp,
+        snapshot: Some(new_snapshot.clone()),
+    });
 
     // 7. Acknowledge consumed inbox messages
     let message_ids: Vec<_> = perception.new_messages.iter().map(|m| m.id).collect();
@@ -436,6 +454,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         };
         (kernel, inbox)
     }

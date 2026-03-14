@@ -351,6 +351,23 @@ mod tests {
         assert_eq!(starts.len(), 2);
     }
 
+    // ── T-7: by_type returns empty for no matches ──
+
+    #[test]
+    fn by_type_returns_empty_for_no_matches() {
+        let ledger = SqliteEventLedger::in_memory().unwrap();
+        // Insert events of different types
+        ledger
+            .append(&make_event(EventType::TickStarted, Some(TickId::new())))
+            .unwrap();
+        ledger
+            .append(&make_event(EventType::TickCompleted, Some(TickId::new())))
+            .unwrap();
+        // Query a type that has no entries
+        let results = ledger.by_type(EventType::MessageReceived, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
     #[test]
     fn append_rejects_duplicate_id() {
         let ledger = SqliteEventLedger::in_memory().unwrap();

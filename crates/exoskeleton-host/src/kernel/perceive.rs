@@ -37,7 +37,7 @@ mod tests {
 
     use chrono::Utc;
     use exoskeleton_core::{
-        ArtifactId, EnvelopeId, EnvelopeKind, EventEntry, EventType, LedgerEntryId,
+        ArtifactId, EnvelopeId, EnvelopeKind, EventEntry, EventType, LedgerEntryId, LiveEvent,
         MessageEnvelope, PrincipalId, TickId,
     };
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
@@ -74,6 +74,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 

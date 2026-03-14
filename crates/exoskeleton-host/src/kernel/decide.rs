@@ -374,7 +374,7 @@ mod tests {
 
     use exoskeleton_core::artifact::ArtifactKind;
     use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
-    use exoskeleton_core::ArtifactStore;
+    use exoskeleton_core::{ArtifactStore, LiveEvent};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
@@ -412,6 +412,7 @@ mod tests {
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 
@@ -690,6 +691,7 @@ mod tests {
             budget_tracker: Some(Arc::new(tokio::sync::Mutex::new(tracker))),
             tool_budget_gate: None,
             metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         }
     }
 
