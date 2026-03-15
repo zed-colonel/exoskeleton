@@ -20,3 +20,9 @@ Thumbs.db
 .env
 .env.*
 docker/
+!docker/nginx.conf
+!docker/observatory-entrypoint.sh
+# Observatory build artifacts (D3)
+observatory/node_modules/
+observatory/dist/
+observatory/.vite/

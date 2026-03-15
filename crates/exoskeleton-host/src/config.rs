@@ -304,6 +304,8 @@ impl VesselConfig {
     /// - `EXO_COGNITIVE_DISPATCH_CONCURRENCY` -> `cognitive_dispatch_concurrency`
     /// - `EXO_TOOL_TICK_INTERVAL_MS` -> `tool_tick_interval`
     /// - `EXO_TOOL_DISPATCH_CONCURRENCY` -> `tool_dispatch_concurrency`
+    /// - `EXO_DAEMON_LISTEN` -> `daemon_listen` (host:port)
+    /// - `EXO_CORS_ORIGINS` -> `cors_allowed_origins` (comma-separated origins)
     pub fn from_file(path: &Path) -> Result<Self, ExoError> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|e| ExoError::Config(format!("failed to read config file: {e}")))?;
@@ -361,6 +363,13 @@ impl VesselConfig {
                 val.parse()
                     .map_err(|e| ExoError::Config(format!("invalid EXO_DAEMON_LISTEN: {e}")))?,
             );
+        }
+        if let Ok(val) = std::env::var("EXO_CORS_ORIGINS") {
+            self.cors_allowed_origins = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         Ok(())
     }
@@ -1099,5 +1108,80 @@ listen = "not-a-socket-addr"
     fn daemon_listen_default_value() {
         let config = VesselConfig::default();
         assert!(config.daemon_listen.is_none());
+    }
+
+    // ── T-1..T-4 (D3): CORS Env Var ──
+    //
+    // All CORS env var tests in a single function to avoid parallel env var races.
+    // std::env::set_var/remove_var are process-global and not thread-safe.
+
+    #[test]
+    fn cors_env_var_behavior() {
+        // T-1: Parsed as comma-separated origins
+        std::env::set_var("EXO_CORS_ORIGINS", "http://localhost:3000,http://localhost:8080");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            ..Default::default()
+        };
+        config.apply_env_overrides().unwrap();
+        assert_eq!(
+            config.cors_allowed_origins,
+            vec!["http://localhost:3000", "http://localhost:8080"],
+            "T-1: comma-separated origins"
+        );
+
+        // T-1 (continued): Whitespace trimmed
+        std::env::set_var("EXO_CORS_ORIGINS", " http://a:3000 , http://b:8080 ");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            ..Default::default()
+        };
+        config.apply_env_overrides().unwrap();
+        assert_eq!(
+            config.cors_allowed_origins,
+            vec!["http://a:3000", "http://b:8080"],
+            "T-1: whitespace trimmed"
+        );
+
+        // T-2: Overrides TOML value
+        std::env::set_var("EXO_CORS_ORIGINS", "http://new-origin:3000");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            cors_allowed_origins: vec!["http://old-origin:9999".into()],
+            ..Default::default()
+        };
+        config.apply_env_overrides().unwrap();
+        assert_eq!(
+            config.cors_allowed_origins,
+            vec!["http://new-origin:3000"],
+            "T-2: env var overrides TOML"
+        );
+
+        // T-4: Empty string clears origins
+        std::env::set_var("EXO_CORS_ORIGINS", "");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            cors_allowed_origins: vec!["http://will-be-cleared:5000".into()],
+            ..Default::default()
+        };
+        config.apply_env_overrides().unwrap();
+        assert!(
+            config.cors_allowed_origins.is_empty(),
+            "T-4: empty env var clears origins"
+        );
+
+        // T-3: Absent env var preserves TOML value (must be last — removes the var)
+        std::env::remove_var("EXO_CORS_ORIGINS");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            cors_allowed_origins: vec!["http://preserved:5000".into()],
+            ..Default::default()
+        };
+        config.apply_env_overrides().unwrap();
+        assert_eq!(
+            config.cors_allowed_origins,
+            vec!["http://preserved:5000"],
+            "T-3: absent env var preserves TOML"
+        );
     }
 }

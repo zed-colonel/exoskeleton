@@ -1,13 +1,17 @@
 # Exoskeleton Docker Compose
 #
 # Profiles:
-#   docker compose --profile single up        Single vessel
-#   docker compose --profile multi up          Multiple vessels (future)
+#   docker compose --profile single up        Single vessel + Observatory
+#   docker compose --profile multi up          Multiple vessels + Observatory
 #
 # Usage:
 #   1. Run `exo bootstrap` locally to generate vessel.toml + data
 #   2. Set required env vars (API keys, EXO_DATA_DIR, etc.)
 #   3. docker compose --profile single up
+#
+# Observatory connects to vessels via host-mapped ports.
+# The browser (not the container) makes requests to vessel APIs,
+# so vessels must be accessible from the host network.
 #
 # Volume permissions:
 #   The data directory is created by `exo bootstrap` under the host user's
@@ -30,6 +34,7 @@ services:
     environment:
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
+      - EXO_CORS_ORIGINS=http://localhost:${OBSERVATORY_PORT:-3000}
       - RUST_LOG=${RUST_LOG:-info}
       # LLM API keys — pass through from host
       - ANTHROPIC_API_KEY
@@ -50,6 +55,7 @@ services:
     environment:
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
+      - EXO_CORS_ORIGINS=http://localhost:${OBSERVATORY_PORT:-3000}
       - RUST_LOG=${RUST_LOG:-info}
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
@@ -69,7 +75,20 @@ services:
     environment:
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
+      - EXO_CORS_ORIGINS=http://localhost:${OBSERVATORY_PORT:-3000}
       - RUST_LOG=${RUST_LOG:-info}
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+    restart: unless-stopped
+
+  # ── Observatory ────────────────────────────────────────────────
+  observatory:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.observatory
+    profiles: ["single", "multi"]
+    ports:
+      - "${OBSERVATORY_PORT:-3000}:80"
+    environment:
+      - OBSERVATORY_VESSEL_URLS=${OBSERVATORY_VESSEL_URLS:-http://localhost:${EXO_PORT:-7600}}
     restart: unless-stopped

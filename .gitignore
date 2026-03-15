@@ -1,6 +1,7 @@
 # ── Build artifacts ──────────────────────────────────────────────
 target/
 **/*.rs.bk
+node_modules/
 
 # ── Local runtime data ──────────────────────────────────────────
 data/

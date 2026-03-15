@@ -28,7 +28,7 @@ exoskeleton-threads = { path = "crates/exoskeleton-threads" }
 exoskeleton-host = { path = "crates/exoskeleton-host" }
 exoskeleton-daemon = { path = "crates/exoskeleton-daemon" }
 
-# ActionQueue crates (from crates.io, with local overrides below)
+# ActionQueue crates (from crates.io)
 actionqueue-core = { version = "0.1.0", features = ["serde"] }
 actionqueue-workflow = "0.1.0"
 actionqueue-engine = "0.1.0"
@@ -37,7 +37,7 @@ actionqueue-storage = "0.1.0"
 actionqueue-runtime = { version = "0.1.1", features = ["budget"] }
 actionqueue-executor-local = "0.1.1"
 
-# WorldInterface crates (local, not published)
+# WorldInterface crates (from crates.io
 worldinterface-core = "0.1.0"
 worldinterface-connector = "0.1.0"
 worldinterface-host = "0.1.0"
