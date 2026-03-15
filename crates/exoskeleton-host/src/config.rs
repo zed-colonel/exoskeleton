@@ -1118,7 +1118,10 @@ listen = "not-a-socket-addr"
     #[test]
     fn cors_env_var_behavior() {
         // T-1: Parsed as comma-separated origins
-        std::env::set_var("EXO_CORS_ORIGINS", "http://localhost:3000,http://localhost:8080");
+        std::env::set_var(
+            "EXO_CORS_ORIGINS",
+            "http://localhost:3000,http://localhost:8080",
+        );
         let mut config = VesselConfig {
             mission: "test".into(),
             ..Default::default()

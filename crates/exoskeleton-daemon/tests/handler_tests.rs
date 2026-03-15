@@ -80,10 +80,7 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
         config,
     );
     let metrics = Arc::new(ExoMetrics::new().unwrap());
-    let cors_origins = origins
-        .into_iter()
-        .map(|o| o.parse().unwrap())
-        .collect();
+    let cors_origins = origins.into_iter().map(|o| o.parse().unwrap()).collect();
 
     Arc::new(AppState {
         inspector,
