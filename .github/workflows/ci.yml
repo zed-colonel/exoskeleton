@@ -63,7 +63,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --all --all-targets -- -D warnings
+      - run: cargo clippy --all --all-targets --no-default-features -- -D warnings
         working-directory: exoskeleton
 
   test:
@@ -95,7 +95,7 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --no-fail-fast -- --test-threads=1
+      - run: cargo test --workspace --no-default-features --no-fail-fast -- --test-threads=1
         working-directory: exoskeleton
 
   doc:
@@ -127,7 +127,7 @@ jobs:
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-doc-
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --no-default-features
         working-directory: exoskeleton
         env:
           RUSTDOCFLAGS: "-D warnings"

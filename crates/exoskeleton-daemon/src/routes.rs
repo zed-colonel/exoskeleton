@@ -8,6 +8,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 
+#[cfg(feature = "embedded-observatory")]
+use crate::embedded;
 use crate::handlers;
 use crate::state::AppState;
 
@@ -23,7 +25,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .max_age(Duration::from_secs(3600))
     };
 
-    Router::new()
+    let router = Router::new()
         // API v1 endpoints
         .route("/api/v1/status", get(handlers::get_status))
         .route("/api/v1/ticks", get(handlers::get_ticks))
@@ -59,6 +61,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(handlers::healthz))
         .route("/ready", get(handlers::readyz))
         .route("/metrics", get(handlers::metrics))
-        .with_state(state)
-        .layer(cors)
+        .with_state(state);
+
+    // Embedded Observatory: serve SPA from compiled-in assets.
+    #[cfg(feature = "embedded-observatory")]
+    let router = router
+        .route("/config.js", get(embedded::serve_config_js))
+        .fallback(embedded::serve_embedded_safe);
+
+    router.layer(cors)
 }

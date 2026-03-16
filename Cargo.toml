@@ -64,6 +64,7 @@ reqwest = { version = "0.12", features = ["json"] }
 prometheus = "0.13"
 base64 = "0.22"
 tower-http = { version = "0.6", features = ["cors"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
 
 # Test dependencies
 tempfile = "3"
