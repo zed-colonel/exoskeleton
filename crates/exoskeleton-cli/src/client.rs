@@ -200,7 +200,7 @@ impl DaemonClient {
         Ok(value)
     }
 
-    /// GET /api/v1/snapshots?limit=N -> Vec<StateSnapshot>.
+    /// GET /api/v1/snapshots?limit=N -> `Vec<StateSnapshot>`.
     pub async fn snapshots(&self, limit: usize) -> Result<Vec<serde_json::Value>, CliError> {
         let path = format!("/api/v1/snapshots?limit={limit}");
         let resp = self.get_raw(&path).await?;
@@ -223,7 +223,7 @@ impl DaemonClient {
         }
     }
 
-    /// GET /api/v1/inbox/history?limit=N -> Vec<InboxHistoryEntry>.
+    /// GET /api/v1/inbox/history?limit=N -> `Vec<InboxHistoryEntry>`.
     pub async fn inbox_history(&self, limit: usize) -> Result<Vec<serde_json::Value>, CliError> {
         let path = format!("/api/v1/inbox/history?limit={limit}");
         let resp = self.get_raw(&path).await?;

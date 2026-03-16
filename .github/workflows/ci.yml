@@ -140,6 +140,7 @@ jobs:
         with:
           path: exoskeleton
           submodules: true
+          ssh-key: ${{ secrets.DEPLOY_KEY_OBSERVATORY }}
       - uses: actions/checkout@v4
         with:
           repository: zed-colonel/worldinterface
