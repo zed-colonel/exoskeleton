@@ -139,8 +139,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: exoskeleton
-          submodules: true
-          ssh-key: ${{ secrets.DEPLOY_KEY_OBSERVATORY }}
+      - run: |
+          eval "$(ssh-agent -s)"
+          ssh-add - <<< "${{ secrets.DEPLOY_KEY_OBSERVATORY }}"
+          cd exoskeleton
+          git submodule update --init --depth=1
       - uses: actions/checkout@v4
         with:
           repository: zed-colonel/worldinterface
