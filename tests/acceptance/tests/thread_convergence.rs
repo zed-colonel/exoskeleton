@@ -11,7 +11,7 @@ use std::time::Duration;
 use exoskeleton_core::{ArtifactKind, ArtifactStore, SnapshotStore, ThreadId};
 use exoskeleton_threads::{MEMORY_CONSOLIDATION_ID, SELF_CRITIQUE_ID, THREAT_MONITOR_ID};
 
-const TICK_TIMEOUT: Duration = Duration::from_secs(120);
+const TICK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn thread_convergence_3_threads_10_ticks() {

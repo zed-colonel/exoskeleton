@@ -69,3 +69,21 @@ tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
 proptest = "1.4"
 tokio-test = "0.4"
+
+[patch.crates-io]
+# WorldInterface — local development (Epoch 0+)
+worldinterface-core = { path = "../worldinterface/crates/worldinterface-core" }
+worldinterface-connector = { path = "../worldinterface/crates/worldinterface-connector" }
+worldinterface-host = { path = "../worldinterface/crates/worldinterface-host" }
+worldinterface-contextstore = { path = "../worldinterface/crates/worldinterface-contextstore" }
+worldinterface-coordinator = { path = "../worldinterface/crates/worldinterface-coordinator" }
+worldinterface-flowspec = { path = "../worldinterface/crates/worldinterface-flowspec" }
+
+# ActionQueue — local development (future epochs)
+actionqueue-core = { path = "../actionqueue/crates/actionqueue-core" }
+actionqueue-workflow = { path = "../actionqueue/crates/actionqueue-workflow" }
+actionqueue-engine = { path = "../actionqueue/crates/actionqueue-engine" }
+actionqueue-budget = { path = "../actionqueue/crates/actionqueue-budget" }
+actionqueue-storage = { path = "../actionqueue/crates/actionqueue-storage" }
+actionqueue-runtime = { path = "../actionqueue/crates/actionqueue-runtime" }
+actionqueue-executor-local = { path = "../actionqueue/crates/actionqueue-executor-local" }

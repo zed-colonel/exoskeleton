@@ -5,8 +5,6 @@ version = 4
 [[package]]
 name = "actionqueue-budget"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6da119d2f3bd1ccd3f368151c8faec4e89ade1f052edbee9949d941bc8bdae7e"
 dependencies = [
  "actionqueue-core",
  "tracing",
@@ -15,8 +13,6 @@ dependencies = [
 [[package]]
 name = "actionqueue-core"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caba4134b881c95f8c3b7823ec1604b7010129c12e4b118310e30cf742013530"
 dependencies = [
  "serde",
  "tracing",
@@ -26,8 +22,6 @@ dependencies = [
 [[package]]
 name = "actionqueue-engine"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "854dc5d53710350fa1d2ce483662b81ebaaf4ad2e021261b7aa3be3698e7d7a0"
 dependencies = [
  "actionqueue-core",
  "actionqueue-executor-local",
@@ -37,8 +31,6 @@ dependencies = [
 [[package]]
 name = "actionqueue-executor-local"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42ae8873ab52525244d1b68964c5878b160ab0b26132320b99b6f1b9b5a6e6f5"
 dependencies = [
  "actionqueue-core",
  "tracing",
@@ -47,8 +39,6 @@ dependencies = [
 [[package]]
 name = "actionqueue-runtime"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41189ec9883944c022da538c7aeb879c0e28f05ec966dd7609857071363236f2"
 dependencies = [
  "actionqueue-budget",
  "actionqueue-core",
@@ -63,8 +53,6 @@ dependencies = [
 [[package]]
 name = "actionqueue-storage"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3176baebc674a938a31bc79600e66f96f36680bf9e28c52819e9f006746a13f"
 dependencies = [
  "actionqueue-core",
  "crc32fast",
@@ -77,8 +65,6 @@ dependencies = [
 [[package]]
 name = "actionqueue-workflow"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e03b5cc26744d10ff6c0dd73675343755e93ee83e79e6d756aae0e98d0c9803d"
 dependencies = [
  "actionqueue-core",
  "actionqueue-executor-local",
@@ -2952,8 +2938,6 @@ dependencies = [
 [[package]]
 name = "worldinterface-connector"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5335c5e12cb1c76966c4d0c751e1617c6700b394006d82ada4a293eab2a0a2bc"
 dependencies = [
  "chrono",
  "reqwest",
@@ -2970,8 +2954,6 @@ dependencies = [
 [[package]]
 name = "worldinterface-contextstore"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b74411187e62c64dce31048bf38a3e66b4b075a75d3a6ce01d3f2190f03b82c2"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -2986,8 +2968,6 @@ dependencies = [
 [[package]]
 name = "worldinterface-coordinator"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d3b3ced1ec48330b655085a29c706f88cbde67918ba9417ddf9c5d75e5f2aad"
 dependencies = [
  "actionqueue-core",
  "actionqueue-executor-local",
@@ -3006,8 +2986,6 @@ dependencies = [
 [[package]]
 name = "worldinterface-core"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb0d2aeac15411e0d6c4dada581b1d2ffc26bd8627669016493b06a7c395bdbb"
 dependencies = [
  "chrono",
  "serde",
@@ -3020,8 +2998,6 @@ dependencies = [
 [[package]]
 name = "worldinterface-flowspec"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c808abca620831646ee3872cb1fdac80429c2a12259545f47d58db48c878e629"
 dependencies = [
  "actionqueue-core",
  "actionqueue-workflow",
@@ -3036,8 +3012,6 @@ dependencies = [
 [[package]]
 name = "worldinterface-host"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0374a3aac779a2b14b5e31954b13732c06bf72231c5425365a5e884f95e88fd8"
 dependencies = [
  "actionqueue-core",
  "actionqueue-executor-local",

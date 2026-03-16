@@ -10,12 +10,15 @@ use chrono::Utc;
 use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
 use exoskeleton_core::{ArtifactId, BudgetStatus, StateSnapshot, TickId, VesselId, VesselStatus};
 use exoskeleton_host::config::{LlmConfig, VesselConfig};
-use worldinterface_connector::connectors::{DelayConnector, FsReadConnector, FsWriteConnector};
+use worldinterface_connector::connectors::{
+    DelayConnector, FsReadConnector, FsWriteConnector, HttpRequestConnector,
+};
 use worldinterface_connector::registry::ConnectorRegistry;
 
 /// Build a VesselConfig suitable for testing.
 ///
-/// Uses fast tick intervals (10ms) and low concurrency (2) for speed.
+/// Uses aggressive timing: 10ms AQ tick intervals, 1-second master loop,
+/// and short lease/shutdown timeouts. All tests use mock LLM backends.
 pub fn test_config(dir: &std::path::Path) -> VesselConfig {
     VesselConfig {
         vessel_id: VesselId::new(),
@@ -23,15 +26,15 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         mission: "integration test".into(),
         cognitive_tick_interval: Duration::from_millis(10),
         cognitive_dispatch_concurrency: NonZeroUsize::new(2).unwrap(),
-        cognitive_lease_timeout_secs: 30,
+        cognitive_lease_timeout_secs: 5,
         tool_tick_interval: Duration::from_millis(10),
         tool_dispatch_concurrency: NonZeroUsize::new(2).unwrap(),
-        shutdown_timeout: Duration::from_secs(5),
+        shutdown_timeout: Duration::from_secs(2),
         llm_config: LlmConfig {
-            timeout_secs: 10, // Must be < cognitive_lease_timeout_secs (30)
+            timeout_secs: 2,
             ..LlmConfig::default()
         },
-        master_loop_interval_secs: 10, // Must be < cognitive_lease_timeout_secs (30)
+        master_loop_interval_secs: 1,
         inbox_dir: None,
         cognitive_budget: None,
         tool_budget: None,
@@ -40,15 +43,13 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
     }
 }
 
-/// Build a ConnectorRegistry WITHOUT the HTTP connector.
-///
-/// `HttpRequestConnector` creates an internal tokio runtime via
-/// `reqwest::blocking::Client`, which conflicts with `#[tokio::test]`.
+/// Build a ConnectorRegistry with all built-in connectors including HTTP.
 pub fn test_registry() -> ConnectorRegistry {
     let mut registry = ConnectorRegistry::new();
     registry.register(Arc::new(DelayConnector));
     registry.register(Arc::new(FsReadConnector));
     registry.register(Arc::new(FsWriteConnector));
+    registry.register(Arc::new(HttpRequestConnector::new()));
     registry
 }
 

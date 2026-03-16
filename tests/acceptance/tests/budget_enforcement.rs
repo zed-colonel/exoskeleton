@@ -20,7 +20,7 @@ use std::time::Duration;
 use exoskeleton_core::{CognitiveBudgetConfig, EscalationPolicy, SnapshotStore, ToolBudgetConfig};
 use exoskeleton_host::budget::tracker::CognitiveBudgetCheck;
 
-const TICK_TIMEOUT: Duration = Duration::from_secs(120);
+const TICK_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ── Existing config-level tests ──
 
@@ -382,7 +382,7 @@ async fn tool_budget_gate_initialized_and_enforces() {
 
 /// Budget window timer fires and resets counters.
 ///
-/// Uses a 2-second window. After ticks consume tokens, we wait for the timer
+/// Uses a 1-second window. After ticks consume tokens, we wait for the timer
 /// to fire and verify that counters are replenished.
 #[tokio::test]
 async fn budget_window_timer_resets_counters() {
@@ -392,7 +392,7 @@ async fn budget_window_timer_resets_counters() {
         local_token_budget: 500,
         frontier_token_budget: 0,
         frontier_cost_budget_cents: 1,
-        time_window_secs: 2, // 2-second window for fast test
+        time_window_secs: 1, // 1-second window for fast test
         per_tick_token_cap: 500,
         per_thread_token_cap: 500,
         escalation_policy: EscalationPolicy::default(),
@@ -414,9 +414,9 @@ async fn budget_window_timer_resets_counters() {
         "tokens should be partially consumed before reset ({pre_reset_remaining})"
     );
 
-    // Wait for the 2-second window to expire and timer to fire.
+    // Wait for the 1-second window to expire and timer to fire.
     // Add margin for timer scheduling (window timer skips first tick).
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // After window reset, budget should be replenished
     let post_reset_remaining = {

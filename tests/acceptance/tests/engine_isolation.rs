@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use exoskeleton_core::{ArtifactKind, ArtifactStore, EventLedger};
 
-const TICK_TIMEOUT: Duration = Duration::from_secs(120);
+const TICK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn cognitive_ticks_unaffected_by_tool_saturation() {

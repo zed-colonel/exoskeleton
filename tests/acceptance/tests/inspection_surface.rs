@@ -16,7 +16,7 @@ use exoskeleton_host::metrics::ExoMetrics;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-const TICK_TIMEOUT: Duration = Duration::from_secs(120);
+const TICK_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn body_string(body: Body) -> String {
     let bytes = body.collect().await.unwrap().to_bytes();
@@ -262,7 +262,7 @@ async fn websocket_liveness_broadcast_events() {
     let mut rx = vessel.event_sender().subscribe();
 
     // Wait for at least one more tick to complete
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut got_tick_completed = false;
     loop {
         tokio::select! {
@@ -288,7 +288,7 @@ async fn websocket_liveness_broadcast_events() {
     // Disconnect (drop rx) and reconnect
     drop(rx);
     let mut rx2 = vessel.event_sender().subscribe();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut got_event_after_reconnect = false;
     loop {
         tokio::select! {

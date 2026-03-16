@@ -329,12 +329,13 @@ async fn list_capabilities_returns_registered_connectors() {
         .unwrap();
 
     let caps = vessel.list_capabilities();
-    assert_eq!(caps.len(), 3); // delay, fs.read, fs.write
+    assert_eq!(caps.len(), 4); // delay, fs.read, fs.write, http.request
 
     let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"delay"));
     assert!(names.contains(&"fs.read"));
     assert!(names.contains(&"fs.write"));
+    assert!(names.contains(&"http.request"));
 
     vessel.shutdown().await.unwrap();
 }

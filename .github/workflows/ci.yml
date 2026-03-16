@@ -15,16 +15,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: exoskeleton
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/worldinterface
+          path: worldinterface
+          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/actionqueue
+          path: actionqueue
+          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
       - run: cargo +nightly fmt --all -- --check
+        working-directory: exoskeleton
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: exoskeleton
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/worldinterface
+          path: worldinterface
+          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/actionqueue
+          path: actionqueue
+          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89.0"
@@ -34,17 +59,30 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+            exoskeleton/target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
       - run: cargo clippy --all --all-targets -- -D warnings
+        working-directory: exoskeleton
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: exoskeleton
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/worldinterface
+          path: worldinterface
+          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/actionqueue
+          path: actionqueue
+          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89.0"
@@ -53,18 +91,30 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+            exoskeleton/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
-      # --test-threads=1 prevents thread pool saturation on CI runners (H-1)
       - run: cargo test --workspace --no-fail-fast -- --test-threads=1
+        working-directory: exoskeleton
 
   doc:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: exoskeleton
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/worldinterface
+          path: worldinterface
+          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/actionqueue
+          path: actionqueue
+          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89.0"
@@ -73,10 +123,32 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+            exoskeleton/target
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-doc-
       - run: cargo doc --workspace --no-deps
+        working-directory: exoskeleton
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: exoskeleton
+          submodules: true
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/worldinterface
+          path: worldinterface
+          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/actionqueue
+          path: actionqueue
+          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
+      - run: docker build -t exoskeleton:ci -f exoskeleton/docker/Dockerfile.vessel exoskeleton/
+      - run: docker build -t observatory:ci -f exoskeleton/docker/Dockerfile.observatory exoskeleton/

@@ -12,7 +12,7 @@ use exoskeleton_core::{ArtifactId, EnvelopeId, EnvelopeKind, MessageEnvelope, Pr
 use exoskeleton_host::storage::StorageManager;
 use exoskeleton_relationship::RelationshipLedger;
 
-const TICK_TIMEOUT: Duration = Duration::from_secs(60);
+const TICK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Create a test envelope from a principal.
 fn test_envelope(source: PrincipalId) -> MessageEnvelope {

@@ -24,7 +24,9 @@ use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
 use exoskeleton_threads::ThreadRegistry;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use worldinterface_connector::connectors::{DelayConnector, FsReadConnector, FsWriteConnector};
+use worldinterface_connector::connectors::{
+    DelayConnector, FsReadConnector, FsWriteConnector, HttpRequestConnector,
+};
 use worldinterface_connector::registry::ConnectorRegistry;
 use worldinterface_core::descriptor::Descriptor;
 use worldinterface_host::config::HostConfig;
@@ -81,19 +83,17 @@ pub struct Vessel {
 }
 
 impl Vessel {
-    /// Start the Vessel with the async-safe connector registry.
+    /// Start the Vessel with the default connector registry.
     ///
-    /// Includes connectors that are safe to run inside an existing tokio
-    /// runtime: `delay`, `fs.read`, `fs.write`. The `http.request` connector
-    /// is excluded because it creates an internal tokio runtime that panics
-    /// when dropped from within an async context.
+    /// Includes all built-in connectors: `delay`, `fs.read`, `fs.write`,
+    /// and `http.request`.
     ///
     /// # Errors
     /// - `ExoError::Config` — invalid configuration
     /// - `ExoError::Engine` — bootstrap failure for either engine
     /// - `ExoError::Storage` — data directory creation failure
     pub async fn start(config: VesselConfig) -> Result<Self, ExoError> {
-        Self::start_with_registry(config, async_safe_registry()).await
+        Self::start_with_registry(config, default_registry()).await
     }
 
     /// Start the Vessel with a custom connector registry.
@@ -695,13 +695,12 @@ async fn schedule_master_loop(
     Ok(task_id)
 }
 
-/// Build a connector registry that is safe to use inside an existing tokio
-/// runtime. Excludes `http.request` which creates its own internal runtime
-/// and panics on drop when nested.
-fn async_safe_registry() -> ConnectorRegistry {
+/// Build the default connector registry with all built-in connectors.
+fn default_registry() -> ConnectorRegistry {
     let mut registry = ConnectorRegistry::new();
     registry.register(Arc::new(DelayConnector));
     registry.register(Arc::new(FsReadConnector));
     registry.register(Arc::new(FsWriteConnector));
+    registry.register(Arc::new(HttpRequestConnector::new()));
     registry
 }
