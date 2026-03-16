@@ -287,3 +287,144 @@ data_dir = "./data"
 ```
 
 This uses all defaults: local LLM backend (no model configured -- will warn), 60-second master loop, no budget enforcement, no daemon override.
+
+---
+
+## Prompt Overrides
+
+All LLM prompts are stored as Markdown files and can be customized without recompilation.
+
+### Directory Structure
+
+```
+{data_dir}/prompts/       # Operator overrides (highest priority)
+prompts/                  # Project defaults (shipped with source)
+```
+
+### Prompt Files
+
+| File | Purpose | Template Variables |
+|------|---------|-------------------|
+| `system-section.md` | Orient step system context | `{{vessel_id}}`, `{{mission}}` |
+| `decide-system.md` | Decide step system prompt | `{{vessel_id}}`, `{{mission}}` |
+| `decide-user.md` | Decide step user prompt | `{{context}}` |
+| `bootstrap-system.md` | Bootstrap first-contact | `{{mission}}` |
+| `charter-threat-monitor.md` | Threat Monitor charter | `{{thread_id}}`, `{{thread_name}}`, `{{tick_number}}` |
+| `charter-self-critique.md` | Self-Critique charter | `{{thread_id}}`, `{{thread_name}}`, `{{tick_number}}` |
+| `charter-memory-consolidation.md` | Memory Consolidation charter | `{{thread_id}}`, `{{thread_name}}`, `{{tick_number}}` |
+| `bootstrap-extract-identity.md` | Identity extraction | *(none)* |
+| `bootstrap-verify.md` | Config verification | `{{config_summary}}` |
+
+### Loading Priority
+
+1. `{data_dir}/prompts/{name}.md` — operator override (highest)
+2. `prompts/{name}.md` — project default
+3. Compiled-in fallback via `include_str!()` (lowest)
+
+### Charter Hot-Reload
+
+Thread charters can be reloaded at runtime without restarting the vessel:
+
+```bash
+# Via CLI
+exo reload-charters
+
+# Via API
+curl -X POST http://localhost:7600/api/v1/charters/reload
+```
+
+### Example: Customizing the Threat Monitor
+
+```bash
+# Copy the default charter to the operator override directory
+mkdir -p /var/lib/exoskeleton/prompts
+cp prompts/charter-threat-monitor.md /var/lib/exoskeleton/prompts/
+
+# Edit the override
+vim /var/lib/exoskeleton/prompts/charter-threat-monitor.md
+
+# Reload without restart
+exo reload-charters
+```
+
+---
+
+## CORS Configuration
+
+Cross-Origin Resource Sharing (CORS) headers are needed when the Observatory UI (or any browser-based client) runs on a different origin than the daemon.
+
+### Configuration
+
+Add `cors_allowed_origins` to the `[daemon]` section:
+
+```toml
+[daemon]
+listen = "127.0.0.1:7600"
+cors_allowed_origins = ["http://localhost:3000"]
+```
+
+Multiple origins are supported:
+
+```toml
+cors_allowed_origins = ["http://localhost:3000", "https://observatory.example.com"]
+```
+
+**Default:** empty (no CORS headers sent). When empty, browser-based clients on different origins will be blocked by the browser's same-origin policy.
+
+### Environment Variable
+
+```bash
+# Comma-separated list of allowed origins
+export EXO_CORS_ORIGINS="http://localhost:3000,https://observatory.example.com"
+```
+
+The environment variable overrides the TOML setting.
+
+---
+
+## Docker Environment
+
+Exoskeleton ships with Docker Compose configuration for containerized deployment.
+
+### Environment Variables
+
+| Variable | Container | Description | Default |
+|----------|-----------|-------------|---------|
+| `EXO_DATA_DIR` | vessel | Data directory inside container | `/data` |
+| `EXO_MISSION` | vessel | Vessel mission | *(required)* |
+| `EXO_DAEMON_LISTEN` | vessel | Daemon listen address | `0.0.0.0:7600` |
+| `EXO_CORS_ORIGINS` | vessel | CORS origins for Observatory | `http://localhost:3000` |
+| `LLM_API_KEY` | vessel | API key for frontier LLM provider | *(optional)* |
+| `OBSERVATORY_PORT` | observatory | Host port for Observatory UI | `3000` |
+
+### Volume Mounting
+
+Persist vessel data across container restarts:
+
+```yaml
+volumes:
+  - ./data:/data          # Vessel data (SQLite stores, AQ WALs)
+  - ./vessel.toml:/etc/exoskeleton/vessel.toml  # Configuration
+```
+
+### Container Networking
+
+| Container | Internal Port | Default Host Port |
+|-----------|--------------|-------------------|
+| vessel | 7600 | 7600 |
+| observatory | 80 | 3000 |
+
+The Observatory container connects to the vessel via Docker network (e.g., `http://vessel:7600`).
+
+### Quick Start
+
+```bash
+# Start both vessel and Observatory
+docker compose up
+
+# Start vessel only
+docker compose up vessel
+
+# Start with custom mission
+EXO_MISSION="Monitor production alerts" docker compose up
+```

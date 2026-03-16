@@ -540,3 +540,487 @@ fn format_schedule(schedule: Option<&Value>) -> String {
         _ => "?".into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    // ── E0-T21: format_snapshot produces expected layout ──
+
+    #[test]
+    fn format_snapshot_produces_expected_layout() {
+        let value = json!({
+            "vessel_id": "550e8400-e29b-41d4-a716-446655440000",
+            "tick_number": 42,
+            "status": "Active",
+            "mission": "Monitor infrastructure",
+            "plan": "Check API health",
+            "last_action_summary": "Called health endpoint",
+            "updated_at": "2026-03-15T10:30:00Z",
+            "thread_summaries": [
+                {"name": "ThreatMon"},
+                {"name": "SelfCrit"},
+                {"name": "MemConsol"}
+            ],
+            "budget_status": {
+                "local_tokens_remaining": 50000,
+                "frontier_tokens_remaining": 10000,
+                "thrash_level": "none"
+            }
+        });
+
+        let output = format_snapshot(&value);
+
+        assert!(output.contains("=== Vessel Status ==="), "missing header");
+        assert!(
+            output.contains("550e8400-e29b-41d4-a716-446655440000"),
+            "missing vessel_id"
+        );
+        assert!(output.contains("42"), "missing tick number");
+        assert!(output.contains("Active"), "missing status");
+        assert!(output.contains("Monitor infrastructure"), "missing mission");
+        assert!(output.contains("Check API health"), "missing plan");
+        assert!(output.contains("3 active"), "missing thread count");
+        assert!(
+            output.contains("local: 50000"),
+            "missing budget local tokens"
+        );
+    }
+
+    // ── E0-T22: format_ticks produces tabular output ──
+
+    #[test]
+    fn format_ticks_produces_tabular_output() {
+        let values = vec![
+            json!({
+                "tick_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "tick_number": 1,
+                "phase": "Completed",
+                "started_at": "2026-03-15T10:00:00.000Z",
+                "completed_at": "2026-03-15T10:00:00.523Z"
+            }),
+            json!({
+                "tick_id": "11111111-2222-3333-4444-555555555555",
+                "tick_number": 2,
+                "phase": "Decide",
+                "started_at": "2026-03-15T10:01:00.000Z"
+            }),
+        ];
+
+        let output = format_ticks(&values);
+
+        assert!(output.contains("Tick ID"), "missing Tick ID header");
+        assert!(output.contains("Number"), "missing Number header");
+        assert!(output.contains("Phase"), "missing Phase header");
+        assert!(output.contains("Started At"), "missing Started At header");
+        assert!(output.contains("Duration"), "missing Duration header");
+        assert!(output.contains("\u{2500}"), "missing box-drawing separator");
+        assert!(output.contains("1"), "missing tick number 1");
+        assert!(output.contains("2"), "missing tick number 2");
+        assert!(
+            output.contains("523ms"),
+            "missing duration for completed tick"
+        );
+        assert!(output.contains("(running)"), "missing running indicator");
+    }
+
+    // ── E0-T23: format_tick produces detailed single-tick view ──
+
+    #[test]
+    fn format_tick_produces_detailed_view() {
+        let value = json!({
+            "tick_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "tick_number": 7,
+            "phase": "Completed",
+            "started_at": "2026-03-15T10:00:00Z",
+            "completed_at": "2026-03-15T10:00:01.200Z",
+            "decision_rationale": "High threat detected, escalating",
+            "actions_taken": [
+                {"tool_name": "http.request", "outcome": "Success"},
+                {"tool_name": "fs.write", "outcome": "Success"}
+            ],
+            "llm_calls": [
+                {"backend": "local", "tokens": 1500}
+            ],
+            "thread_contributions": [
+                {"thread": "ThreatMon"},
+                {"thread": "SelfCrit"},
+                {"thread": "MemConsol"}
+            ]
+        });
+
+        let output = format_tick(&value);
+
+        assert!(output.contains("=== Tick Detail ==="), "missing header");
+        assert!(
+            output.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "missing tick_id"
+        );
+        assert!(output.contains("7"), "missing tick number");
+        assert!(
+            output.contains("High threat detected, escalating"),
+            "missing rationale"
+        );
+        assert!(output.contains("Actions:      2"), "missing action count");
+        assert!(output.contains("LLM Calls:    1"), "missing LLM call count");
+        assert!(
+            output.contains("Thread Contributions: 3"),
+            "missing thread count"
+        );
+        assert!(output.contains("http.request"), "missing first action tool");
+        assert!(output.contains("fs.write"), "missing second action tool");
+    }
+
+    // ── E0-T24: format_threads produces table with short IDs ──
+
+    #[test]
+    fn format_threads_produces_table_with_short_ids() {
+        let values = vec![
+            json!({
+                "thread_id": "550e8400-e29b-41d4-a716-446655440000",
+                "name": "Threat Monitor",
+                "priority": "Critical",
+                "schedule": "EveryTick",
+                "status": "Active"
+            }),
+            json!({
+                "thread_id": "661f9511-f3ac-52e5-b827-557766551111",
+                "name": "Self-Critique",
+                "priority": "High",
+                "schedule": "EveryTick",
+                "status": "Active"
+            }),
+            json!({
+                "thread_id": "772a0622-04bd-63f6-c938-668877662222",
+                "name": "Memory Consolidation",
+                "priority": "Normal",
+                "schedule": {"EveryNTicks": 5},
+                "status": "Active"
+            }),
+        ];
+
+        let output = format_threads(&values);
+
+        assert!(output.contains("ID (short)"), "missing ID header");
+        assert!(output.contains("Name"), "missing Name header");
+        assert!(output.contains("Priority"), "missing Priority header");
+        assert!(output.contains("Schedule"), "missing Schedule header");
+        assert!(output.contains("Status"), "missing Status header");
+        assert!(output.contains("Threat Monitor"), "missing thread name");
+        assert!(output.contains("Critical"), "missing Critical priority");
+        assert!(output.contains("High"), "missing High priority");
+        assert!(output.contains("Normal"), "missing Normal priority");
+        assert!(output.contains("EveryTick"), "missing EveryTick schedule");
+        assert!(
+            output.contains("EveryNTicks(5)"),
+            "missing EveryNTicks schedule"
+        );
+        // Thread IDs should be truncated to 8 chars
+        assert!(output.contains("550e8400"), "missing short thread ID");
+        assert!(
+            !output.contains("550e8400-e29b"),
+            "thread ID should be truncated"
+        );
+    }
+
+    // ── E0-T25: format_budget produces cognitive + tool sections ──
+
+    #[test]
+    fn format_budget_produces_cognitive_and_tool_sections() {
+        let value = json!({
+            "cognitive": {
+                "local_tokens_remaining": 900000,
+                "frontier_tokens_remaining": 95000,
+                "frontier_cost_cents_remaining": 500,
+                "frontier_calls_this_window": 3,
+                "consecutive_failures": 0,
+                "thrash_level": "none",
+                "window_duration_secs": 3600,
+                "window_start": "2026-03-15T10:00:00Z"
+            },
+            "tool": {
+                "invocations_remaining": 950,
+                "invocations_this_window": 50,
+                "window_start": "2026-03-15T10:00:00Z"
+            }
+        });
+
+        let output = format_budget(&value);
+
+        assert!(output.contains("=== Budget Status ==="), "missing header");
+        assert!(
+            output.contains("Cognitive Budget:"),
+            "missing cognitive section"
+        );
+        assert!(output.contains("Tool Budget:"), "missing tool section");
+        assert!(
+            output.contains("Local Tokens:"),
+            "missing local tokens line"
+        );
+        assert!(output.contains("900000"), "missing local token value");
+        assert!(
+            output.contains("Frontier Tokens:"),
+            "missing frontier tokens line"
+        );
+        assert!(output.contains("95000"), "missing frontier token value");
+        assert!(output.contains("Frontier Cost:"), "missing cost line");
+        assert!(output.contains("5.00 cents"), "missing formatted cost");
+        assert!(output.contains("Thrash Level:"), "missing thrash level");
+        assert!(
+            output.contains("Invocations Left:"),
+            "missing tool invocations"
+        );
+        assert!(output.contains("950"), "missing tool invocation value");
+
+        // Also test unconfigured budget
+        let empty = json!({});
+        let empty_output = format_budget(&empty);
+        assert!(
+            empty_output.contains("(not configured)"),
+            "missing unconfigured fallback"
+        );
+        // Should have (not configured) for both sections
+        assert_eq!(
+            empty_output.matches("(not configured)").count(),
+            2,
+            "should show (not configured) for both cognitive and tool"
+        );
+    }
+
+    // ── E0-T26: format_engines produces UP/DOWN indicators ──
+
+    #[test]
+    fn format_engines_produces_up_down_indicators() {
+        let value = json!({
+            "cognitive": {
+                "available": true,
+                "last_tick_number": 42,
+                "last_tick_at": "2026-03-15T10:30:00Z",
+                "vessel_status": "Active",
+                "active_threads": 3
+            },
+            "tool": {
+                "available": false,
+                "capabilities_count": 4,
+                "active_flows": 0
+            }
+        });
+
+        let output = format_engines(&value);
+
+        assert!(output.contains("=== Engine Status ==="), "missing header");
+        assert!(
+            output.contains("Cognitive AQ:"),
+            "missing cognitive section"
+        );
+        assert!(
+            output.contains("Tool AQ (WI Host):"),
+            "missing tool section"
+        );
+        // Cognitive should be UP, tool should be DOWN
+        let cog_section = output.split("Tool AQ").next().unwrap();
+        assert!(cog_section.contains("UP"), "cognitive should be UP");
+        let tool_section = output.split("Tool AQ").nth(1).unwrap();
+        assert!(tool_section.contains("DOWN"), "tool should be DOWN");
+        assert!(output.contains("Last Tick:"), "missing last tick line");
+        assert!(output.contains("#42"), "missing tick number");
+        assert!(output.contains("Capabilities:"), "missing capabilities");
+        assert!(output.contains("4"), "missing capabilities count");
+    }
+
+    // ── E0-T27: format_events produces timestamped table ──
+
+    #[test]
+    fn format_events_produces_timestamped_table() {
+        let values = vec![
+            json!({
+                "timestamp": "2026-03-15T10:00:00.123456Z",
+                "event_type": "VesselStarted",
+                "summary": "Vessel boot completed"
+            }),
+            json!({
+                "timestamp": "2026-03-15T10:01:00.500Z",
+                "event_type": "ActionExecuted",
+                "summary": "Called external API"
+            }),
+            json!({
+                "timestamp": "2026-03-15T10:02:00.000Z",
+                "event_type": "TickCompleted",
+                "summary": "Tick 5 finished"
+            }),
+        ];
+
+        let output = format_events(&values);
+
+        assert!(output.contains("Timestamp"), "missing Timestamp header");
+        assert!(output.contains("Type"), "missing Type header");
+        assert!(output.contains("Summary"), "missing Summary header");
+        assert!(output.contains("VesselStarted"), "missing VesselStarted");
+        assert!(output.contains("ActionExecuted"), "missing ActionExecuted");
+        assert!(output.contains("TickCompleted"), "missing TickCompleted");
+        assert!(
+            output.contains("Vessel boot completed"),
+            "missing first summary"
+        );
+        assert!(
+            output.contains("Called external API"),
+            "missing second summary"
+        );
+        assert!(output.contains("Tick 5 finished"), "missing third summary");
+        // Timestamps should be truncated (no fractional seconds, no 'T')
+        assert!(
+            output.contains("2026-03-15 10:00:00"),
+            "timestamp not truncated"
+        );
+        assert!(
+            !output.contains(".123456Z"),
+            "fractional seconds should be stripped"
+        );
+    }
+
+    // ── E0-T28: format_relationships produces trust table ──
+
+    #[test]
+    fn format_relationships_produces_trust_table() {
+        let value = json!({
+            "principals": [
+                {
+                    "principal_id": "operator-alice",
+                    "trust_level": 0.85,
+                    "interaction_count": 42,
+                    "last_interaction": "2026-03-15T10:30:00.000Z"
+                },
+                {
+                    "principal_id": "service-bot",
+                    "trust_level": 0.50,
+                    "interaction_count": 7,
+                    "last_interaction": "2026-03-14T08:00:00.000Z"
+                }
+            ]
+        });
+
+        let output = format_relationships(&value);
+
+        assert!(
+            output.contains("Principal ID"),
+            "missing Principal ID header"
+        );
+        assert!(output.contains("Trust"), "missing Trust header");
+        assert!(
+            output.contains("Interactions"),
+            "missing Interactions header"
+        );
+        assert!(output.contains("Last Seen"), "missing Last Seen header");
+        assert!(output.contains("operator-alice"), "missing first principal");
+        assert!(output.contains("service-bot"), "missing second principal");
+        assert!(output.contains("0.85"), "missing first trust level");
+        assert!(output.contains("0.50"), "missing second trust level");
+        assert!(output.contains("42"), "missing interaction count");
+
+        // Empty principals
+        let empty = json!({"principals": []});
+        assert_eq!(
+            format_relationships(&empty),
+            "No relationship data available."
+        );
+    }
+
+    // ── E0-T29: Formatters handle empty input ──
+
+    #[test]
+    fn formatters_handle_empty_input() {
+        assert_eq!(format_ticks(&[]), "No ticks recorded yet.");
+        assert_eq!(format_threads(&[]), "No threads registered.");
+        assert_eq!(format_events(&[]), "No events recorded yet.");
+        assert_eq!(
+            format_relationships(&json!({})),
+            "No relationship data available."
+        );
+    }
+
+    // ── E0-T30: Formatters handle missing fields gracefully ──
+
+    #[test]
+    fn formatters_handle_missing_fields_gracefully() {
+        let empty = json!({});
+
+        let snapshot_out = format_snapshot(&empty);
+        assert!(
+            snapshot_out.contains("unknown"),
+            "snapshot should show unknown for vessel_id"
+        );
+
+        let tick_out = format_tick(&empty);
+        assert!(
+            tick_out.contains("unknown"),
+            "tick should show unknown for tick_id"
+        );
+
+        let budget_out = format_budget(&empty);
+        assert!(
+            budget_out.contains("(not configured)"),
+            "budget should show not configured"
+        );
+
+        // format_engines should not panic on empty object
+        let engines_out = format_engines(&empty);
+        assert!(
+            engines_out.contains("=== Engine Status ==="),
+            "engines should show header"
+        );
+    }
+
+    // ── E0-T31: Helper functions produce correct output ──
+
+    #[test]
+    fn helper_functions_produce_correct_output() {
+        // truncate_timestamp
+        assert_eq!(
+            truncate_timestamp("2026-03-12T14:30:00.123456Z"),
+            "2026-03-12 14:30:00"
+        );
+        assert_eq!(
+            truncate_timestamp("2026-03-12T14:30:00Z"),
+            "2026-03-12 14:30:00"
+        );
+        assert_eq!(truncate_timestamp("short"), "short");
+
+        // short_id
+        assert_eq!(short_id("550e8400-e29b-41d4-a716-446655440000"), "550e8400");
+        assert_eq!(short_id("abc"), "abc");
+
+        // compute_duration
+        let tick_completed = json!({
+            "started_at": "2026-03-15T10:00:00.000Z",
+            "completed_at": "2026-03-15T10:00:00.523Z"
+        });
+        assert_eq!(compute_duration(&tick_completed), "523ms");
+
+        let tick_slow = json!({
+            "started_at": "2026-03-15T10:00:00.000Z",
+            "completed_at": "2026-03-15T10:00:02.500Z"
+        });
+        assert_eq!(compute_duration(&tick_slow), "2.5s");
+
+        let tick_running = json!({
+            "started_at": "2026-03-15T10:00:00.000Z"
+        });
+        assert_eq!(compute_duration(&tick_running), "(running)");
+
+        let tick_empty = json!({});
+        assert_eq!(compute_duration(&tick_empty), "(running)");
+
+        // format_schedule
+        assert_eq!(
+            format_schedule(Some(&Value::String("EveryTick".into()))),
+            "EveryTick"
+        );
+        assert_eq!(
+            format_schedule(Some(&json!({"EveryNTicks": 5}))),
+            "EveryNTicks(5)"
+        );
+        assert_eq!(format_schedule(None), "?");
+    }
+}

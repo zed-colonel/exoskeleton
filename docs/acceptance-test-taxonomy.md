@@ -95,6 +95,9 @@ All acceptance tests live in `tests/acceptance/tests/`. They boot a full Vessel 
 | `metrics_endpoint_has_live_data` | `inspection_surface.rs` | GET /metrics contains exo_ticks_total |
 | `healthz_returns_200` | `inspection_surface.rs` | GET /healthz returns 200 |
 | `ready_reflects_engine_state` | `inspection_surface.rs` | GET /ready returns 200 or 503 |
+| `websocket_liveness_broadcast_events` | `inspection_surface.rs` | WebSocket at /api/v1/ws receives LiveEvent messages during ticks |
+| `d2_api_completeness` | `inspection_surface.rs` | All D2 endpoints (artifacts, memory, snapshots, inbox-history, config) return valid responses |
+| `d2_config_sanitization` | `inspection_surface.rs` | GET /api/v1/config returns SanitizedConfig (env var names, not key values) (I4) |
 
 ### Criterion G: Engine Isolation Proof (I9)
 
@@ -154,4 +157,4 @@ cargo test -p exoskeleton-acceptance --test smoke
 cargo test --workspace
 ```
 
-Acceptance tests use mock LLM backends (`MockLlmBackend`) and a reduced connector registry (Delay, FsRead, FsWrite -- no HTTP connector to avoid tokio runtime conflicts). Tests use fast tick intervals (10ms) and 30-second lease timeouts for CI stability.
+Acceptance tests use mock LLM backends (`MockLlmBackend`) and the full connector registry (Delay, FsRead, FsWrite, HttpRequest). Tests use fast tick intervals (10ms) and 30-second lease timeouts for CI stability.

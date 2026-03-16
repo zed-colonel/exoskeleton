@@ -322,3 +322,92 @@ struct RawResponse {
     status: u16,
     body: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    // ── E0-T32: Connection refused returns CliError::Connection ──
+
+    #[tokio::test]
+    async fn connection_refused_returns_cli_error_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // nothing listening
+
+        let client = DaemonClient::new(&format!("http://127.0.0.1:{port}"));
+        let result = client.status().await;
+
+        assert!(
+            matches!(result, Err(CliError::Connection(_))),
+            "expected CliError::Connection, got: {result:?}"
+        );
+    }
+
+    // ── E0-T33: Server returns 500 produces CliError::DaemonError ──
+
+    #[tokio::test]
+    async fn server_500_returns_daemon_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let response =
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 14\r\n\r\nserver failure";
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient::new(&format!("http://127.0.0.1:{port}"));
+        let result = client.status().await;
+
+        match result {
+            Err(CliError::DaemonError { status, body }) => {
+                assert_eq!(status, 500);
+                assert!(body.contains("server failure"), "body was: {body}");
+            }
+            other => panic!("expected CliError::DaemonError, got: {other:?}"),
+        }
+    }
+
+    // ── E0-T34: 404 on allow_404 endpoint returns Ok(None) ──
+
+    #[tokio::test]
+    async fn not_found_on_allow_404_endpoint_returns_none() {
+        // Test 1: 404 returns Ok(None)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found";
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient::new(&format!("http://127.0.0.1:{port}"));
+        let result = client.tick("nonexistent-id").await;
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None) for 404, got: {result:?}"
+        );
+
+        // Test 2: 500 on same method still returns error (not swallowed)
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener2.accept().await.unwrap();
+            let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\n\r\nerror";
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client2 = DaemonClient::new(&format!("http://127.0.0.1:{port2}"));
+        let result2 = client2.tick("nonexistent-id").await;
+        assert!(
+            matches!(result2, Err(CliError::DaemonError { status: 500, .. })),
+            "expected DaemonError for 500 on allow_404 path, got: {result2:?}"
+        );
+    }
+}

@@ -28,3 +28,6 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 dialoguer = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }

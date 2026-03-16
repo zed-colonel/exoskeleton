@@ -207,6 +207,128 @@ The relationship substrate provides trust-based governance:
 - Destructive actions (e.g., `fs.write`) require trust >= 0.6 (configurable)
 - Empty relationship snapshot: passthrough (new principals can act)
 
+**Storage layer.** The persistence layer comprises 8 SQLite stores managed by `StorageManager`. See [Data Directory Layout](data-directory.md) for the full directory structure and store catalog.
+
+---
+
+## Memory & Context Compilation
+
+Exoskeleton maintains three memory tiers, all feeding into a token-budgeted context window each tick:
+
+**Working context** lives directly in the StateSnapshot. It is a short string summarizing the vessel's immediate focus — updated each tick by the Amend step.
+
+**Episodic summaries** are recent tick digests stored in `MemoryStore`. The Orient step fetches the 10 most recent summaries to give the LLM a sense of what just happened.
+
+**Long-term notes** are operator-provided or consolidation-produced durable memories. The Memory Consolidation thread periodically promotes salient observations from episodic summaries into long-term storage.
+
+### Context Compiler
+
+The `ContextCompiler` in `exoskeleton-memory` assembles a token-budgeted prompt from these sources:
+
+```
+  ContextSources                    ContextCompiler                 CompiledContext
+  ┌──────────────────┐              ┌──────────────┐               ┌────────────────┐
+  │ mission          │              │              │               │ prompt (String) │
+  │ snapshot         │──────────────│  render      │──────────────>│ total_tokens    │
+  │ relationship     │   sections   │  budget      │   truncate    │ budget          │
+  │ thread outputs   │──────────────│  truncate    │──────────────>│ sections[]      │
+  │ recent events    │              │  assemble    │               │ truncated[]     │
+  │ episodic memory  │              │              │               │                 │
+  │ long-term notes  │              └──────────────┘               └────────────────┘
+  └──────────────────┘
+```
+
+Each source is rendered into a named section. The system section (vessel identity, mission) is never truncated. Remaining sections share the budget proportionally and are truncated from the bottom when necessary. This enforces **invariant I5** — context is compiled fresh each tick, never accumulated.
+
+Thread context compilation follows the same pattern but with a per-thread budget. The charter section is never truncated; snapshot and recent outputs share the remaining budget 50/50.
+
+---
+
+## Budget Enforcement
+
+Budget enforcement operates in two layers:
+
+### Layer 1: AQ BudgetGate (hard stop)
+
+The ActionQueue BudgetGate halts task dispatch when budget dimensions are exhausted. This is a coarse-grained stop — once triggered, no more cognitive or tool tasks run until the budget window resets.
+
+### Layer 2: Exoskeleton CognitiveBudgetTracker (fine-grained)
+
+The `CognitiveBudgetTracker` in `exoskeleton-host` provides token-level accounting:
+
+- **Per-backend tracking** — local and frontier model tokens tracked separately
+- **Per-thread caps** — no single thread can consume more than `per_thread_token_cap` per tick
+- **Per-tick caps** — total token consumption across all threads capped per tick
+- **Window-based replenishment** — a timer task resets counters at `time_window_secs` intervals
+
+### Thrash Detection
+
+The `ThrashDetector` analyzes recent TickRecords for pathological patterns:
+
+- **Action repetition** — the same action attempted repeatedly
+- **Stagnation** — no meaningful state change across ticks
+- **Token waste** — high token consumption with no useful output
+
+These produce a graduated `ThrashLevel` (None → Low → High → Critical) visible in the BudgetStatus.
+
+### Model Escalation
+
+Consecutive LLM failures trigger frontier model escalation in the Decide step. The escalation policy checks:
+
+- Consecutive failure count (configurable, default: 3)
+- Remaining frontier budget and call limits
+- Stake-based escalation for high-risk action types
+
+### ToolBudgetGate
+
+The `ToolBudgetGate` rate-limits tool invocations at the Act step boundary, enforcing **invariant I6** (budgets enforced independently per engine). It counts invocations per window and blocks execution when the limit is reached, returning `ActionOutcome::RateLimited`.
+
+---
+
+## Prompt System
+
+The prompt system (introduced in Epoch 0) externalizes all LLM prompts into editable Markdown files.
+
+### PromptRegistry
+
+`PromptRegistry` in `exoskeleton-core` is a pure in-memory `HashMap<String, String>`. It provides:
+
+- `resolve(name, vars)` — look up a template by name and substitute `{{variable}}` placeholders
+- `register(name, template)` — add or replace a template at runtime
+- `with_defaults()` — load compiled-in fallback templates
+
+### Prompt Files
+
+Nine prompt files live in the `prompts/` directory:
+
+| File | Purpose | Variables |
+|------|---------|-----------|
+| `system-section.md` | Orient step system context | `vessel_id`, `mission` |
+| `decide-system.md` | Decide step system prompt | `vessel_id`, `mission` |
+| `decide-user.md` | Decide step user prompt | `context` |
+| `bootstrap-system.md` | Bootstrap first-contact system | `mission` |
+| `charter-threat-monitor.md` | Threat Monitor thread | `thread_id`, `thread_name`, `tick_number` |
+| `charter-self-critique.md` | Self-Critique thread | `thread_id`, `thread_name`, `tick_number` |
+| `charter-memory-consolidation.md` | Memory Consolidation thread | `thread_id`, `thread_name`, `tick_number` |
+| `bootstrap-extract-identity.md` | Identity extraction | *(none)* |
+| `bootstrap-verify.md` | Config verification | `config_summary` |
+
+### Three-Tier Loading
+
+Templates are loaded with a priority chain:
+
+1. **Operator override** — `{data_dir}/prompts/{name}.md` (highest priority)
+2. **Project default** — `prompts/{name}.md` in the working directory
+3. **Compiled-in fallback** — `include_str!()` baked into the binary (lowest priority)
+
+This allows operators to customize prompts without recompilation, while always having a working fallback.
+
+### Charter Hot-Reload
+
+Thread charters can be reloaded at runtime via `POST /api/v1/charters/reload` (CLI: `exo reload-charters`). The `ThreadRegistry::reload_charters()` method re-reads charter templates from disk and updates the `PromptRegistry`, taking effect on the next tick.
+
+See [Configuration Reference](configuration.md) for prompt override configuration.
+
 ---
 
 ## References
