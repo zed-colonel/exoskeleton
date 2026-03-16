@@ -12,35 +12,40 @@ use exoskeleton_memory::{CompiledContext, SectionResult, TokenCounter};
 /// vessel state snapshot, and the thread's recent outputs. The charter section
 /// is never truncated; snapshot and output sections are truncated proportionally
 /// if the budget is tight.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_thread_context(
     counter: &dyn TokenCounter,
     thread: &ThreadSpec,
     snapshot: &StateSnapshot,
     recent_outputs: &[ThreadOutput],
     _tick_id: TickId,
+    charter_template: Option<&str>,
 ) -> Result<CompiledContext, ExoError> {
     // ── 1. Render sections as text ──
 
-    let charter_section = format!(
-        "=== THREAD: {} ===\n\
-         Thread ID: {}\n\
-         Charter: {}\n\
-         Priority: {:?}\n\
-         Current Tick: {}\n\
-         \n\
-         You are a cognitive thread within an Exoskeleton vessel.\n\
-         Your purpose is described by your charter above.\n\
-         Analyze the context below and produce:\n\
-         1. A concise summary of your analysis\n\
-         2. Specific recommendations for the master loop\n\
-         \n\
-         Respond with JSON:\n\
-         {{\n\
-           \"summary\": \"Your analysis in one sentence\",\n\
-           \"recommendations\": [\"Specific actionable recommendation\", ...]\n\
-         }}",
-        thread.name, thread.thread_id, thread.charter, thread.priority, snapshot.tick_number,
-    );
+    let charter_section = match charter_template {
+        Some(template) => template.to_string(),
+        None => format!(
+            "=== THREAD: {} ===\n\
+             Thread ID: {}\n\
+             Charter: {}\n\
+             Priority: {:?}\n\
+             Current Tick: {}\n\
+             \n\
+             You are a cognitive thread within an Exoskeleton vessel.\n\
+             Your purpose is described by your charter above.\n\
+             Analyze the context below and produce:\n\
+             1. A concise summary of your analysis\n\
+             2. Specific recommendations for the master loop\n\
+             \n\
+             Respond with JSON:\n\
+             {{\n\
+               \"summary\": \"Your analysis in one sentence\",\n\
+               \"recommendations\": [\"Specific actionable recommendation\", ...]\n\
+             }}",
+            thread.name, thread.thread_id, thread.charter, thread.priority, snapshot.tick_number,
+        ),
+    };
 
     let plan_display = snapshot.plan.as_deref().unwrap_or("None");
     let last_action_display = snapshot.last_action_summary.as_deref().unwrap_or("None");
@@ -202,7 +207,8 @@ mod tests {
         let thread = test_thread("ThreatMon", 5000);
         let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
 
-        let ctx = compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new()).unwrap();
+        let ctx =
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None).unwrap();
 
         assert!(
             ctx.prompt.contains("Monitor for alignment threats"),
@@ -220,7 +226,8 @@ mod tests {
         let thread = test_thread("SnapCheck", 5000);
         let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
 
-        let ctx = compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new()).unwrap();
+        let ctx =
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None).unwrap();
 
         assert!(
             ctx.prompt.contains("test mission"),
@@ -244,7 +251,8 @@ mod tests {
         ];
 
         let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new()).unwrap();
+            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new(), None)
+                .unwrap();
 
         assert!(
             ctx.prompt.contains("Detected drift pattern"),
@@ -272,7 +280,8 @@ mod tests {
         ];
 
         let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new()).unwrap();
+            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new(), None)
+                .unwrap();
 
         assert!(
             ctx.total_tokens <= thread.token_budget,
@@ -322,7 +331,8 @@ mod tests {
         ];
 
         let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new()).unwrap();
+            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new(), None)
+                .unwrap();
 
         // Charter must be preserved.
         assert!(
@@ -348,7 +358,8 @@ mod tests {
         let thread = test_thread("EmptyOut", 5000);
         let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
 
-        let ctx = compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new()).unwrap();
+        let ctx =
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None).unwrap();
 
         assert!(!ctx.prompt.is_empty(), "Prompt should not be empty");
         assert!(

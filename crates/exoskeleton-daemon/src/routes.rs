@@ -39,6 +39,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/capabilities", get(handlers::get_capabilities))
         .route("/api/v1/engines", get(handlers::get_engines))
         .route("/api/v1/inbox", post(handlers::post_inbox))
+        // Epoch 0: Charter hot-reload
+        .route(
+            "/api/v1/charters/reload",
+            post(handlers::post_reload_charters),
+        )
         // D2: New endpoints
         .route("/api/v1/ws", get(handlers::ws_handler))
         .route("/api/v1/artifacts/{id}", get(handlers::get_artifact))

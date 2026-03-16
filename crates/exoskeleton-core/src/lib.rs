@@ -13,6 +13,7 @@ pub mod id;
 pub mod inbox;
 pub mod llm;
 pub mod memory;
+pub mod prompt;
 pub mod relationship;
 pub mod snapshot;
 pub mod thread;
@@ -34,6 +35,7 @@ pub use id::{
 pub use inbox::Inbox;
 pub use llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
 pub use memory::{EpisodicSummary, LongTermNote, MemoryTier};
+pub use prompt::PromptRegistry;
 pub use relationship::{
     PrincipalSummary, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
 };

@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::{ExoError, ThreadId, ThreadOutput, ThreadSpec, ThreadStatus, ThreadSummary};
 
 use crate::scheduling::is_thread_due;
@@ -115,6 +116,34 @@ impl ThreadRegistry {
         self.store.save_output(output)
     }
 
+    /// Update the charter text of a thread in the store.
+    pub fn update_charter(&self, thread_id: ThreadId, charter: String) -> Result<(), ExoError> {
+        self.store.update_charter(thread_id, charter)
+    }
+
+    /// Reload thread charters from the prompt registry.
+    ///
+    /// For each registered thread, checks if a charter override exists in the
+    /// registry (keyed by `charter-{name-slug}`). If the charter text differs
+    /// from the current value, updates it in the store.
+    ///
+    /// Returns the number of charters updated.
+    pub fn reload_charters(&self, prompts: &PromptRegistry) -> Result<u32, ExoError> {
+        let threads = self.store.list()?;
+        let mut updated = 0;
+        for (spec, _status) in &threads {
+            let key = charter_key(&spec.name);
+            if let Some(new_charter) = prompts.get(&key) {
+                if new_charter != spec.charter {
+                    self.store
+                        .update_charter(spec.thread_id, new_charter.to_string())?;
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
+    }
+
     /// Build a [`ThreadSummary`] for every registered thread.
     ///
     /// The `token_budget_remaining` field is set to the thread's static
@@ -139,6 +168,12 @@ impl ThreadRegistry {
         }
         Ok(summaries)
     }
+}
+
+/// Convert a thread name to its charter registry key.
+/// "Threat Monitor" -> "charter-threat-monitor"
+fn charter_key(name: &str) -> String {
+    format!("charter-{}", name.to_lowercase().replace(' ', "-"))
 }
 
 #[cfg(test)]
@@ -358,5 +393,70 @@ mod tests {
         assert_eq!(due[0].name, "CRIT");
         assert_eq!(due[1].name, "NRM");
         assert_eq!(due[2].name, "BG");
+    }
+
+    // ── E0-T20: reload_charters updates from registry ──
+
+    #[test]
+    fn reload_charters_updates_from_registry() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let reg = ThreadRegistry::new(store);
+
+        // Register threads with original charters
+        let spec = test_spec(
+            "Threat Monitor",
+            ThreadPriority::Critical,
+            ThreadSchedule::EveryTick,
+        );
+        let id = reg.register(spec).unwrap();
+
+        // Build a PromptRegistry with a different charter
+        let mut prompts = PromptRegistry::new();
+        prompts.insert("charter-threat-monitor", "Updated threat charter text");
+
+        let updated = reg.reload_charters(&prompts).unwrap();
+        assert_eq!(updated, 1, "should update 1 charter");
+
+        let (got_spec, _) = reg.get(id).unwrap().unwrap();
+        assert_eq!(got_spec.charter, "Updated threat charter text");
+    }
+
+    #[test]
+    fn reload_charters_skips_unchanged() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let reg = ThreadRegistry::new(store);
+
+        let spec = test_spec(
+            "Self-Critique",
+            ThreadPriority::High,
+            ThreadSchedule::EveryTick,
+        );
+        reg.register(spec.clone()).unwrap();
+
+        // Registry has the same charter text
+        let mut prompts = PromptRegistry::new();
+        prompts.insert("charter-self-critique", &spec.charter);
+
+        let updated = reg.reload_charters(&prompts).unwrap();
+        assert_eq!(updated, 0, "should not update when charter is unchanged");
+    }
+
+    #[test]
+    fn reload_charters_ignores_missing_keys() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let reg = ThreadRegistry::new(store);
+
+        let spec = test_spec(
+            "Custom Thread",
+            ThreadPriority::Normal,
+            ThreadSchedule::EveryTick,
+        );
+        reg.register(spec).unwrap();
+
+        // Empty registry — no charter keys
+        let prompts = PromptRegistry::new();
+
+        let updated = reg.reload_charters(&prompts).unwrap();
+        assert_eq!(updated, 0, "should not update when key is missing");
     }
 }

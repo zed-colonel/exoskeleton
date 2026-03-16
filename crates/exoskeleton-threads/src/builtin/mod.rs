@@ -9,6 +9,7 @@ pub mod memory_consolidation;
 pub mod self_critique;
 pub mod threat_monitor;
 
+use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::{ExoError, ThreadId};
 pub use memory_consolidation::{MemoryConsolidation, MemoryNote};
 pub use self_critique::SelfCritique;
@@ -40,12 +41,30 @@ pub const MEMORY_CONSOLIDATION_ID: ThreadId = ThreadId::from_uuid(Uuid::from_byt
 /// Checks each built-in thread by its deterministic ID. If a thread with
 /// that ID already exists (in any status, including Suspended or Failed),
 /// it is NOT re-registered — preserving operator status changes.
-pub fn register_builtin_threads(registry: &ThreadRegistry) -> Result<(), ExoError> {
-    let builtin_specs = [
+///
+/// Charter text comes from the `PromptRegistry` (Epoch 0). If the registry
+/// has a charter entry for a thread, it overrides the compiled-in default.
+pub fn register_builtin_threads(
+    registry: &ThreadRegistry,
+    prompts: &PromptRegistry,
+) -> Result<(), ExoError> {
+    let mut builtin_specs = [
         threat_monitor::spec(),
         self_critique::spec(),
         memory_consolidation::spec(),
     ];
+
+    // Override charters from prompt registry (Epoch 0)
+    let charter_keys = [
+        "charter-threat-monitor",
+        "charter-self-critique",
+        "charter-memory-consolidation",
+    ];
+    for (spec, key) in builtin_specs.iter_mut().zip(charter_keys.iter()) {
+        if let Some(charter) = prompts.get(key) {
+            spec.charter = charter.to_string();
+        }
+    }
 
     for spec in &builtin_specs {
         match registry.get(spec.thread_id)? {
@@ -102,7 +121,7 @@ mod tests {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
-        register_builtin_threads(&registry).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
         let all = registry.list().unwrap();
         assert_eq!(all.len(), 3);
@@ -117,8 +136,8 @@ mod tests {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
-        register_builtin_threads(&registry).unwrap();
-        register_builtin_threads(&registry).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
         let all = registry.list().unwrap();
         assert_eq!(
@@ -133,7 +152,7 @@ mod tests {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
-        register_builtin_threads(&registry).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
         // Operator suspends the Threat Monitor.
         registry
@@ -141,7 +160,7 @@ mod tests {
             .unwrap();
 
         // Re-register (e.g., vessel restart).
-        register_builtin_threads(&registry).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
         // Threat Monitor should still be Suspended.
         let (_, status) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();

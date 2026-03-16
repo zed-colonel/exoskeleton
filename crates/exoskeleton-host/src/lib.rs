@@ -17,6 +17,7 @@ pub mod inspect;
 pub mod kernel;
 pub mod llm;
 pub mod metrics;
+pub mod prompt_loader;
 pub mod storage;
 pub mod vessel;
 

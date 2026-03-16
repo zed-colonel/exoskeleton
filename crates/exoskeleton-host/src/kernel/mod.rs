@@ -17,6 +17,7 @@ use std::sync::Arc;
 use actionqueue_executor_local::{CancellationToken, HandlerOutput};
 use chrono::Utc;
 use exoskeleton_core::inbox::Inbox;
+use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::{
     Artifact, ArtifactKind, ArtifactStore, EventEntry, EventLedger, EventType, LedgerEntryId,
     LiveEvent, SnapshotStore, StateSnapshot, TickId, TickStore, VesselId,
@@ -66,6 +67,8 @@ pub struct KernelContext {
     /// Capacity: 256 events. Slow receivers that fall behind will receive
     /// a `RecvError::Lagged(n)` and can recover by re-polling REST endpoints.
     pub event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
+    /// Prompt template registry (Epoch 0). Loaded at boot, immutable during run.
+    pub prompt_registry: Arc<PromptRegistry>,
 }
 
 /// Run one complete PODAARA tick.

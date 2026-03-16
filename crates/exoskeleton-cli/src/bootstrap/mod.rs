@@ -15,10 +15,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole};
+use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_host::config::{
     FrontierModelConfig, FrontierProvider, LlmConfig, LocalApiFormat, LocalModelConfig,
 };
-use exoskeleton_host::direct_llm_call;
+use exoskeleton_host::{direct_llm_call, prompt_loader};
 
 use self::first_contact::FirstContactResult;
 use self::wizard::WizardResult;
@@ -52,16 +53,19 @@ pub async fn run_bootstrap(
     print_step(2, "Verifying LLM Connectivity");
     verify_connectivity(&llm_config).await?;
 
+    // Step 2.5: Load prompt registry (Epoch 0)
+    let prompts = load_bootstrap_prompts(Some(&wizard_result.data_dir));
+
     // Step 3: First contact conversation
     println!();
     print_step(3, "First Contact");
     println!("  The vessel is ready. Let's bring it to life.\n");
-    let contact_result = first_contact::run_first_contact(&llm_config).await?;
+    let contact_result = first_contact::run_first_contact(&llm_config, &prompts).await?;
 
     // Step 4: Extract identity from conversation
     println!();
     print_step(4, "Establishing Identity");
-    let identity = extract_identity(&llm_config, &contact_result).await?;
+    let identity = extract_identity(&llm_config, &contact_result, &prompts).await?;
 
     println!("  Name:    {}", identity.vessel_name);
     println!("  Mission: {}", identity.mission);
@@ -95,6 +99,20 @@ pub async fn run_bootstrap(
     println!();
 
     Ok(())
+}
+
+/// Load prompt registry for bootstrap.
+///
+/// Bootstrap runs before the vessel exists. Uses tier-2 (project-level) and
+/// tier-3 (compiled-in) loading. If a data_dir is available, also checks tier-1.
+fn load_bootstrap_prompts(data_dir: Option<&Path>) -> PromptRegistry {
+    let mut registry = PromptRegistry::with_defaults();
+    if let Some(dir) = data_dir {
+        prompt_loader::load_prompt_overrides(&mut registry, dir);
+    } else {
+        prompt_loader::load_project_prompt_overrides(&mut registry);
+    }
+    registry
 }
 
 /// Build an LlmConfig from the wizard results.
@@ -166,6 +184,7 @@ async fn verify_connectivity(llm_config: &LlmConfig) -> Result<(), CliError> {
 async fn extract_identity(
     llm_config: &LlmConfig,
     contact: &FirstContactResult,
+    prompts: &PromptRegistry,
 ) -> Result<VesselIdentity, CliError> {
     print!("  Analyzing conversation... ");
     std::io::stdout().flush().ok();
@@ -184,20 +203,12 @@ async fn extract_identity(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let extraction_prompt = format!(
-        r#"You just had a first-contact conversation with a human. Based on the transcript below, extract the following information.
-
-1. **vessel_name**: The name that was agreed upon for the vessel/agent. If no clear name was established, suggest one that fits the conversation's tone and themes.
-2. **mission**: A concise mission statement (1-2 sentences) capturing the vessel's purpose as established in the conversation. If no clear purpose was discussed, synthesize one from the conversation's themes.
-3. **user_name**: The human's name, if they shared it. null if unknown.
-4. **user_summary**: A brief description of the user based on what was learned (role, interests, etc.). null if nothing was shared.
-
-Respond ONLY with valid JSON, no markdown formatting:
-{{"vessel_name": "...", "mission": "...", "user_name": "..." or null, "user_summary": "..." or null}}
-
-Transcript:
-{transcript}"#
-    );
+    let extraction_prompt = prompts
+        .resolve(
+            "bootstrap-identity-extraction",
+            &[("transcript", &transcript)],
+        )
+        .map_err(|e| CliError::Other(format!("prompt resolution failed: {e}")))?;
 
     let request = LlmRequest {
         backend: None,

@@ -19,8 +19,8 @@ use std::time::Duration;
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse, StopReason};
 use exoskeleton_core::{
-    ArtifactStore, EventType, LiveEvent, ThreadId, ThreadPriority, ThreadSchedule, ThreadSpec,
-    ThreadStatus, VesselId,
+    ArtifactStore, EventType, LiveEvent, PromptRegistry, ThreadId, ThreadPriority, ThreadSchedule,
+    ThreadSpec, ThreadStatus, VesselId,
 };
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
 use exoskeleton_host::inbox::InMemoryInbox;
@@ -170,6 +170,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         tool_budget_gate: kernel.tool_budget_gate.clone(),
         metrics: None,
         event_tx: kernel.event_tx.clone(),
+        prompt_registry: kernel.prompt_registry.clone(),
     }
 }
 
@@ -248,6 +249,7 @@ async fn setup_with_threads(
         tool_budget_gate: None,
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+        prompt_registry: Arc::new(PromptRegistry::with_defaults()),
     };
 
     (kernel, handler, mock)
@@ -310,6 +312,7 @@ async fn setup_with_threads_custom_backend(
         tool_budget_gate: None,
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+        prompt_registry: Arc::new(PromptRegistry::with_defaults()),
     };
 
     (kernel, handler)
@@ -1268,6 +1271,7 @@ mod proptest_tests {
                 &snapshot,
                 &[],
                 TickId::new(),
+                None,
             ) {
                 Ok(ctx) => {
                     prop_assert!(

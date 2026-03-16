@@ -143,6 +143,9 @@ enum Commands {
 
     /// View sanitized vessel configuration.
     Config,
+
+    /// Reload thread charters from prompt files on disk.
+    ReloadCharters,
 }
 
 #[derive(Subcommand)]
@@ -306,6 +309,10 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
         }
 
         Commands::Config => commands::config::run_config(&client, cli.json).await,
+
+        Commands::ReloadCharters => {
+            commands::reload_charters::run_reload_charters(&client, cli.json).await
+        }
 
         Commands::Bootstrap { .. } => unreachable!("bootstrap is handled in main()"),
         Commands::Start { .. } => unreachable!("start is handled in main()"),

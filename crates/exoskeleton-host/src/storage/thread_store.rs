@@ -285,6 +285,42 @@ impl ThreadStore for SqliteThreadStore {
         Ok(())
     }
 
+    fn update_charter(&self, thread_id: ThreadId, charter: String) -> Result<(), ExoError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
+
+        // Read current spec, update charter, re-serialize
+        let row: String = conn
+            .query_row(
+                "SELECT spec_json FROM thread_specs WHERE thread_id = ?1",
+                rusqlite::params![thread_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    ExoError::Storage(format!("thread not found: {thread_id}"))
+                }
+                other => ExoError::Storage(format!("update_charter query: {other}")),
+            })?;
+
+        let mut spec: ThreadSpec = serde_json::from_str(&row)
+            .map_err(|e| ExoError::Storage(format!("spec deserialization: {e}")))?;
+        spec.charter = charter;
+        let new_json = serde_json::to_string(&spec)
+            .map_err(|e| ExoError::Storage(format!("spec serialization: {e}")))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE thread_specs SET spec_json = ?1, updated_at = ?2 WHERE thread_id = ?3",
+            rusqlite::params![new_json, now, thread_id.to_string()],
+        )
+        .map_err(|e| ExoError::Storage(format!("update_charter: {e}")))?;
+
+        Ok(())
+    }
+
     fn recent_outputs(
         &self,
         thread_id: ThreadId,
@@ -535,5 +571,28 @@ mod tests {
         assert!(store2.get(thread_id).unwrap().is_none());
         assert!(store2.get_last_run(thread_id).unwrap().is_none());
         assert!(store2.recent_outputs(thread_id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sqlite_update_charter_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("threads.db");
+
+        let spec = make_spec("CharterUpdate");
+        let thread_id = spec.thread_id;
+
+        {
+            let store = SqliteThreadStore::open(&path).unwrap();
+            store.save(&spec, ThreadStatus::Active).unwrap();
+            store
+                .update_charter(thread_id, "New charter from test".into())
+                .unwrap();
+        }
+
+        let store2 = SqliteThreadStore::open(&path).unwrap();
+        let (got_spec, _) = store2.get(thread_id).unwrap().unwrap();
+        assert_eq!(got_spec.charter, "New charter from test");
+        // Name should be unchanged
+        assert_eq!(got_spec.name, "CharterUpdate");
     }
 }

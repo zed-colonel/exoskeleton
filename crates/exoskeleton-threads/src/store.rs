@@ -45,6 +45,11 @@ pub trait ThreadStore: Send + Sync {
 
     /// Append an output to the thread's output history.
     fn save_output(&self, output: &ThreadOutput) -> Result<(), ExoError>;
+
+    /// Update the charter text of an existing thread.
+    ///
+    /// Returns `ExoError::Storage` if the thread ID is not found.
+    fn update_charter(&self, thread_id: ThreadId, charter: String) -> Result<(), ExoError>;
 }
 
 /// In-memory thread store for testing.
@@ -172,6 +177,20 @@ impl ThreadStore for InMemoryThreadStore {
             .or_default()
             .push(output.clone());
         Ok(())
+    }
+
+    fn update_charter(&self, thread_id: ThreadId, charter: String) -> Result<(), ExoError> {
+        let mut specs = self
+            .specs
+            .write()
+            .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
+        match specs.get_mut(&thread_id) {
+            Some(entry) => {
+                entry.0.charter = charter;
+                Ok(())
+            }
+            None => Err(ExoError::Storage("thread not found".into())),
+        }
     }
 }
 
@@ -341,5 +360,30 @@ mod tests {
         assert_eq!(recent[0].summary, "test-output");
         assert_eq!(recent[0].recommendations, vec!["rec from test-output"]);
         assert_eq!(recent[0].artifact_id, output.artifact_id);
+    }
+
+    // ── E0-T19: update_charter changes text ──
+
+    #[test]
+    fn update_charter_changes_text() {
+        let store = InMemoryThreadStore::new();
+        let spec = make_spec("Updatable");
+        let tid = spec.thread_id;
+
+        store.save(&spec, ThreadStatus::Active).unwrap();
+
+        store
+            .update_charter(tid, "New charter text".into())
+            .unwrap();
+
+        let (got_spec, _) = store.get(tid).unwrap().unwrap();
+        assert_eq!(got_spec.charter, "New charter text");
+    }
+
+    #[test]
+    fn update_charter_nonexistent_fails() {
+        let store = InMemoryThreadStore::new();
+        let result = store.update_charter(ThreadId::new(), "anything".into());
+        assert!(result.is_err());
     }
 }

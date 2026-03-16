@@ -404,6 +404,20 @@ pub async fn get_inbox_history(
     }
 }
 
+/// POST /api/v1/charters/reload -> Reload thread charters from disk.
+pub async fn post_reload_charters(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.inspector.reload_charters() {
+        Ok(updated) => {
+            let resp = serde_json::json!({
+                "updated": updated,
+                "message": format!("{updated} charter(s) reloaded from disk"),
+            });
+            Json(resp).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// GET /api/v1/config -> Sanitized vessel configuration (I4: no API key values).
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.inspector.config();

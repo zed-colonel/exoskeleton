@@ -165,6 +165,11 @@ impl Vessel {
         // 7.6 Create broadcast channel for real-time events (D2)
         let (event_tx, _) = tokio::sync::broadcast::channel::<LiveEvent>(256);
 
+        // 7.7 Create PromptRegistry (Epoch 0)
+        let mut prompt_registry = exoskeleton_core::prompt::PromptRegistry::with_defaults();
+        crate::prompt_loader::load_prompt_overrides(&mut prompt_registry, &config.data_dir);
+        let prompt_registry = Arc::new(prompt_registry);
+
         let kernel_context = Arc::new(KernelContext {
             snapshot_store: storage.snapshot_store().clone(),
             event_ledger: storage.event_ledger().clone(),
@@ -184,10 +189,14 @@ impl Vessel {
             tool_budget_gate: tool_budget_gate.clone(),
             metrics: None,
             event_tx: event_tx.clone(),
+            prompt_registry: prompt_registry.clone(),
         });
 
         // 8. Register built-in cognitive threads (Sprint 7)
-        exoskeleton_threads::register_builtin_threads(&kernel_context.thread_registry)?;
+        exoskeleton_threads::register_builtin_threads(
+            &kernel_context.thread_registry,
+            &prompt_registry,
+        )?;
 
         // 9. Bootstrap Cognitive AQ engine with KernelContext
         let cognitive_engine = if local_backend.is_some() || frontier_backend.is_some() {

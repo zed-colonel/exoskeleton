@@ -14,7 +14,9 @@ use std::time::Duration;
 use actionqueue_executor_local::CancellationToken;
 use common::{test_config, test_registry};
 use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
-use exoskeleton_core::{ArtifactKind, ArtifactStore, EventType, LiveEvent, VesselId};
+use exoskeleton_core::{
+    ArtifactKind, ArtifactStore, EventType, LiveEvent, PromptRegistry, VesselId,
+};
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
 use exoskeleton_host::inbox::InMemoryInbox;
 use exoskeleton_host::kernel::{KernelContext, WiHostSlot};
@@ -76,6 +78,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         tool_budget_gate: kernel.tool_budget_gate.clone(),
         metrics: None,
         event_tx: kernel.event_tx.clone(),
+        prompt_registry: kernel.prompt_registry.clone(),
     }
 }
 
@@ -140,6 +143,7 @@ async fn setup_kernel_with_host(
         tool_budget_gate: None,
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+        prompt_registry: Arc::new(PromptRegistry::with_defaults()),
     };
 
     (kernel, handler, mock_backend)
@@ -190,6 +194,7 @@ fn setup_kernel_no_host(
         tool_budget_gate: None,
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+        prompt_registry: Arc::new(PromptRegistry::with_defaults()),
     };
 
     (kernel, handler, mock_backend)

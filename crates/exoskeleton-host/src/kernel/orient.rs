@@ -44,6 +44,18 @@ pub fn orient(
             None => None,
         };
 
+    // Resolve the system section template (Epoch 0)
+    let system_section = kernel
+        .prompt_registry
+        .resolve(
+            "context-system-section",
+            &[
+                ("vessel_id", &kernel.vessel_id.to_string()),
+                ("mission", &kernel.mission),
+            ],
+        )
+        .ok();
+
     let sources = ContextSources {
         vessel_id: kernel.vessel_id,
         mission: &kernel.mission,
@@ -54,6 +66,7 @@ pub fn orient(
         episodic_summaries: &episodic_summaries,
         long_term_notes: &long_term_notes,
         working_context: &snapshot.working_context,
+        system_section_override: system_section.as_deref(),
     };
 
     let compiled_context = kernel.context_compiler.compile(&sources)?;
@@ -66,6 +79,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
+    use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{
         EventEntry, EventType, LedgerEntryId, LiveEvent, StateSnapshot, VesselId,
     };
@@ -105,6 +119,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         }
     }
 

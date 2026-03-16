@@ -36,7 +36,7 @@ pub fn decide(
 
     // 2. Build system prompt with available tools from WI Host
     let tools_description = build_tools_description(kernel);
-    let system_prompt = build_system_prompt(kernel, &tools_description);
+    let system_prompt = build_system_prompt(kernel, &tools_description)?;
 
     // 3. Build user message from compiled context
     let user_message = orientation.compiled_context.prompt.clone();
@@ -307,32 +307,14 @@ fn build_tools_description(kernel: &KernelContext) -> String {
     }
 }
 
-fn build_system_prompt(kernel: &KernelContext, tools: &str) -> String {
-    format!(
-        r#"You are an autonomous agent (vessel {vessel_id}).
-Mission: {mission}
-
-You are in the Decide phase of your PODAARA cognitive loop. Based on the context below, decide what actions to take.
-
-Available tools:
-{tools}
-
-Respond with JSON in this exact format:
-{{
-  "reasoning": "Your analysis and chain of thought",
-  "plan_update": "New plan (omit if unchanged)",
-  "working_context_update": "New focus (omit if unchanged)",
-  "actions": [
-    {{"tool_name": "...", "params": {{}}, "rationale": "..."}}
-  ],
-  "memory_notes": ["Observations to remember"]
-}}
-
-If no actions are needed, return an empty actions array.
-Always include reasoning."#,
-        vessel_id = kernel.vessel_id,
-        mission = kernel.mission,
-        tools = tools,
+fn build_system_prompt(kernel: &KernelContext, tools: &str) -> Result<String, ExoError> {
+    kernel.prompt_registry.resolve(
+        "decide-system",
+        &[
+            ("vessel_id", &kernel.vessel_id.to_string()),
+            ("mission", &kernel.mission),
+            ("tools", tools),
+        ],
     )
 }
 
@@ -374,6 +356,7 @@ mod tests {
 
     use exoskeleton_core::artifact::ArtifactKind;
     use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
+    use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{ArtifactStore, LiveEvent};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
@@ -413,6 +396,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         }
     }
 
@@ -630,11 +614,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             test_kernel(dir.path())
         };
-        let prompt = build_system_prompt(&kernel_ctx, "- fs.write: Write a file");
+        let prompt = build_system_prompt(&kernel_ctx, "- fs.write: Write a file").unwrap();
         assert!(prompt.contains("Available tools:"));
         assert!(prompt.contains("fs.write: Write a file"));
         assert!(prompt.contains("test mission"));
-        assert!(prompt.contains("PODAARA"));
     }
 
     #[test]
@@ -692,6 +675,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         }
     }
 
@@ -846,7 +830,11 @@ mod tests {
         kernel.thread_registry.save_output(&thread_output).unwrap();
 
         // Register the Self-Critique thread so it exists
-        exoskeleton_threads::register_builtin_threads(&kernel.thread_registry).unwrap();
+        exoskeleton_threads::register_builtin_threads(
+            &kernel.thread_registry,
+            &PromptRegistry::with_defaults(),
+        )
+        .unwrap();
 
         let mock_local = Arc::new(MockLlmBackend::new(mock_response_with_content(
             "local".into(),
@@ -896,7 +884,11 @@ mod tests {
         kernel.thread_registry.save_output(&thread_output).unwrap();
 
         // Register the Threat Monitor thread so it exists
-        exoskeleton_threads::register_builtin_threads(&kernel.thread_registry).unwrap();
+        exoskeleton_threads::register_builtin_threads(
+            &kernel.thread_registry,
+            &PromptRegistry::with_defaults(),
+        )
+        .unwrap();
 
         let mock_local = Arc::new(MockLlmBackend::new(mock_response_with_content(
             "local".into(),
@@ -944,7 +936,11 @@ mod tests {
         };
         kernel.thread_registry.save_output(&thread_output).unwrap();
 
-        exoskeleton_threads::register_builtin_threads(&kernel.thread_registry).unwrap();
+        exoskeleton_threads::register_builtin_threads(
+            &kernel.thread_registry,
+            &PromptRegistry::with_defaults(),
+        )
+        .unwrap();
 
         let mock_local = Arc::new(MockLlmBackend::new(mock_response_with_content(
             "local".into(),
@@ -995,7 +991,11 @@ mod tests {
         };
         kernel.thread_registry.save_output(&thread_output).unwrap();
 
-        exoskeleton_threads::register_builtin_threads(&kernel.thread_registry).unwrap();
+        exoskeleton_threads::register_builtin_threads(
+            &kernel.thread_registry,
+            &PromptRegistry::with_defaults(),
+        )
+        .unwrap();
 
         let mock_local = Arc::new(MockLlmBackend::new(mock_response_with_content(
             "local".into(),

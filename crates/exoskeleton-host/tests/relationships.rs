@@ -443,6 +443,7 @@ fn context_compilation_with_relationships() {
         episodic_summaries: &[],
         long_term_notes: &[],
         working_context: "",
+        system_section_override: None,
     };
 
     let compiled = compiler.compile(&sources).unwrap();
@@ -593,6 +594,7 @@ fn context_prompt_contains_principal_details() {
         episodic_summaries: &[],
         long_term_notes: &[],
         working_context: "",
+        system_section_override: None,
     };
 
     let compiled = compiler.compile(&sources).unwrap();

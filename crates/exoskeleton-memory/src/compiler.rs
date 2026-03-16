@@ -41,6 +41,10 @@ pub struct ContextSources<'a> {
     pub long_term_notes: &'a [LongTermNote],
     /// Current working context / task focus.
     pub working_context: &'a str,
+    /// Pre-resolved system section template (Epoch 0).
+    /// If Some, used instead of the hardcoded `render_system_section()` output.
+    /// The host layer resolves the template and passes the result as data.
+    pub system_section_override: Option<&'a str>,
 }
 
 /// Result of context compilation.
@@ -443,7 +447,10 @@ impl ContextCompiler {
         vec![
             (
                 "system",
-                render::render_system_section(sources.vessel_id, sources.mission),
+                match sources.system_section_override {
+                    Some(override_text) => format!("=== SYSTEM ===\n{override_text}"),
+                    None => render::render_system_section(sources.vessel_id, sources.mission),
+                },
                 p.system.priority,
             ),
             (
@@ -541,6 +548,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &[],
             working_context: &snapshot.working_context,
+            system_section_override: None,
         }
     }
 
@@ -593,6 +601,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &notes,
             working_context: &snap.working_context,
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -625,6 +634,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -647,6 +657,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -717,6 +728,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &notes,
             working_context: "Current focus",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -770,6 +782,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -808,6 +821,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -856,6 +870,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &notes,
             working_context: "Some focus text",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -912,6 +927,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &notes,
             working_context: "",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -951,6 +967,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
         let result = compiler.compile(&sources).unwrap();
         assert!(!result.prompt.contains("RELATIONSHIPS"));
@@ -976,6 +993,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
         let result = compiler.compile(&sources).unwrap();
         assert!(!result.prompt.contains("THREAD OUTPUTS"));
@@ -1062,6 +1080,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &notes,
             working_context: "Evaluating options",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1150,6 +1169,7 @@ mod tests {
             episodic_summaries: &episodic,
             long_term_notes: &notes,
             working_context: "Current task",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1180,6 +1200,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &[],
             working_context: "",
+            system_section_override: None,
         };
         let result1 = compiler.compile(&sources1).unwrap();
 
@@ -1202,6 +1223,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &notes,
             working_context: "New focus",
+            system_section_override: None,
         };
         let result2 = compiler.compile(&sources2).unwrap();
 
@@ -1237,6 +1259,7 @@ mod tests {
             episodic_summaries: &[],
             long_term_notes: &notes,
             working_context: "",
+            system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();

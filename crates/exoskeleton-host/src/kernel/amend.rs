@@ -410,6 +410,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
+    use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::tick::LlmCallRecord;
     use exoskeleton_core::{
         ArtifactId, ArtifactKind, EnvelopeId, EnvelopeKind, EventType, MessageEnvelope,
@@ -455,6 +456,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         };
         (kernel, inbox)
     }

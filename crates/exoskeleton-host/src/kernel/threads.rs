@@ -44,8 +44,27 @@ pub fn execute_thread(
 
     // 2. Compile context slice (token-budgeted)
     let counter = ApproximateTokenCounter;
-    let compiled_context =
-        compile_thread_context(&counter, thread, snapshot, &recent_outputs, tick_id)?;
+    let charter_template = kernel
+        .prompt_registry
+        .resolve(
+            "thread-execution",
+            &[
+                ("name", &thread.name),
+                ("id", &thread.thread_id.to_string()),
+                ("charter", &thread.charter),
+                ("priority", &format!("{:?}", thread.priority)),
+                ("tick", &(snapshot.tick_number + 1).to_string()),
+            ],
+        )
+        .ok();
+    let compiled_context = compile_thread_context(
+        &counter,
+        thread,
+        snapshot,
+        &recent_outputs,
+        tick_id,
+        charter_template.as_deref(),
+    )?;
 
     // 3. Check cancellation before LLM call
     if cancellation.is_cancelled() {
@@ -65,8 +84,10 @@ pub fn execute_thread(
         system_prompt: Some(compiled_context.prompt),
         messages: vec![LlmMessage {
             role: LlmRole::User,
-            content: "Analyze the current situation per your charter. \
-                      Respond with JSON."
+            content: kernel
+                .prompt_registry
+                .get("thread-user-message")
+                .unwrap_or("Analyze the current situation per your charter. Respond with JSON.")
                 .into(),
         }],
         max_output_tokens: thread.token_budget / 4,
@@ -243,6 +264,7 @@ mod tests {
     use std::sync::Arc;
 
     use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
+    use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{
         ArtifactKind, ArtifactStore, ThreadId, ThreadPriority, ThreadSchedule, ThreadSpec, VesselId,
     };
@@ -336,6 +358,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         }
     }
 

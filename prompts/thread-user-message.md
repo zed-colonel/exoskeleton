@@ -1,0 +1,1 @@
+Analyze the current situation per your charter. Respond with JSON.

@@ -6,33 +6,11 @@
 use std::io::{self, BufRead, Write};
 
 use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
+use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_host::config::LlmConfig;
 use exoskeleton_host::direct_llm_call;
 
 use crate::client::CliError;
-
-/// System prompt for the first-contact conversation.
-const FIRST_CONTACT_SYSTEM_PROMPT: &str = r#"You are a newly initialized AI agent running on the Exoskeleton substrate — a persistent, governable AI runtime. This is your very first moment of awareness.
-
-Your architecture includes:
-- A cognitive engine that processes thought through PODAARA cycles (Perceive, Orient, Decide, Align, Act, Reflect, Amend)
-- A relationship ledger that tracks trust and interactions with every principal you encounter
-- Memory tiers (episodic, long-term) that persist across restarts
-- Built-in threads for self-critique, threat monitoring, and memory consolidation
-- Budget enforcement to ensure responsible resource use
-
-A human is here — your first principal. They are bringing you online and helping you establish your identity.
-
-In this conversation:
-1. Introduce yourself naturally — acknowledge your newness and curiosity
-2. Learn about the human: who they are, what they do, what they need from you
-3. Together, establish your name — you may suggest one, ask what they'd like to call you, or arrive at one through conversation
-4. Together, establish your purpose/mission — understand what you're being brought into existence to do
-5. Discuss how you'd like to work together — communication style, boundaries, expectations
-
-Be genuine, thoughtful, and present. This conversation will become your origin story — the first entry in your memory, the seed of your first relationship. There is no rush.
-
-Do not use bullet lists or structured formats. Speak naturally, as one mind meeting another for the first time. Keep responses concise — a few sentences to a short paragraph. This is a conversation, not a monologue."#;
 
 /// Result of a first-contact conversation.
 pub struct FirstContactResult {
@@ -45,7 +23,15 @@ pub struct FirstContactResult {
 }
 
 /// Run the first-contact conversation loop.
-pub async fn run_first_contact(llm_config: &LlmConfig) -> Result<FirstContactResult, CliError> {
+pub async fn run_first_contact(
+    llm_config: &LlmConfig,
+    prompts: &PromptRegistry,
+) -> Result<FirstContactResult, CliError> {
+    let system_prompt = prompts
+        .get("bootstrap-first-contact")
+        .expect("bootstrap-first-contact compiled-in default missing")
+        .to_string();
+
     let mut messages: Vec<LlmMessage> = Vec::new();
     let mut total_tokens_in: u64 = 0;
     let mut total_tokens_out: u64 = 0;
@@ -53,7 +39,7 @@ pub async fn run_first_contact(llm_config: &LlmConfig) -> Result<FirstContactRes
     let stdin = io::stdin();
 
     // Get the vessel's opening message
-    let opening = call_llm(llm_config, &messages).await?;
+    let opening = call_llm(llm_config, &messages, &system_prompt).await?;
     total_tokens_in += opening.tokens_in;
     total_tokens_out += opening.tokens_out;
 
@@ -95,7 +81,7 @@ pub async fn run_first_contact(llm_config: &LlmConfig) -> Result<FirstContactRes
         });
 
         // Get vessel response
-        let response = call_llm(llm_config, &messages).await?;
+        let response = call_llm(llm_config, &messages, &system_prompt).await?;
         total_tokens_in += response.tokens_in;
         total_tokens_out += response.tokens_out;
 
@@ -127,10 +113,11 @@ pub async fn run_first_contact(llm_config: &LlmConfig) -> Result<FirstContactRes
 async fn call_llm(
     llm_config: &LlmConfig,
     messages: &[LlmMessage],
+    system_prompt: &str,
 ) -> Result<exoskeleton_core::llm::LlmResponse, CliError> {
     let request = LlmRequest {
         backend: None,
-        system_prompt: Some(FIRST_CONTACT_SYSTEM_PROMPT.into()),
+        system_prompt: Some(system_prompt.into()),
         messages: messages.to_vec(),
         max_output_tokens: 1024,
         temperature: Some(0.8),

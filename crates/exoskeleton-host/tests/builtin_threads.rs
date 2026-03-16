@@ -9,8 +9,8 @@ use std::time::Duration;
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse, StopReason};
 use exoskeleton_core::{
-    ArtifactKind, ArtifactStore, EventType, LiveEvent, ThreadPriority, ThreadSchedule,
-    ThreadStatus, VesselId,
+    ArtifactKind, ArtifactStore, EventType, LiveEvent, PromptRegistry, ThreadPriority,
+    ThreadSchedule, ThreadStatus, VesselId,
 };
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
 use exoskeleton_host::inbox::InMemoryInbox;
@@ -147,6 +147,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         tool_budget_gate: kernel.tool_budget_gate.clone(),
         metrics: None,
         event_tx: kernel.event_tx.clone(),
+        prompt_registry: kernel.prompt_registry.clone(),
     }
 }
 
@@ -193,7 +194,7 @@ async fn setup_builtin_threads(
 
     let thread_store = Arc::new(InMemoryThreadStore::new());
     let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
-    register_builtin_threads(&thread_registry).unwrap();
+    register_builtin_threads(&thread_registry, &PromptRegistry::with_defaults()).unwrap();
 
     let kernel = KernelContext {
         snapshot_store: storage.snapshot_store().clone(),
@@ -214,6 +215,7 @@ async fn setup_builtin_threads(
         tool_budget_gate: None,
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+        prompt_registry: Arc::new(PromptRegistry::with_defaults()),
     };
 
     (kernel, handler, mock)
@@ -252,7 +254,7 @@ async fn setup_builtin_threads_custom(
 
     let thread_store = Arc::new(InMemoryThreadStore::new());
     let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
-    register_builtin_threads(&thread_registry).unwrap();
+    register_builtin_threads(&thread_registry, &PromptRegistry::with_defaults()).unwrap();
 
     let kernel = KernelContext {
         snapshot_store: storage.snapshot_store().clone(),
@@ -273,6 +275,7 @@ async fn setup_builtin_threads_custom(
         tool_budget_gate: None,
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+        prompt_registry: Arc::new(PromptRegistry::with_defaults()),
     };
 
     (kernel, handler)
@@ -286,7 +289,7 @@ async fn setup_builtin_threads_custom(
 fn builtin_threads_registered_on_setup() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
     let all = registry.list().unwrap();
     assert_eq!(all.len(), 3);
@@ -313,9 +316,9 @@ fn builtin_threads_registered_on_setup() {
 fn builtin_registration_idempotent() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry).unwrap();
-    register_builtin_threads(&registry).unwrap();
-    register_builtin_threads(&registry).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
     assert_eq!(registry.list().unwrap().len(), 3);
 }
 
@@ -323,7 +326,7 @@ fn builtin_registration_idempotent() {
 fn builtin_registration_preserves_suspended() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
     // Operator suspends Threat Monitor
     registry
@@ -331,7 +334,7 @@ fn builtin_registration_preserves_suspended() {
         .unwrap();
 
     // Re-register (simulate restart)
-    register_builtin_threads(&registry).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
     let (_, status) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();
     assert_eq!(
@@ -821,7 +824,7 @@ async fn replay_tick_record_references_correct_artifacts() {
 fn builtin_threads_due_in_priority_order() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
 
     let due = registry.due_threads(1).unwrap();
     assert_eq!(due.len(), 3);

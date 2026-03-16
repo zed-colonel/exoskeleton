@@ -234,6 +234,7 @@ mod tests {
     use std::time::Duration;
 
     use actionqueue_executor_local::CancellationToken;
+    use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{ArtifactKind, EventType};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
@@ -274,6 +275,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         }
     }
 
@@ -316,6 +318,7 @@ mod tests {
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         }
     }
 
@@ -712,6 +715,7 @@ mod tests {
             tool_budget_gate: kernel.tool_budget_gate.clone(),
             metrics: kernel.metrics.clone(),
             event_tx: kernel.event_tx.clone(),
+            prompt_registry: kernel.prompt_registry.clone(),
         }
     }
 }

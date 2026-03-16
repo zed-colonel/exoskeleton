@@ -71,6 +71,7 @@ mod tests {
                 episodic_summaries: &[],
                 long_term_notes: &[],
                 working_context: "",
+                system_section_override: None,
             };
 
             match compiler.compile(&sources) {

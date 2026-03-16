@@ -386,6 +386,21 @@ impl VesselInspector {
     pub fn config(&self) -> &VesselConfig {
         &self.config
     }
+
+    // ── Epoch 0: Charter hot-reload ──
+
+    /// Reload thread charters from prompt files on disk.
+    ///
+    /// Creates a fresh PromptRegistry, loads overrides from the data directory
+    /// and project-level prompts, then applies any changed charters to the
+    /// thread registry. Returns the number of charters updated.
+    ///
+    /// Note: this is a mutation operation (updates thread store), not a read.
+    pub fn reload_charters(&self) -> Result<u32, ExoError> {
+        let mut prompts = exoskeleton_core::prompt::PromptRegistry::with_defaults();
+        crate::prompt_loader::load_prompt_overrides(&mut prompts, &self.config.data_dir);
+        self.thread_registry.reload_charters(&prompts)
+    }
 }
 
 /// A reconstructed inbox history entry from event ledger data.
@@ -405,6 +420,7 @@ pub struct InboxHistoryEntry {
 mod tests {
     use std::sync::Arc;
 
+    use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::tick::{TickPhase, TickRecord};
     use exoskeleton_core::{EventEntry, EventType, LedgerEntryId, StateSnapshot, TickId, VesselId};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
@@ -506,7 +522,11 @@ mod tests {
         let inspector = test_inspector(dir.path());
 
         // Register built-in threads
-        exoskeleton_threads::register_builtin_threads(&inspector.thread_registry).unwrap();
+        exoskeleton_threads::register_builtin_threads(
+            &inspector.thread_registry,
+            &PromptRegistry::with_defaults(),
+        )
+        .unwrap();
 
         let threads = inspector.thread_status().unwrap();
         assert_eq!(threads.len(), 3, "expected 3 built-in threads");
