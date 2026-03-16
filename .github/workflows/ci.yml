@@ -154,5 +154,11 @@ jobs:
           repository: zed-colonel/actionqueue
           path: actionqueue
           ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
-      - run: docker build -t exoskeleton:ci -f exoskeleton/docker/Dockerfile.vessel exoskeleton/
+      - run: >
+          docker build
+          --build-context actionqueue=actionqueue
+          --build-context worldinterface=worldinterface
+          -t exoskeleton:ci
+          -f exoskeleton/docker/Dockerfile.vessel
+          exoskeleton/
       - run: docker build -t observatory:ci -f exoskeleton/docker/Dockerfile.observatory exoskeleton/

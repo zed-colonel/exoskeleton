@@ -3,6 +3,12 @@ FROM rust:1.89-bookworm AS builder
 
 WORKDIR /build
 
+# Copy local path-patch dependencies (ActionQueue + WorldInterface).
+# Provided via --build-context flags or docker-compose additional_contexts.
+# The workspace Cargo.toml patches resolve ../actionqueue → /actionqueue, etc.
+COPY --from=actionqueue . /actionqueue
+COPY --from=worldinterface . /worldinterface
+
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/exoskeleton-core/Cargo.toml crates/exoskeleton-core/Cargo.toml
@@ -31,6 +37,7 @@ RUN cargo build --release --workspace 2>/dev/null || true
 
 # Now copy real source and build
 COPY crates/ crates/
+COPY prompts/ prompts/
 COPY tests/ tests/
 COPY examples/ examples/
 COPY clippy.toml rustfmt.toml ./

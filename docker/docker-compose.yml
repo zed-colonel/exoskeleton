@@ -25,6 +25,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.vessel
+      additional_contexts:
+        actionqueue: ../../actionqueue
+        worldinterface: ../../worldinterface
     profiles: ["single"]
     user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
     ports:
@@ -46,6 +49,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.vessel
+      additional_contexts:
+        actionqueue: ../../actionqueue
+        worldinterface: ../../worldinterface
     profiles: ["multi"]
     user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
     ports:
@@ -66,6 +72,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.vessel
+      additional_contexts:
+        actionqueue: ../../actionqueue
+        worldinterface: ../../worldinterface
     profiles: ["multi"]
     user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
     ports:
