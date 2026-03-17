@@ -59,6 +59,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/snapshots/at/{tick}",
             get(handlers::get_snapshot_at_tick),
         )
+        .route(
+            "/api/v1/snapshots/at/{tick}/fork",
+            post(handlers::post_fork_snapshot),
+        )
         .route("/api/v1/inbox/history", get(handlers::get_inbox_history))
         .route("/api/v1/config", get(handlers::get_config))
         // Operational endpoints

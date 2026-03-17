@@ -47,6 +47,10 @@ pub enum ExoError {
     #[error("shutdown: {0}")]
     Shutdown(String),
 
+    /// Requested resource not found (E3-S3).
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// Serialization/deserialization error.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
@@ -75,6 +79,7 @@ mod tests {
             ExoError::BudgetExhausted("tokens depleted".into()),
             ExoError::InvariantViolation("I9 violated".into()),
             ExoError::Shutdown("graceful".into()),
+            ExoError::NotFound("no such tick".into()),
         ];
         for e in &errors {
             let display = e.to_string();

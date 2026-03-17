@@ -69,6 +69,22 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
+    /// Create fresh, empty stores in a new data directory.
+    ///
+    /// Like `open()`, but validates that no stores already exist. Returns
+    /// `ExoError::Storage` if the `{data_dir}/exo/` directory already exists.
+    /// This prevents accidentally overwriting an existing vessel's data.
+    pub fn create_fresh(data_dir: &Path) -> Result<Self, ExoError> {
+        let exo_dir = data_dir.join("exo");
+        if exo_dir.exists() {
+            return Err(ExoError::Storage(format!(
+                "data directory already has stores: {}",
+                exo_dir.display()
+            )));
+        }
+        Self::open(data_dir)
+    }
+
     /// Open or create all stores under the given data directory.
     ///
     /// Creates `{data_dir}/exo/` if it doesn't exist (should already exist
@@ -402,6 +418,34 @@ mod tests {
             exoskeleton_core::BudgetStore::load(mgr.budget_store().as_ref())
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    // ── E3-S3: StorageManager::create_fresh ──
+
+    #[test]
+    fn create_fresh_succeeds_on_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let _mgr = StorageManager::create_fresh(dir.path()).unwrap();
+        let exo_dir = dir.path().join("exo");
+        assert!(exo_dir.join("artifacts.db").exists());
+        assert!(exo_dir.join("snapshots.db").exists());
+        assert!(exo_dir.join("events.db").exists());
+        assert!(exo_dir.join("ticks.db").exists());
+        assert!(exo_dir.join("memory.db").exists());
+        assert!(exo_dir.join("threads.db").exists());
+        assert!(exo_dir.join("relationships.db").exists());
+        assert!(exo_dir.join("budget.db").exists());
+    }
+
+    #[test]
+    fn create_fresh_rejects_existing_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let _mgr1 = StorageManager::open(dir.path()).unwrap();
+        // Second call to create_fresh should fail
+        let result = StorageManager::create_fresh(dir.path());
+        assert!(
+            matches!(result, Err(ExoError::Storage(msg)) if msg.contains("already has stores"))
         );
     }
 }

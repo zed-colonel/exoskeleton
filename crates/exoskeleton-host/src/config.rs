@@ -294,6 +294,54 @@ impl VesselConfig {
         Ok(())
     }
 
+    /// Generate a vessel.toml file for a forked vessel.
+    ///
+    /// Creates a `VesselConfigFile` from this config, overriding the vessel_id,
+    /// data_dir, and optionally the mission. Writes the TOML to
+    /// `{data_dir}/vessel.toml` and returns the path.
+    pub fn generate_fork_config(
+        &self,
+        new_vessel_id: VesselId,
+        new_data_dir: &Path,
+        mission_override: Option<&str>,
+    ) -> Result<PathBuf, ExoError> {
+        let config_file = VesselConfigFile {
+            vessel: VesselSection {
+                vessel_id: Some(new_vessel_id.to_string()),
+                mission: mission_override.unwrap_or(&self.mission).to_string(),
+                data_dir: new_data_dir.to_path_buf(),
+                master_loop_interval_secs: self.master_loop_interval_secs,
+                inbox_dir: None,
+            },
+            cognitive: CognitiveSection {
+                tick_interval_ms: self.cognitive_tick_interval.as_millis() as u64,
+                dispatch_concurrency: self.cognitive_dispatch_concurrency.get(),
+                lease_timeout_secs: self.cognitive_lease_timeout_secs,
+                budget: self.cognitive_budget.clone(),
+            },
+            tool: ToolSection {
+                tick_interval_ms: self.tool_tick_interval.as_millis() as u64,
+                dispatch_concurrency: self.tool_dispatch_concurrency.get(),
+                budget: self.tool_budget.clone(),
+            },
+            llm: self.llm_config.clone(),
+            daemon: None,
+        };
+
+        let toml_str = toml::to_string_pretty(&config_file)
+            .map_err(|e| ExoError::Config(format!("failed to serialize fork config: {e}")))?;
+
+        let config_path = new_data_dir.join("vessel.toml");
+        std::fs::write(&config_path, &toml_str).map_err(|e| {
+            ExoError::Storage(format!(
+                "failed to write fork config to {}: {e}",
+                config_path.display()
+            ))
+        })?;
+
+        Ok(config_path)
+    }
+
     /// Load configuration from a TOML file, applying environment variable overrides.
     ///
     /// Env vars (all optional, override TOML values):
@@ -398,7 +446,7 @@ fn default_600() -> u64 {
 /// All Duration values are represented as integer milliseconds.
 /// All NonZeroUsize values are represented as plain usize (validated on conversion).
 /// Optional fields use serde defaults.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VesselConfigFile {
     /// `[vessel]` section.
     pub vessel: VesselSection,
@@ -417,7 +465,7 @@ pub struct VesselConfigFile {
 }
 
 /// The `[daemon]` section of the TOML config file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonSection {
     /// Listen address as "host:port" string. Default: 127.0.0.1:7600.
     pub listen: Option<String>,
@@ -427,7 +475,7 @@ pub struct DaemonSection {
 }
 
 /// The `[vessel]` section of the TOML config file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VesselSection {
     /// UUID string. Generated if omitted.
     pub vessel_id: Option<String>,
@@ -444,7 +492,7 @@ pub struct VesselSection {
 }
 
 /// The `[cognitive]` section of the TOML config file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CognitiveSection {
     /// Tick interval in milliseconds. Default: 100.
     #[serde(default = "default_100")]
@@ -472,7 +520,7 @@ impl Default for CognitiveSection {
 }
 
 /// The `[tool]` section of the TOML config file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolSection {
     /// Tick interval in milliseconds. Default: 50.
     #[serde(default = "default_50")]
@@ -1186,5 +1234,87 @@ listen = "not-a-socket-addr"
             vec!["http://preserved:5000"],
             "T-3: absent env var preserves TOML"
         );
+    }
+
+    // ── E3-S3: Fork Config Generation ──
+
+    #[test]
+    fn generate_fork_config_creates_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_config = VesselConfig {
+            mission: "original mission".into(),
+            llm_config: LlmConfig {
+                local: Some(LocalModelConfig {
+                    endpoint: "http://localhost:11434".into(),
+                    model: "llama3.2:latest".into(),
+                    api_format: LocalApiFormat::OpenAICompat,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let new_id = VesselId::new();
+        let path = source_config
+            .generate_fork_config(new_id, dir.path(), None)
+            .unwrap();
+
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        let file: VesselConfigFile = toml::from_str(&content).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.vessel_id, new_id);
+        assert_eq!(config.mission, "original mission");
+        assert!(config.llm_config.local.is_some());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn generate_fork_config_applies_mission_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_config = VesselConfig {
+            mission: "original mission".into(),
+            ..Default::default()
+        };
+
+        let new_id = VesselId::new();
+        let path = source_config
+            .generate_fork_config(new_id, dir.path(), Some("overridden mission"))
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let file: VesselConfigFile = toml::from_str(&content).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.mission, "overridden mission");
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn generate_fork_config_roundtrip_preserves_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_config = VesselConfig {
+            mission: "test".into(),
+            cognitive_tick_interval: Duration::from_millis(200),
+            cognitive_dispatch_concurrency: NonZeroUsize::new(8).unwrap(),
+            cognitive_lease_timeout_secs: 300,
+            tool_tick_interval: Duration::from_millis(25),
+            tool_dispatch_concurrency: NonZeroUsize::new(2).unwrap(),
+            master_loop_interval_secs: 30,
+            ..Default::default()
+        };
+
+        let path = source_config
+            .generate_fork_config(VesselId::new(), dir.path(), None)
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let file: VesselConfigFile = toml::from_str(&content).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.cognitive_tick_interval, Duration::from_millis(200));
+        assert_eq!(config.cognitive_dispatch_concurrency.get(), 8);
+        assert_eq!(config.cognitive_lease_timeout_secs, 300);
+        assert_eq!(config.tool_tick_interval, Duration::from_millis(25));
+        assert_eq!(config.tool_dispatch_concurrency.get(), 2);
+        assert_eq!(config.master_loop_interval_secs, 30);
     }
 }

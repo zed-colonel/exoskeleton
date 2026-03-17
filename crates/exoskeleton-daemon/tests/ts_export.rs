@@ -25,7 +25,7 @@ use exoskeleton_core::{
 };
 // ── exoskeleton-daemon types ──
 use exoskeleton_daemon::handlers::{
-    MemoryResponse, SanitizedConfig, SanitizedFrontierConfig, SanitizedLocalConfig,
+    ForkResponse, MemoryResponse, SanitizedConfig, SanitizedFrontierConfig, SanitizedLocalConfig,
 };
 // ── exoskeleton-host types ──
 use exoskeleton_host::inspect::{
@@ -115,6 +115,7 @@ fn export_typescript_types() {
     emit!(output, &cfg, SanitizedFrontierConfig);
     emit!(output, &cfg, SanitizedConfig);
     emit!(output, &cfg, MemoryResponse);
+    emit!(output, &cfg, ForkResponse);
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../observatory/src/api/types.generated.ts");
@@ -135,6 +136,10 @@ fn export_typescript_types() {
     assert!(
         content.contains("SanitizedConfig"),
         "Missing SanitizedConfig type"
+    );
+    assert!(
+        content.contains("ForkResponse"),
+        "Missing ForkResponse type"
     );
 }
 

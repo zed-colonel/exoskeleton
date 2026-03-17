@@ -13,7 +13,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use exoskeleton_core::{
-    ArtifactId, EnvelopeId, EnvelopeKind, LlmBackend, MessageEnvelope, PrincipalId, TickId,
+    ArtifactId, EnvelopeId, EnvelopeKind, ExoError, LlmBackend, MessageEnvelope, PrincipalId,
+    TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
 use serde::{Deserialize, Serialize};
@@ -530,4 +531,61 @@ pub struct SanitizedFrontierConfig {
     model: String,
     /// Name of the env var (NOT the key value).
     api_key_env: String,
+}
+
+// ── E3-S3: Snapshot Fork ──
+
+/// Request body for POST /api/v1/snapshots/at/{tick}/fork.
+#[derive(Debug, Deserialize)]
+pub struct ForkRequest {
+    /// Target data directory for the forked vessel. Must not already exist.
+    pub data_dir: String,
+    /// Optional mission override. If None, copies the source vessel's mission.
+    pub mission: Option<String>,
+}
+
+/// Response body for POST /api/v1/snapshots/at/{tick}/fork.
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
+pub struct ForkResponse {
+    /// The new vessel's unique identity.
+    pub vessel_id: exoskeleton_core::VesselId,
+    /// Path to the generated vessel.toml configuration file.
+    pub config_path: String,
+    /// Path to the new vessel's data directory.
+    pub data_dir: String,
+    /// The source tick number that was forked from.
+    pub forked_from_tick: u64,
+    /// The source vessel's ID (for provenance tracking).
+    pub source_vessel_id: exoskeleton_core::VesselId,
+}
+
+/// POST /api/v1/snapshots/at/{tick}/fork -> ForkResponse or error.
+pub async fn post_fork_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(tick): Path<u64>,
+    Json(req): Json<ForkRequest>,
+) -> impl IntoResponse {
+    let target_dir = std::path::PathBuf::from(&req.data_dir);
+
+    match state
+        .inspector
+        .fork_from_snapshot(tick, &target_dir, req.mission.as_deref())
+    {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(ForkResponse {
+                vessel_id: result.vessel_id,
+                config_path: result.config_path.to_string_lossy().into_owned(),
+                data_dir: result.data_dir.to_string_lossy().into_owned(),
+                forked_from_tick: result.forked_from_tick,
+                source_vessel_id: result.source_vessel_id,
+            }),
+        )
+            .into_response(),
+        Err(ExoError::NotFound(msg)) => (StatusCode::NOT_FOUND, msg).into_response(),
+        Err(ExoError::Config(msg)) if msg.contains("already exists") => {
+            (StatusCode::CONFLICT, msg).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }

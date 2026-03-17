@@ -257,6 +257,41 @@ impl DaemonClient {
         Ok(value)
     }
 
+    /// POST /api/v1/snapshots/at/{tick}/fork -> fork result.
+    pub async fn fork_snapshot(
+        &self,
+        tick: u64,
+        data_dir: &str,
+        mission: Option<&str>,
+    ) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}/api/v1/snapshots/at/{tick}/fork", self.base_url);
+        let mut body = serde_json::json!({ "data_dir": data_dir });
+        if let Some(m) = mission {
+            body["mission"] = serde_json::Value::String(m.to_string());
+        }
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CliError::Connection(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("<unreadable>"));
+
+        if status >= 400 {
+            return Err(CliError::DaemonError { status, body: text });
+        }
+
+        let value = serde_json::from_str(&text)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
     /// GET /api/v1/config -> SanitizedConfig.
     pub async fn config(&self) -> Result<serde_json::Value, CliError> {
         let resp = self.get_raw("/api/v1/config").await?;

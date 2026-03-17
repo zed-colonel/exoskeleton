@@ -4,6 +4,7 @@
 //! budget trackers, and engine slots into coherent query results. All methods
 //! are non-mutating and safe to call concurrently from the HTTP daemon.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -11,9 +12,10 @@ use exoskeleton_core::budget::ThrashLevel;
 use exoskeleton_core::relationship::{RelationshipRecord, RelationshipSnapshot};
 use exoskeleton_core::tick::TickRecord;
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactStore, EpisodicSummary, EventEntry, EventLedger, EventType,
-    ExoError, LongTermNote, PrincipalId, SnapshotStore, StateSnapshot, ThreadPriority,
-    ThreadSchedule, ThreadStatus, TickId, TickStore, VesselStatus,
+    Artifact, ArtifactId, ArtifactKind, ArtifactStore, BudgetStatus, EpisodicSummary, EventEntry,
+    EventLedger, EventType, ExoError, LedgerEntryId, LongTermNote, PrincipalId, SnapshotStore,
+    StateSnapshot, ThreadPriority, ThreadSchedule, ThreadStatus, TickId, TickStore, VesselId,
+    VesselStatus,
 };
 use exoskeleton_memory::MemoryStore;
 use exoskeleton_relationship::{compile_relationship_snapshot, RelationshipLedger};
@@ -25,6 +27,20 @@ use crate::budget::{CognitiveBudgetTracker, ToolBudgetGate};
 use crate::config::VesselConfig;
 use crate::kernel::WiHostSlot;
 use crate::storage::StorageManager;
+
+/// Fork result returned by `fork_from_snapshot()`.
+pub struct ForkResult {
+    /// The new vessel's unique identity.
+    pub vessel_id: VesselId,
+    /// Path to the generated vessel.toml.
+    pub config_path: PathBuf,
+    /// Path to the new data directory.
+    pub data_dir: PathBuf,
+    /// The source tick number.
+    pub forked_from_tick: u64,
+    /// The source vessel's ID.
+    pub source_vessel_id: VesselId,
+}
 
 /// Read-only inspection surface over all vessel state.
 ///
@@ -429,6 +445,122 @@ impl VesselInspector {
         crate::prompt_loader::load_prompt_overrides(&mut prompts, &self.config.data_dir);
         self.thread_registry.reload_charters(&prompts)
     }
+
+    // ── E3-S3: Snapshot Fork ──
+
+    /// Fork a new vessel from a historical snapshot.
+    ///
+    /// Creates a new data directory with empty stores, seeds the initial
+    /// snapshot from the source vessel's state at `tick_number`, generates
+    /// a vessel.toml, and records a VesselForked event in the source ledger.
+    ///
+    /// Note: this is a creation/mutation operation, not a read.
+    pub fn fork_from_snapshot(
+        &self,
+        tick_number: u64,
+        target_data_dir: &Path,
+        mission_override: Option<&str>,
+    ) -> Result<ForkResult, ExoError> {
+        // 1. Load source snapshot at the requested tick
+        let source_snapshot = self
+            .storage
+            .snapshot_store()
+            .at_tick(tick_number)?
+            .ok_or_else(|| ExoError::NotFound(format!("no snapshot at tick {tick_number}")))?;
+
+        // 2. Validate target data directory
+        if target_data_dir.exists() {
+            return Err(ExoError::Config(format!(
+                "target data directory already exists: {}",
+                target_data_dir.display()
+            )));
+        }
+
+        // 3. Generate new VesselId
+        let new_vessel_id = VesselId::new();
+
+        // 4. Create data directory structure
+        // Note: exo/ is created by StorageManager::create_fresh() in step 5.
+        let dirs = [
+            target_data_dir.join("cognitive-aq"),
+            target_data_dir.join("wi/aq"),
+            target_data_dir.join("wi"),
+            target_data_dir.join("inbox"),
+        ];
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                ExoError::Storage(format!(
+                    "failed to create fork directory {}: {e}",
+                    dir.display()
+                ))
+            })?;
+        }
+
+        // 5. Initialize empty stores
+        let fork_storage = StorageManager::create_fresh(target_data_dir)?;
+
+        // 6. Seed initial snapshot (tick 0, new vessel_id, forked cognitive state)
+        let forked_snapshot = StateSnapshot {
+            vessel_id: new_vessel_id,
+            tick_number: 0,
+            mission: mission_override
+                .unwrap_or(&source_snapshot.mission)
+                .to_string(),
+            plan: source_snapshot.plan.clone(),
+            status: VesselStatus::Idle,
+            working_context: source_snapshot.working_context.clone(),
+            thread_summaries: Vec::new(),
+            relationship_snapshot_ref: None,
+            budget_status: BudgetStatus::unlimited(),
+            last_action_summary: None,
+            started_at: None,
+            updated_at: Utc::now(),
+        };
+        fork_storage.snapshot_store().save(&forked_snapshot)?;
+
+        // 7. Generate vessel.toml
+        let config_path =
+            self.config
+                .generate_fork_config(new_vessel_id, target_data_dir, mission_override)?;
+
+        // 8. Record VesselForked event in source vessel's event ledger
+        let fork_metadata = serde_json::json!({
+            "source_vessel_id": self.config.vessel_id.to_string(),
+            "source_tick": tick_number,
+            "fork_vessel_id": new_vessel_id.to_string(),
+            "fork_data_dir": target_data_dir.to_string_lossy(),
+        });
+        let fork_artifact = Artifact::new(
+            ArtifactKind::Receipt,
+            serde_json::to_vec(&fork_metadata).unwrap_or_default(),
+            "application/json".into(),
+        );
+        self.storage.artifact_store().put(&fork_artifact)?;
+
+        let event = EventEntry {
+            id: LedgerEntryId::new(),
+            tick_id: None,
+            event_type: EventType::VesselForked,
+            payload_ref: Some(fork_artifact.id),
+            summary: format!(
+                "Forked vessel {} from tick {} → new vessel {} at {}",
+                self.config.vessel_id,
+                tick_number,
+                new_vessel_id,
+                target_data_dir.display()
+            ),
+            timestamp: Utc::now(),
+        };
+        self.storage.event_ledger().append(&event)?;
+
+        Ok(ForkResult {
+            vessel_id: new_vessel_id,
+            config_path,
+            data_dir: target_data_dir.to_path_buf(),
+            forked_from_tick: tick_number,
+            source_vessel_id: self.config.vessel_id,
+        })
+    }
 }
 
 /// A reconstructed inbox history entry from event ledger data.
@@ -621,5 +753,183 @@ mod tests {
         // Empty ledger should produce an empty snapshot
         let snapshot = inspector.relationship_snapshot().unwrap();
         assert!(snapshot.principals.is_empty());
+    }
+
+    // ── E3-S3: Snapshot Fork Tests ──
+
+    #[test]
+    fn fork_creates_data_directory_structure() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        // Seed a source snapshot at tick 5
+        let snap = StateSnapshot {
+            vessel_id: VesselId::new(),
+            tick_number: 5,
+            mission: "source mission".into(),
+            plan: Some("the plan".into()),
+            status: VesselStatus::Idle,
+            working_context: "working on something".into(),
+            thread_summaries: Vec::new(),
+            relationship_snapshot_ref: None,
+            budget_status: BudgetStatus::unlimited(),
+            last_action_summary: Some("did something".into()),
+            started_at: Some(Utc::now()),
+            updated_at: Utc::now(),
+        };
+        inspector.storage.snapshot_store().save(&snap).unwrap();
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        let fork_path = fork_dir.path().join("my-fork");
+        let _result = inspector.fork_from_snapshot(5, &fork_path, None).unwrap();
+
+        // Verify directory structure (E3-T23)
+        assert!(fork_path.join("cognitive-aq").is_dir());
+        assert!(fork_path.join("wi/aq").is_dir());
+        assert!(fork_path.join("wi").is_dir());
+        assert!(fork_path.join("exo").is_dir());
+        assert!(fork_path.join("inbox").is_dir());
+    }
+
+    #[test]
+    fn fork_initializes_empty_stores() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        let mut snap = StateSnapshot::initial(VesselId::new(), "test".into());
+        snap.tick_number = 1;
+        snap.updated_at = Utc::now();
+        inspector.storage.snapshot_store().save(&snap).unwrap();
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        let fork_path = fork_dir.path().join("fork");
+        inspector.fork_from_snapshot(1, &fork_path, None).unwrap();
+
+        // Verify stores are created and empty (E3-T24)
+        let fork_storage = StorageManager::open(&fork_path).unwrap();
+        assert!(fork_storage.tick_store().latest().unwrap().is_none());
+        assert!(fork_storage.event_ledger().recent(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fork_seeds_initial_snapshot() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        let source_snap = StateSnapshot {
+            vessel_id: VesselId::new(),
+            tick_number: 3,
+            mission: "original mission".into(),
+            plan: Some("execute plan B".into()),
+            status: VesselStatus::Acting,
+            working_context: "analyzing data".into(),
+            thread_summaries: vec![exoskeleton_core::snapshot::ThreadSummary {
+                thread_id: exoskeleton_core::ThreadId::new(),
+                name: "Threat Monitor".into(),
+                status: ThreadStatus::Active,
+                last_output_summary: Some("no threats".into()),
+                token_budget_remaining: 5000,
+            }],
+            relationship_snapshot_ref: Some(ArtifactId::from_content(b"rel")),
+            budget_status: BudgetStatus::unlimited(),
+            last_action_summary: Some("wrote file".into()),
+            started_at: Some(Utc::now()),
+            updated_at: Utc::now(),
+        };
+        inspector
+            .storage
+            .snapshot_store()
+            .save(&source_snap)
+            .unwrap();
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        let fork_path = fork_dir.path().join("fork");
+        let result = inspector.fork_from_snapshot(3, &fork_path, None).unwrap();
+
+        // Verify seeded snapshot (E3-T25)
+        let fork_storage = StorageManager::open(&fork_path).unwrap();
+        let forked = fork_storage.snapshot_store().latest().unwrap().unwrap();
+        assert_eq!(forked.tick_number, 0);
+        assert_eq!(forked.vessel_id, result.vessel_id);
+        assert_ne!(forked.vessel_id, source_snap.vessel_id);
+        assert_eq!(forked.mission, "original mission");
+        assert_eq!(forked.plan, Some("execute plan B".into()));
+        assert_eq!(forked.working_context, "analyzing data");
+        assert_eq!(forked.status, VesselStatus::Idle);
+        assert!(forked.thread_summaries.is_empty());
+        assert!(forked.relationship_snapshot_ref.is_none());
+        assert!(forked.started_at.is_none());
+        assert!(forked.last_action_summary.is_none());
+    }
+
+    #[test]
+    fn fork_records_vessel_forked_event_in_source() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        let snap = StateSnapshot::initial(VesselId::new(), "test".into());
+        inspector.storage.snapshot_store().save(&snap).unwrap();
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        let fork_path = fork_dir.path().join("fork");
+        inspector.fork_from_snapshot(0, &fork_path, None).unwrap();
+
+        // Verify VesselForked event in source (E3-T27)
+        let events = inspector
+            .storage
+            .event_ledger()
+            .by_type(EventType::VesselForked, 1)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].payload_ref.is_some());
+        assert!(events[0].summary.contains("Forked vessel"));
+    }
+
+    #[test]
+    fn fork_returns_not_found_for_nonexistent_tick() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        let fork_path = fork_dir.path().join("fork");
+        let result = inspector.fork_from_snapshot(99, &fork_path, None);
+
+        // E3-T28
+        assert!(matches!(result, Err(ExoError::NotFound(_))));
+    }
+
+    #[test]
+    fn fork_returns_error_if_data_dir_exists() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        let snap = StateSnapshot::initial(VesselId::new(), "test".into());
+        inspector.storage.snapshot_store().save(&snap).unwrap();
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        // fork_dir.path() already exists (tempdir creates it)
+        let result = inspector.fork_from_snapshot(0, fork_dir.path(), None);
+
+        // E3-T29
+        assert!(matches!(result, Err(ExoError::Config(msg)) if msg.contains("already exists")));
+    }
+
+    #[test]
+    fn fork_with_mission_override() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(source_dir.path());
+
+        let snap = StateSnapshot::initial(VesselId::new(), "original".into());
+        inspector.storage.snapshot_store().save(&snap).unwrap();
+
+        let fork_dir = tempfile::tempdir().unwrap();
+        let fork_path = fork_dir.path().join("fork");
+        inspector
+            .fork_from_snapshot(0, &fork_path, Some("new mission"))
+            .unwrap();
+
+        let fork_storage = StorageManager::open(&fork_path).unwrap();
+        let forked = fork_storage.snapshot_store().latest().unwrap().unwrap();
+        assert_eq!(forked.mission, "new mission");
     }
 }

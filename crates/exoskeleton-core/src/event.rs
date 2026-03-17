@@ -72,6 +72,8 @@ pub enum EventType {
     BudgetConsumed,
     /// A message was received via the inbox (D2).
     MessageReceived,
+    /// A snapshot fork was created from this vessel (E3-S3).
+    VesselForked,
     /// An error occurred.
     Error,
 }
@@ -143,6 +145,7 @@ mod tests {
             EventType::RelationshipUpdated,
             EventType::BudgetConsumed,
             EventType::MessageReceived,
+            EventType::VesselForked,
             EventType::Error,
         ];
         for event_type in &variants {

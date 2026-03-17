@@ -146,6 +146,18 @@ enum Commands {
 
     /// Reload thread charters from prompt files on disk.
     ReloadCharters,
+
+    /// Fork a new vessel from a historical snapshot.
+    Fork {
+        /// Tick number to fork from.
+        tick: u64,
+        /// Target data directory for the forked vessel.
+        #[arg(long)]
+        data_dir: String,
+        /// Optional mission override.
+        #[arg(long)]
+        mission: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -313,6 +325,12 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
         Commands::ReloadCharters => {
             commands::reload_charters::run_reload_charters(&client, cli.json).await
         }
+
+        Commands::Fork {
+            tick,
+            data_dir,
+            mission,
+        } => commands::fork::run_fork(client, *tick, data_dir, mission.as_deref(), cli.json).await,
 
         Commands::Bootstrap { .. } => unreachable!("bootstrap is handled in main()"),
         Commands::Start { .. } => unreachable!("start is handled in main()"),

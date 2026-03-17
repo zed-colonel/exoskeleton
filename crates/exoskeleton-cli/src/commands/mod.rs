@@ -9,6 +9,7 @@ pub mod budget;
 pub mod config;
 pub mod engines;
 pub mod events;
+pub mod fork;
 pub mod inbox_history;
 pub mod inspect;
 pub mod memory;
