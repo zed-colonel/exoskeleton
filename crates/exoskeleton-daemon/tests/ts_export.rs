@@ -119,6 +119,9 @@ fn export_typescript_types() {
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../observatory/src/api/types.generated.ts");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("failed to create output directory");
+    }
     std::fs::write(&path, &output).expect("failed to write types.generated.ts");
 
     // Verify the file was written
