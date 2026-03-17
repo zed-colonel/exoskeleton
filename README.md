@@ -62,8 +62,8 @@ Exoskeleton operates **two physically separate ActionQueue engines** (invariant 
 
 ### Observability
 
-- **HTTP daemon** -- axum-based REST API with 12 endpoints
-- **CLI** -- `exo` binary with `bootstrap`, `start`, `inspect`, `thread`, `relationship`, `budget`, `events`, `engines`, `send` commands
+- **HTTP daemon** -- axum-based REST API with 24 endpoints + WebSocket
+- **CLI** -- `exo` binary with `bootstrap`, `start`, `inspect`, `thread`, `relationship`, `budget`, `events`, `engines`, `send`, `artifact`, `memory`, `snapshots`, `inbox-history`, `config`, `reload-charters`, `fork` commands
 - **Docker** -- multi-stage build, 151MB image, compose profiles for single and multi-vessel
 - **Prometheus metrics** -- `exo_ticks_total`, `exo_tick_duration_seconds`, `exo_current_tick_number`
 - **8 SQLite stores** -- independently queryable, WAL-mode, backup-friendly
@@ -220,7 +220,7 @@ exo engines                        # Dual engine health
 
 ```bash
 cargo build --workspace                               # Build all crates
-cargo test --workspace                                # Run all tests (~772)
+cargo test --workspace                                # Run all tests (~1,149)
 cargo clippy --all --all-targets -- -D warnings       # Lint (strict)
 cargo fmt --all -- --check                            # Format check
 cargo doc --workspace --no-deps                       # Build docs
@@ -248,7 +248,7 @@ Nine governing principles enforced across all crates:
 
 ## Testing
 
-~758 tests across unit, integration, and acceptance levels:
+~1,149 tests (886 Rust + 263 TypeScript) across unit, integration, and acceptance levels:
 
 - **Unit tests** -- in-crate `#[cfg(test)] mod tests` blocks
 - **Integration tests** -- multi-crate interaction tests in `exoskeleton-host`
@@ -279,6 +279,7 @@ See [`docs/configuration.md`](docs/configuration.md) for the full reference.
 - [Configuration reference](docs/configuration.md)
 - [Acceptance test taxonomy](docs/acceptance-test-taxonomy.md)
 - [Data directory layout](docs/data-directory.md)
+- [Relationship demo walkthrough](docs/examples/relationship-demo.md)
 - [Project charter](exoskeleton_charter_1.0.md)
 - [Invariant boundaries policy](exoskeleton_invariant_boundaries_policy_1.0.md)
 - [Scope appendix](exoskeleton_scope_appendix_1.0.md)

@@ -147,6 +147,8 @@ listen = "127.0.0.1:7600"
 | `master_loop_interval_secs` | u64 | No | `60` | PODAARA tick interval in seconds (must be >= 1 and < `lease_timeout_secs`) |
 | `inbox_dir` | Path | No | `{data_dir}/inbox/` | Directory for the file-based inbox |
 
+**Forked vessels:** When a vessel is created via snapshot forking, the `vessel.toml` is auto-generated with a new `vessel_id`, the fork target's `data_dir`, and the source vessel's LLM/budget/engine settings. The `[daemon]` section is intentionally omitted to prevent port conflicts -- the operator adds it if needed.
+
 ### `[cognitive]`
 
 | Field | Type | Required | Default | Description |

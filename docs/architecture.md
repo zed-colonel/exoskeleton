@@ -211,6 +211,24 @@ The relationship substrate provides trust-based governance:
 
 ---
 
+## Snapshot Forking
+
+Exoskeleton supports creating a new vessel from a historical tick's cognitive state
+via `exo fork <tick>` or `POST /api/v1/snapshots/at/{tick}/fork`.
+
+A fork creates a **state-seeded vessel** -- a new entity with a new VesselId and fresh
+stores, initialized with the plan and working context from the source snapshot. The
+forked vessel:
+
+- Has its own data directory with the full dual-engine structure (I9)
+- Gets a generated vessel.toml copying the source LLM, budget, and engine config
+- Starts from tick 0 with empty history -- it's "new game+" not a timeline branch
+- Provenance is tracked: the source vessel records a `VesselForked` event (I3)
+
+See [Data Directory Layout](data-directory.md) for the fork directory structure.
+
+---
+
 ## Memory & Context Compilation
 
 Exoskeleton maintains three memory tiers, all feeding into a token-budgeted context window each tick:
