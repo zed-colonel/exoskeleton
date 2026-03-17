@@ -167,6 +167,7 @@ mod tests {
             actions_taken: Vec::new(),
             llm_calls: Vec::new(),
             decision_rationale: None,
+            context_breakdown_ref: None,
         };
 
         assert_eq!(record.snapshot_before, snap_artifact.id);

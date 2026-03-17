@@ -18,7 +18,7 @@ use crate::ExoError;
 /// plans, receipts, thread outputs, relationship entries, memory, decisions,
 /// and envelopes. Content-addressing via `ArtifactId` (SHA-256 of `content`)
 /// provides deduplication and tamper detection (I3: replayable).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Artifact {
     /// Content-addressed ID (SHA-256 of `content`).
     pub id: ArtifactId,
@@ -85,7 +85,7 @@ impl Artifact {
 }
 
 /// Classification of artifact content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     /// A State Snapshot (the single authoritative view of vessel state).
@@ -109,10 +109,13 @@ pub enum ArtifactKind {
     LlmResponse,
     /// A TickRecord artifact (Sprint 5). Contains a serialized TickRecord as JSON.
     Tick,
+    /// A ContextBreakdown artifact (E3-S2). Contains a serialized CompiledContext as JSON.
+    /// Shows per-section token allocation from the Orient step.
+    ContextBreakdown,
 }
 
 /// Lightweight reference to an artifact (id + kind) for embedding in other structures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ArtifactRef {
     /// Content-addressed ID.
     pub id: ArtifactId,
@@ -225,6 +228,7 @@ mod tests {
             ArtifactKind::Envelope,
             ArtifactKind::LlmResponse,
             ArtifactKind::Tick,
+            ArtifactKind::ContextBreakdown,
         ];
         for kind in &variants {
             let json = serde_json::to_string(kind).unwrap();

@@ -13,7 +13,7 @@ use crate::ExoError;
 /// All budgets are enforced per time window. When a window expires, budgets are
 /// replenished. This prevents unbounded accumulation while allowing bursty usage
 /// within each window.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct CognitiveBudgetConfig {
     /// Total local model tokens per window (input + output combined).
     pub local_token_budget: u64,
@@ -70,7 +70,7 @@ impl CognitiveBudgetConfig {
 /// Configuration for tool execution rate limits.
 ///
 /// Enforced independently of cognitive budgets (I6, I9).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ToolBudgetConfig {
     /// Maximum tool invocations per time window.
     pub max_invocations_per_window: u64,
@@ -105,7 +105,7 @@ impl ToolBudgetConfig {
 }
 
 /// Policy for escalating from local to frontier model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct EscalationPolicy {
     /// Self-Critique uncertainty threshold for frontier escalation (0.0-1.0).
     pub escalate_on_uncertainty: f64,
@@ -174,7 +174,9 @@ pub struct BudgetDimensionState {
 }
 
 /// Thrash severity level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ThrashLevel {
     /// No thrashing detected.

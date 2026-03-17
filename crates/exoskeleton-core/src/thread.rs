@@ -34,7 +34,9 @@ pub struct ThreadSpec {
 /// Higher-priority threads get context budget preference and execute
 /// first when resources are constrained. Declared in ascending order
 /// so derived `Ord` gives `Background < Low < Normal < High < Critical`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadPriority {
     /// Lowest priority — runs only when ample resources are available.
@@ -50,7 +52,7 @@ pub enum ThreadPriority {
 }
 
 /// When a cognitive thread should execute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadSchedule {
     /// Execute every tick.
@@ -62,7 +64,7 @@ pub enum ThreadSchedule {
 }
 
 /// Operational status of a cognitive thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadStatus {
     /// Thread is active and will execute on its schedule.
@@ -158,6 +160,19 @@ mod tests {
             let parsed: ThreadSchedule = serde_json::from_str(&json).unwrap();
             assert_eq!(*s, parsed);
         }
+    }
+
+    // ── E3-T15: ts-rs spike — enum with mixed variants ──
+
+    #[test]
+    fn ts_thread_schedule_mixed_variants() {
+        use ts_rs::TS;
+        let cfg = ts_rs::Config::default();
+        let decl = ThreadSchedule::decl(&cfg);
+        // Should produce a union type with snake_case variants
+        assert!(decl.contains("every_tick"), "ThreadSchedule: {decl}");
+        assert!(decl.contains("on_demand"), "ThreadSchedule: {decl}");
+        assert!(decl.contains("every_n_ticks"), "ThreadSchedule: {decl}");
     }
 
     #[test]

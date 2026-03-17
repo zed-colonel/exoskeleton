@@ -214,6 +214,7 @@ async fn s9_thrash_detection_identifies_patterns() {
             actions_taken: actions,
             llm_calls,
             decision_rationale: None,
+            context_breakdown_ref: None,
         }
     };
 

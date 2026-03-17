@@ -157,6 +157,7 @@ mod tests {
             actions_taken: actions,
             llm_calls,
             decision_rationale: None,
+            context_breakdown_ref: None,
         }
     }
 

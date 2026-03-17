@@ -228,6 +228,24 @@ pub fn run_tick(
         Err(e) => return HandlerOutput::retryable_failure(format!("Orient failed: {e}")),
     };
 
+    // 9.5 Store ContextBreakdown artifact (E3-S2, W-24)
+    let context_breakdown_ref = match Artifact::from_json(
+        ArtifactKind::ContextBreakdown,
+        &orientation.compiled_context,
+    ) {
+        Ok(artifact) => match kernel.artifact_store.put(&artifact) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to store context breakdown artifact");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize context breakdown");
+            None
+        }
+    };
+
     // 10. Check cancellation
     if cancellation.is_cancelled() {
         return HandlerOutput::retryable_failure("cancelled after Orient");
@@ -363,6 +381,7 @@ pub fn run_tick(
         &alignment,
         &act_result,
         &reflection,
+        context_breakdown_ref,
     );
 
     // Record success/failure for consecutive failure tracking (Sprint 9)

@@ -51,7 +51,7 @@ pub struct ContextSources<'a> {
 ///
 /// Contains the assembled prompt text, total token count, per-section
 /// breakdown, and information about which sections were truncated.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct CompiledContext {
     /// The assembled prompt text, ready for LLM consumption.
     pub prompt: String,
@@ -66,7 +66,7 @@ pub struct CompiledContext {
 }
 
 /// Token allocation result for one section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct SectionResult {
     /// Section name (e.g., "system", "state_snapshot").
     pub name: String,
@@ -1270,5 +1270,33 @@ mod tests {
         );
         // Should not panic; should truncate cleanly
         assert!(result.prompt.contains("=== SYSTEM ==="));
+    }
+
+    // ── E3-T17: CompiledContext JSON roundtrip ──
+
+    #[test]
+    fn compiled_context_json_roundtrip() {
+        let ctx = CompiledContext {
+            prompt: "test prompt".into(),
+            total_tokens: 100,
+            budget: 4000,
+            sections: vec![SectionResult {
+                name: "system".into(),
+                allocated: 400,
+                used: 100,
+                truncated: false,
+            }],
+            truncated_sections: vec![],
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let parsed: CompiledContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx.total_tokens, parsed.total_tokens);
+        assert_eq!(ctx.budget, parsed.budget);
+        assert_eq!(ctx.sections.len(), parsed.sections.len());
+        assert_eq!(ctx.sections[0].name, parsed.sections[0].name);
+        assert_eq!(ctx.sections[0].allocated, parsed.sections[0].allocated);
+        assert_eq!(ctx.sections[0].used, parsed.sections[0].used);
+        assert_eq!(ctx.sections[0].truncated, parsed.sections[0].truncated);
+        assert_eq!(ctx.prompt, parsed.prompt);
     }
 }

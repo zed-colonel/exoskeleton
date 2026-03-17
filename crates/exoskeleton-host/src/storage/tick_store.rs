@@ -189,6 +189,7 @@ mod tests {
             actions_taken: Vec::new(),
             llm_calls: Vec::new(),
             decision_rationale: None,
+            context_breakdown_ref: None,
         }
     }
 
@@ -325,6 +326,7 @@ mod tests {
                 response_artifact_ref: Some(ArtifactId::from_content(b"llm response")),
             }],
             decision_rationale: Some("Decided to write output file".into()),
+            context_breakdown_ref: None,
         };
 
         store.save(&record).unwrap();

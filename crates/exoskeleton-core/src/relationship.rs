@@ -11,7 +11,7 @@ use crate::id::{ArtifactId, LedgerEntryId, PrincipalId, TickId};
 /// One entry in the Relationship Ledger (I8: durable and explicit).
 ///
 /// The ledger is append-only — entries are never modified or deleted (IBP §4.1).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct RelationshipRecord {
     /// Unique identity of this ledger entry.
     pub id: LedgerEntryId,
@@ -36,7 +36,7 @@ pub struct RelationshipRecord {
 }
 
 /// Classification of relational signals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationalSignalType {
     /// Trust level changed for a principal.
@@ -61,7 +61,7 @@ pub enum RelationalSignalType {
 ///
 /// Recomputed every tick in the Align step from the Relationship Ledger.
 /// Never accumulated — compiled fresh from durable sources.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct RelationshipSnapshot {
     /// Summary of each known principal.
     pub principals: Vec<PrincipalSummary>,
@@ -70,7 +70,7 @@ pub struct RelationshipSnapshot {
 }
 
 /// Compact summary of the vessel's relationship with one principal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct PrincipalSummary {
     /// Which principal this summarizes.
     pub principal_id: PrincipalId,

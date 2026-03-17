@@ -13,7 +13,7 @@ use crate::ExoError;
 /// runs PODAARA, and writes a new Snapshot at tick end. Threads contribute
 /// artifacts that inform but never directly mutate the Snapshot (IBP §4.3:
 /// "Thread outputs never replace master loop").
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct StateSnapshot {
     /// Which vessel this snapshot belongs to.
     pub vessel_id: VesselId,
@@ -72,7 +72,7 @@ impl StateSnapshot {
 }
 
 /// Operational status of a vessel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum VesselStatus {
     /// Vessel is idle, waiting for the next tick or external input.
@@ -99,7 +99,7 @@ impl VesselStatus {
 
 /// Compact summary of one cognitive thread's state for inclusion in the
 /// State Snapshot. This is a compiled view, not the full thread state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ThreadSummary {
     /// Which thread this summarizes.
     pub thread_id: ThreadId,
@@ -119,7 +119,7 @@ pub struct ThreadSummary {
 ///
 /// Reflects cognitive budget state (I6). Tool budget is managed separately
 /// by the WI Host and reported independently (I9).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct BudgetStatus {
     /// Remaining local model tokens this window.
     pub local_tokens_remaining: u64,

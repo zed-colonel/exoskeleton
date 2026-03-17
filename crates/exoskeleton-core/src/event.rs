@@ -24,7 +24,7 @@ use crate::ExoError;
 /// Events are written by the master loop (Sprint 5), the LLM handler (Sprint 4),
 /// thread execution (Sprint 6), and the Align step (Sprint 8). Sprint 2 provides
 /// the storage layer; later sprints are the producers.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct EventEntry {
     /// Unique identity of this event entry.
     pub id: LedgerEntryId,
@@ -49,7 +49,7 @@ pub struct EventEntry {
 ///
 /// Event types correspond to the major operations in the vessel lifecycle and
 /// PODAARA loop. Each type may appear with different payloads and summaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     /// Vessel started (both engines bootstrapped).
@@ -81,7 +81,7 @@ pub enum EventType {
 /// Lighter than `EventEntry` — carries enough context for UI updates without
 /// requiring artifact retrieval. Observers needing full detail can follow up
 /// with REST calls using the embedded IDs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct LiveEvent {
     /// Event type tag (matches EventType variants for consistency).
     pub event_type: EventType,

@@ -12,7 +12,7 @@ use crate::ExoError;
 /// what the LLM decided, what actions were taken (via Tool AQ), what
 /// threads contributed, and timing. The TickRecord is stored as an artifact
 /// (I3: everything replayable).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct TickRecord {
     /// Unique identity of this tick (corresponds to a Cognitive AQ RunId as UUID).
     pub tick_id: TickId,
@@ -40,13 +40,17 @@ pub struct TickRecord {
     /// Reasoning summary from the Decide step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_rationale: Option<String>,
+    /// Reference to the ContextBreakdown artifact (E3-S2).
+    /// Contains per-section token allocation from the Orient step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_breakdown_ref: Option<ArtifactId>,
 }
 
 /// PODAARA phase of the cognitive cycle.
 ///
 /// The 7 phases run in strict order: Perceive -> Orient -> Decide -> Align ->
 /// Act -> Reflect -> Amend. This sequence is a sacred invariant (Charter §5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TickPhase {
     /// Gather context and inputs.
@@ -94,7 +98,7 @@ impl TickPhase {
 }
 
 /// A cognitive thread's contribution to a tick.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ThreadContribution {
     /// Which thread contributed.
     pub thread_id: ThreadId,
@@ -105,7 +109,7 @@ pub struct ThreadContribution {
 }
 
 /// Record of one action executed in the Act step (crossing to Tool AQ via WI Host).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ActionRecord {
     /// What kind of action (connector name, e.g., "fs.write", "http.request").
     pub action_type: String,
@@ -119,7 +123,7 @@ pub struct ActionRecord {
 }
 
 /// Outcome of a tool invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionOutcome {
     /// Action completed successfully.
@@ -135,7 +139,7 @@ pub enum ActionOutcome {
 }
 
 /// Record of one LLM invocation (dispatched via the Cognitive AQ).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct LlmCallRecord {
     /// Which model was used.
     pub model: String,
@@ -263,6 +267,7 @@ mod tests {
                 response_artifact_ref: Some(ArtifactId::from_content(b"llm response")),
             }],
             decision_rationale: Some("Decided to write output file".into()),
+            context_breakdown_ref: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let parsed: TickRecord = serde_json::from_str(&json).unwrap();

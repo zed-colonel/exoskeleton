@@ -41,7 +41,7 @@ pub enum MemoryTier {
 ///
 /// Each episodic summary is also stored as an Artifact (ArtifactKind::Memory)
 /// for content-addressing and replay (I3).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct EpisodicSummary {
     /// Content-addressed ID of this summary when stored as an artifact.
     pub id: ArtifactId,
@@ -68,7 +68,7 @@ pub struct EpisodicSummary {
 ///
 /// Each note is also stored as an Artifact (ArtifactKind::Memory) for
 /// content-addressing and replay (I3).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct LongTermNote {
     /// Content-addressed ID of this note when stored as an artifact.
     pub id: ArtifactId,

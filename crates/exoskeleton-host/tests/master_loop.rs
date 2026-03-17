@@ -885,6 +885,93 @@ async fn sprint5_tick_stores_snapshot_artifacts() {
     assert!(result.is_ok(), "test timed out");
 }
 
+// ── E3-S2: Context Compiler Visualization Tests ──
+
+/// E3-T18: Orient step stores ContextBreakdown artifact after compilation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e3_orient_stores_context_breakdown_artifact() {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, handler, _mock) =
+            setup_kernel_with_host(dir.path(), MOCK_DECISION_NO_ACTIONS).await;
+
+        let artifact_store = kernel.artifact_store.clone();
+
+        let k = send_kernel(&kernel);
+        let output = tokio::task::spawn_blocking(move || {
+            let token = CancellationToken::new();
+            exoskeleton_host::kernel::run_tick(&handler, &k, &token)
+        })
+        .await
+        .unwrap();
+
+        match &output {
+            actionqueue_executor_local::HandlerOutput::Success { .. } => {}
+            other => panic!("expected Success, got: {other:?}"),
+        }
+
+        // I3/I5: ContextBreakdown artifact must exist after Orient step
+        let ctx_artifacts = artifact_store
+            .list_by_kind(ArtifactKind::ContextBreakdown, 10)
+            .unwrap();
+        assert!(
+            !ctx_artifacts.is_empty(),
+            "ContextBreakdown artifact should be stored after Orient step (I3/I5)"
+        );
+
+        // Verify the artifact content is valid CompiledContext JSON
+        let artifact = artifact_store.get(&ctx_artifacts[0].id).unwrap().unwrap();
+        let context: exoskeleton_memory::compiler::CompiledContext =
+            serde_json::from_slice(&artifact.content)
+                .expect("ContextBreakdown artifact should deserialize to CompiledContext");
+        assert!(context.budget > 0, "budget should be set");
+        assert!(!context.sections.is_empty(), "sections should be populated");
+
+        shutdown_host(&kernel).await;
+    })
+    .await;
+    assert!(result.is_ok(), "test timed out");
+}
+
+/// E3-T19: TickRecord has context_breakdown_ref populated after a full tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e3_tick_record_has_context_breakdown_ref() {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, handler, _mock) =
+            setup_kernel_with_host(dir.path(), MOCK_DECISION_NO_ACTIONS).await;
+
+        let tick_store = kernel.tick_store.clone();
+
+        let k = send_kernel(&kernel);
+        let output = tokio::task::spawn_blocking(move || {
+            let token = CancellationToken::new();
+            exoskeleton_host::kernel::run_tick(&handler, &k, &token)
+        })
+        .await
+        .unwrap();
+
+        match &output {
+            actionqueue_executor_local::HandlerOutput::Success { .. } => {}
+            other => panic!("expected Success, got: {other:?}"),
+        }
+
+        // The TickRecord should have a context_breakdown_ref linking to the artifact
+        let tick_record = tick_store
+            .latest()
+            .unwrap()
+            .expect("TickRecord should exist after tick");
+        assert!(
+            tick_record.context_breakdown_ref.is_some(),
+            "TickRecord.context_breakdown_ref should be Some after a successful tick (E3-S2)"
+        );
+
+        shutdown_host(&kernel).await;
+    })
+    .await;
+    assert!(result.is_ok(), "test timed out");
+}
+
 // ── T-13: Property-Based Tests (Sprint 5) ──
 
 mod proptest_tests {

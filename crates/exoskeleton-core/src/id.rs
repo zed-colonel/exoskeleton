@@ -19,9 +19,20 @@ macro_rules! define_id {
     ($name:ident, $doc:expr) => {
         #[doc = $doc]
         #[derive(
-            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            ts_rs::TS,
         )]
         #[serde(transparent)]
+        #[ts(as = "String")]
         pub struct $name(Uuid);
 
         impl Default for $name {
@@ -81,8 +92,9 @@ define_id!(LedgerEntryId, "Identity of a Relationship Ledger entry.");
 /// Computed from the artifact's content bytes. Two artifacts with identical
 /// content produce the same `ArtifactId`, enabling deduplication and
 /// tamper detection.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(transparent)]
+#[ts(as = "String")]
 pub struct ArtifactId(String);
 
 /// Errors when parsing an [`ArtifactId`] from a string.
@@ -274,6 +286,18 @@ mod tests {
         let bad = "g".repeat(64);
         let result = bad.parse::<ArtifactId>();
         assert!(matches!(result, Err(ArtifactIdError::InvalidHex)));
+    }
+
+    // ── E3-T14: ts-rs spike — ID newtypes generate as string aliases ──
+
+    #[test]
+    fn ts_id_newtypes_generate_as_string() {
+        use ts_rs::TS;
+        let cfg = ts_rs::Config::default();
+        let decl = VesselId::decl(&cfg);
+        assert_eq!(decl, "type VesselId = string;", "VesselId: {decl}");
+        let decl = ArtifactId::decl(&cfg);
+        assert_eq!(decl, "type ArtifactId = string;", "ArtifactId: {decl}");
     }
 
     #[test]

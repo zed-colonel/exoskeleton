@@ -30,6 +30,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/status", get(handlers::get_status))
         .route("/api/v1/ticks", get(handlers::get_ticks))
         .route("/api/v1/ticks/{id}", get(handlers::get_tick_by_id))
+        .route(
+            "/api/v1/ticks/{id}/context",
+            get(handlers::get_tick_context),
+        )
         .route("/api/v1/threads", get(handlers::get_threads))
         .route("/api/v1/relationships", get(handlers::get_relationships))
         .route(

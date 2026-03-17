@@ -360,8 +360,8 @@ pub struct MemoryQuery {
     limit: Option<usize>,
 }
 
-#[derive(Serialize)]
-struct MemoryResponse {
+#[derive(Serialize, Deserialize, ts_rs::TS)]
+pub struct MemoryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     episodic: Option<Vec<exoskeleton_core::EpisodicSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -400,6 +400,28 @@ pub async fn get_inbox_history(
     let limit = query.limit.unwrap_or(50).min(1000);
     match state.inspector.inbox_history(limit) {
         Ok(entries) => Json(entries).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/v1/ticks/:id/context -> CompiledContext or 404
+pub async fn get_tick_context(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+) -> impl IntoResponse {
+    let tick_id: TickId = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid tick ID (expected UUID)".to_string(),
+            )
+                .into_response();
+        }
+    };
+    match state.inspector.context_breakdown(tick_id) {
+        Ok(Some(breakdown)) => Json(breakdown).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -470,8 +492,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(sanitized).into_response()
 }
 
-#[derive(Serialize)]
-struct SanitizedConfig {
+#[derive(Serialize, Deserialize, ts_rs::TS)]
+pub struct SanitizedConfig {
     vessel_id: exoskeleton_core::VesselId,
     mission: String,
     data_dir: String,
@@ -495,15 +517,15 @@ struct SanitizedConfig {
     daemon_listen: Option<String>,
 }
 
-#[derive(Serialize)]
-struct SanitizedLocalConfig {
+#[derive(Serialize, Deserialize, ts_rs::TS)]
+pub struct SanitizedLocalConfig {
     endpoint: String,
     model: String,
     api_format: String,
 }
 
-#[derive(Serialize)]
-struct SanitizedFrontierConfig {
+#[derive(Serialize, Deserialize, ts_rs::TS)]
+pub struct SanitizedFrontierConfig {
     provider: String,
     model: String,
     /// Name of the env var (NOT the key value).

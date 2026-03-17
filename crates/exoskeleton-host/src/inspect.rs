@@ -42,7 +42,7 @@ pub struct VesselInspector {
 }
 
 /// Thread information for inspection display.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct ThreadStatusEntry {
     pub thread_id: exoskeleton_core::ThreadId,
     pub name: String,
@@ -55,7 +55,7 @@ pub struct ThreadStatusEntry {
 }
 
 /// Combined budget status for inspection (richer than BudgetStatus in snapshot).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct InspectionBudgetStatus {
     /// Cognitive budget from CognitiveBudgetTracker.
     pub cognitive: Option<CognitiveBudgetDetail>,
@@ -63,7 +63,7 @@ pub struct InspectionBudgetStatus {
     pub tool: Option<ToolBudgetDetail>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct CognitiveBudgetDetail {
     pub local_tokens_remaining: u64,
     pub frontier_tokens_remaining: u64,
@@ -75,7 +75,7 @@ pub struct CognitiveBudgetDetail {
     pub window_duration_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct ToolBudgetDetail {
     pub invocations_remaining: u64,
     pub invocations_this_window: u64,
@@ -83,13 +83,13 @@ pub struct ToolBudgetDetail {
 }
 
 /// Health and status of both engines.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct EngineStatus {
     pub cognitive: CognitiveEngineStatus,
     pub tool: ToolEngineStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct CognitiveEngineStatus {
     /// Whether the engine slot contains an engine (not shut down).
     pub available: bool,
@@ -103,7 +103,7 @@ pub struct CognitiveEngineStatus {
     pub active_threads: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct ToolEngineStatus {
     /// Whether the WI Host slot contains a host (not shut down).
     pub available: bool,
@@ -387,6 +387,34 @@ impl VesselInspector {
         &self.config
     }
 
+    /// Get the context breakdown for a specific tick.
+    ///
+    /// Returns the CompiledContext that was assembled during the Orient step,
+    /// showing per-section token allocation and truncation information.
+    pub fn context_breakdown(
+        &self,
+        tick_id: TickId,
+    ) -> Result<Option<exoskeleton_memory::compiler::CompiledContext>, ExoError> {
+        let record = match self.storage.tick_store().get(tick_id)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let ref_id = match record.context_breakdown_ref {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        match self.storage.artifact_store().get(&ref_id)? {
+            Some(artifact) => {
+                let context: exoskeleton_memory::compiler::CompiledContext =
+                    serde_json::from_slice(&artifact.content).map_err(|e| {
+                        ExoError::Storage(format!("invalid context breakdown: {e}"))
+                    })?;
+                Ok(Some(context))
+            }
+            None => Ok(None),
+        }
+    }
+
     // ── Epoch 0: Charter hot-reload ──
 
     /// Reload thread charters from prompt files on disk.
@@ -404,7 +432,7 @@ impl VesselInspector {
 }
 
 /// A reconstructed inbox history entry from event ledger data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct InboxHistoryEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub envelope_id: Option<exoskeleton_core::EnvelopeId>,
@@ -495,6 +523,7 @@ mod tests {
                 actions_taken: vec![],
                 llm_calls: vec![],
                 decision_rationale: None,
+                context_breakdown_ref: None,
             };
             inspector.storage.tick_store().save(&record).unwrap();
         }

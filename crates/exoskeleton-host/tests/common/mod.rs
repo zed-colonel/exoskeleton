@@ -85,6 +85,7 @@ pub fn make_tick(tick_number: u64) -> exoskeleton_core::TickRecord {
         actions_taken: Vec::new(),
         llm_calls: Vec::new(),
         decision_rationale: None,
+        context_breakdown_ref: None,
     }
 }
 

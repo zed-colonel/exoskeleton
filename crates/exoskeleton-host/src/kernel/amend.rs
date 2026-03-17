@@ -48,6 +48,7 @@ pub fn amend(
     alignment: &AlignmentResult,
     act_result: &ActResult,
     reflection: &ReflectionResult,
+    context_breakdown_ref: Option<ArtifactId>,
 ) -> Result<HandlerOutput, ExoError> {
     // 1. Build new snapshot from old + SnapshotDelta
     let mut new_snapshot = snapshot_before.clone();
@@ -216,6 +217,7 @@ pub fn amend(
             .collect(),
         llm_calls: vec![decision.llm_call_record.clone()],
         decision_rationale: Some(decision.reasoning.clone()),
+        context_breakdown_ref,
     };
 
     // 5. Store TickRecord as artifact (I3)
@@ -544,6 +546,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -574,6 +577,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -603,6 +607,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -632,6 +637,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -667,6 +673,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -702,6 +709,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -746,6 +754,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -799,6 +808,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -840,6 +850,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -873,6 +884,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -928,6 +940,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -990,6 +1003,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -1059,6 +1073,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
@@ -1115,6 +1130,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1145,6 +1161,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
         )
         .unwrap();
 
