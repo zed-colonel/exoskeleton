@@ -26,7 +26,7 @@ exoskeleton-memory = { path = "crates/exoskeleton-memory" }
 exoskeleton-relationship = { path = "crates/exoskeleton-relationship" }
 exoskeleton-threads = { path = "crates/exoskeleton-threads" }
 exoskeleton-host = { path = "crates/exoskeleton-host" }
-exoskeleton-daemon = { path = "crates/exoskeleton-daemon" }
+exoskeleton-daemon = { path = "crates/exoskeleton-daemon", default-features = false }
 
 # ActionQueue crates (from crates.io)
 actionqueue-core = { version = "0.1.0", features = ["serde"] }
