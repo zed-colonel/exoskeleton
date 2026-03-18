@@ -271,6 +271,36 @@ impl MemoryStore for SqliteMemoryStore {
             .map_err(|e| ExoError::Storage(format!("count_long_term: {e}")))?;
         Ok(count as u64)
     }
+
+    fn evict_episodic_beyond(&self, capacity: u64) -> Result<u64, ExoError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM episodic_summaries", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| ExoError::Storage(format!("count_episodic: {e}")))?;
+
+        let capacity = capacity as i64;
+        if count <= capacity {
+            return Ok(0);
+        }
+
+        let to_evict = count - capacity;
+
+        conn.execute(
+            "DELETE FROM episodic_summaries WHERE id IN (
+                SELECT id FROM episodic_summaries ORDER BY end_tick ASC LIMIT ?1
+            )",
+            rusqlite::params![to_evict],
+        )
+        .map_err(|e| ExoError::Storage(format!("evict_episodic: {e}")))?;
+
+        Ok(to_evict as u64)
+    }
 }
 
 /// Intermediate row type for episodic summary deserialization.
@@ -849,6 +879,103 @@ mod tests {
             proptest::prop_assert_eq!(&results[0].tags, &note.tags);
             proptest::prop_assert_eq!(results[0].token_count, note.token_count);
         }
+    }
+
+    // ── E1-T77–E1-T80: Episodic Eviction Tests ──
+
+    #[test]
+    fn evict_episodic_beyond_capacity() {
+        // E1-T77: 150 entries, capacity 100 → 50 evicted, 100 remain
+        let store = SqliteMemoryStore::in_memory().unwrap();
+        for i in 0..150u64 {
+            let ep = EpisodicSummary {
+                id: ArtifactId::from_content(format!("evict-ep-{i}").as_bytes()),
+                start_tick: i * 2,
+                end_tick: i * 2 + 1,
+                summary: format!("Episode {i}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            store.write_episodic(&ep).unwrap();
+        }
+        assert_eq!(store.count_episodic().unwrap(), 150);
+
+        let evicted = store.evict_episodic_beyond(100).unwrap();
+        assert_eq!(evicted, 50);
+        assert_eq!(store.count_episodic().unwrap(), 100);
+    }
+
+    #[test]
+    fn evict_episodic_below_capacity_noop() {
+        // E1-T78: 80 entries, capacity 100 → no eviction
+        let store = SqliteMemoryStore::in_memory().unwrap();
+        for i in 0..80u64 {
+            let ep = EpisodicSummary {
+                id: ArtifactId::from_content(format!("noop-ep-{i}").as_bytes()),
+                start_tick: i,
+                end_tick: i + 1,
+                summary: format!("Episode {i}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            store.write_episodic(&ep).unwrap();
+        }
+
+        let evicted = store.evict_episodic_beyond(100).unwrap();
+        assert_eq!(evicted, 0);
+        assert_eq!(store.count_episodic().unwrap(), 80);
+    }
+
+    #[test]
+    fn evict_episodic_oldest_entries_first() {
+        // E1-T79: Oldest entries (lowest end_tick) evicted first
+        let store = SqliteMemoryStore::in_memory().unwrap();
+        for i in 0..10u64 {
+            let ep = EpisodicSummary {
+                id: ArtifactId::from_content(format!("order-ep-{i}").as_bytes()),
+                start_tick: i * 10,
+                end_tick: i * 10 + 9,
+                summary: format!("Episode {i}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            store.write_episodic(&ep).unwrap();
+        }
+
+        // Evict down to 5 → oldest 5 removed (end_ticks 9, 19, 29, 39, 49)
+        let evicted = store.evict_episodic_beyond(5).unwrap();
+        assert_eq!(evicted, 5);
+
+        let remaining = store.recent_episodic(10).unwrap();
+        assert_eq!(remaining.len(), 5);
+        // Remaining should be the newest 5 (end_ticks 59, 69, 79, 89, 99)
+        assert_eq!(remaining[0].end_tick, 99);
+        assert_eq!(remaining[4].end_tick, 59);
+    }
+
+    #[test]
+    fn evict_episodic_count_reflects_post_eviction() {
+        // E1-T80: count_episodic() reflects post-eviction count
+        let store = SqliteMemoryStore::in_memory().unwrap();
+        for i in 0..20u64 {
+            let ep = EpisodicSummary {
+                id: ArtifactId::from_content(format!("count-ep-{i}").as_bytes()),
+                start_tick: i,
+                end_tick: i + 1,
+                summary: format!("Episode {i}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            store.write_episodic(&ep).unwrap();
+        }
+
+        assert_eq!(store.count_episodic().unwrap(), 20);
+        store.evict_episodic_beyond(10).unwrap();
+        assert_eq!(store.count_episodic().unwrap(), 10);
     }
 
     #[test]

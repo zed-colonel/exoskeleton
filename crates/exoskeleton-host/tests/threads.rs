@@ -173,6 +173,8 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         metrics: None,
         event_tx: kernel.event_tx.clone(),
         prompt_registry: kernel.prompt_registry.clone(),
+        trust_decay_config: kernel.trust_decay_config.clone(),
+        episodic_memory_capacity: kernel.episodic_memory_capacity,
     }
 }
 
@@ -253,6 +255,8 @@ async fn setup_with_threads(
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+        trust_decay_config: None,
+        episodic_memory_capacity: None,
     };
 
     (kernel, handler, mock)
@@ -317,6 +321,8 @@ async fn setup_with_threads_custom_backend(
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+        trust_decay_config: None,
+        episodic_memory_capacity: None,
     };
 
     (kernel, handler)

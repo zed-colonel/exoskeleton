@@ -72,6 +72,10 @@ pub struct KernelContext {
     pub event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
     /// Prompt template registry (Epoch 0). Loaded at boot, immutable during run.
     pub prompt_registry: Arc<PromptRegistry>,
+    /// Trust decay configuration (E1-S3). `None` disables time-based decay.
+    pub trust_decay_config: Option<exoskeleton_core::TrustDecayConfig>,
+    /// Episodic memory capacity (E1-S3). `None` disables eviction.
+    pub episodic_memory_capacity: Option<u64>,
 }
 
 /// Run one complete PODAARA tick.

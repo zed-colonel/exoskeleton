@@ -45,6 +45,8 @@ pub fn test_config(dir: &Path) -> VesselConfig {
         tool_budget: None,
         daemon_listen: None,
         cors_allowed_origins: vec![],
+        trust_decay: None,
+        episodic_memory_capacity: Some(200),
     }
 }
 

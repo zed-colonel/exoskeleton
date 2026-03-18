@@ -462,6 +462,8 @@ mod tests {
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+            trust_decay_config: None,
+            episodic_memory_capacity: None,
         }
     }
 
@@ -495,6 +497,8 @@ mod tests {
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+            trust_decay_config: None,
+            episodic_memory_capacity: None,
         }
     }
 

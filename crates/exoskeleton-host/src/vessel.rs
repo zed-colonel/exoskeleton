@@ -191,6 +191,8 @@ impl Vessel {
             metrics: None,
             event_tx: event_tx.clone(),
             prompt_registry: prompt_registry.clone(),
+            trust_decay_config: config.trust_decay.clone(),
+            episodic_memory_capacity: config.episodic_memory_capacity,
         });
 
         // 8. Register built-in cognitive threads (Sprint 7)

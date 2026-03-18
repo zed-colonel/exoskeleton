@@ -212,7 +212,7 @@ impl VesselInspector {
 
     /// Current relationship snapshot (compiled from ledger).
     pub fn relationship_snapshot(&self) -> Result<RelationshipSnapshot, ExoError> {
-        compile_relationship_snapshot(self.relationship_ledger.as_ref())
+        compile_relationship_snapshot(self.relationship_ledger.as_ref(), None, chrono::Utc::now())
     }
 
     /// Relationship history for a specific principal.

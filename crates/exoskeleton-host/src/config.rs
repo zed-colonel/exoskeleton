@@ -196,6 +196,15 @@ pub struct VesselConfig {
     /// Allowed origins for CORS requests. Empty disables CORS (same-origin only).
     /// Set to `["http://localhost:5173"]` for Observatory development mode.
     pub cors_allowed_origins: Vec<String>,
+
+    // ── Relationship settings (E1-S3) ──
+    /// Trust decay configuration. `None` disables time-based decay (pre-E1-S3 behavior).
+    pub trust_decay: Option<exoskeleton_core::TrustDecayConfig>,
+
+    // ── Memory settings (E1-S3) ──
+    /// Episodic memory capacity. When episodic count exceeds this, oldest entries
+    /// are evicted. `None` disables eviction. Default: Some(200).
+    pub episodic_memory_capacity: Option<u64>,
 }
 
 impl Default for VesselConfig {
@@ -217,6 +226,8 @@ impl Default for VesselConfig {
             tool_budget: None,
             daemon_listen: None,
             cors_allowed_origins: Vec::new(),
+            trust_decay: None,
+            episodic_memory_capacity: Some(200),
         }
     }
 }
@@ -312,6 +323,13 @@ impl VesselConfig {
                 data_dir: new_data_dir.to_path_buf(),
                 master_loop_interval_secs: self.master_loop_interval_secs,
                 inbox_dir: None,
+                trust_decay_rate: self.trust_decay.as_ref().map(|c| c.decay_rate),
+                trust_decay_min_inactivity_days: self
+                    .trust_decay
+                    .as_ref()
+                    .map(|c| c.min_inactivity_days)
+                    .unwrap_or(7),
+                episodic_memory_capacity: self.episodic_memory_capacity.unwrap_or(200),
             },
             cognitive: CognitiveSection {
                 tick_interval_ms: self.cognitive_tick_interval.as_millis() as u64,
@@ -437,6 +455,12 @@ fn default_50() -> u64 {
 fn default_4() -> usize {
     4
 }
+fn default_7() -> u64 {
+    7
+}
+fn default_200() -> u64 {
+    200
+}
 fn default_600() -> u64 {
     600
 }
@@ -489,6 +513,15 @@ pub struct VesselSection {
     /// Directory for the file-based inbox. Default: {data_dir}/inbox/
     #[serde(default)]
     pub inbox_dir: Option<PathBuf>,
+    /// Trust decay rate per day of inactivity. `None` or omitted disables decay.
+    #[serde(default)]
+    pub trust_decay_rate: Option<f64>,
+    /// Minimum inactive days before trust decay begins. Default: 7.
+    #[serde(default = "default_7")]
+    pub trust_decay_min_inactivity_days: u64,
+    /// Episodic memory capacity (max summaries). Default: 200. Set to 0 to disable.
+    #[serde(default = "default_200")]
+    pub episodic_memory_capacity: u64,
 }
 
 /// The `[cognitive]` section of the TOML config file.
@@ -589,6 +622,18 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
                 .daemon
                 .map(|d| d.cors_allowed_origins)
                 .unwrap_or_default(),
+            trust_decay: file.vessel.trust_decay_rate.map(|rate| {
+                exoskeleton_core::TrustDecayConfig {
+                    decay_rate: rate,
+                    baseline: 0.5,
+                    min_inactivity_days: file.vessel.trust_decay_min_inactivity_days,
+                }
+            }),
+            episodic_memory_capacity: if file.vessel.episodic_memory_capacity == 0 {
+                None
+            } else {
+                Some(file.vessel.episodic_memory_capacity)
+            },
         })
     }
 }

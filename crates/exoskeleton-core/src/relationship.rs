@@ -90,6 +90,44 @@ pub struct PrincipalSummary {
     pub notes: Option<String>,
 }
 
+/// Configuration for time-based trust decay (E1-S3, W-15).
+///
+/// After signal-based trust computation, trust decays exponentially toward
+/// the baseline for inactive principals. Active principals (recent interaction)
+/// are unaffected.
+///
+/// Formula:
+///   elapsed = (now - last_interaction).num_days()
+///   if elapsed >= min_inactivity_days:
+///     decay_factor = 1.0 - exp(-decay_rate * elapsed as f64)
+///     trust = trust + decay_factor * (baseline - trust)
+///
+/// With default parameters (rate=0.01, baseline=0.5, min_inactivity=7):
+/// - 7 days inactive: ~6.8% decay toward 0.5
+/// - 30 days inactive: ~26% decay toward 0.5
+/// - 70 days inactive: ~50% decay toward 0.5
+/// - Active principals: zero decay
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct TrustDecayConfig {
+    /// Decay rate per day. Default: 0.01 (~50% decay in 70 days).
+    pub decay_rate: f64,
+    /// Trust level that inactive principals regress toward. Default: 0.5.
+    pub baseline: f64,
+    /// Minimum days of inactivity before decay begins. Default: 7.
+    /// Prevents penalizing weekend gaps or brief absences.
+    pub min_inactivity_days: u64,
+}
+
+impl Default for TrustDecayConfig {
+    fn default() -> Self {
+        Self {
+            decay_rate: 0.01,
+            baseline: 0.5,
+            min_inactivity_days: 7,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +235,28 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("last_interaction"));
         assert!(!obj.contains_key("notes"));
+    }
+
+    // ── E1-T75, E1-T76: TrustDecayConfig ──
+
+    #[test]
+    fn trust_decay_config_json_roundtrip() {
+        let config = TrustDecayConfig {
+            decay_rate: 0.02,
+            baseline: 0.4,
+            min_inactivity_days: 14,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: TrustDecayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn trust_decay_config_default_values() {
+        let config = TrustDecayConfig::default();
+        assert!((config.decay_rate - 0.01).abs() < f64::EPSILON);
+        assert!((config.baseline - 0.5).abs() < f64::EPSILON);
+        assert_eq!(config.min_inactivity_days, 7);
     }
 
     #[test]

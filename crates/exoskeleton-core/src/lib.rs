@@ -46,6 +46,7 @@ pub use plan::{Plan, PlanOp, PlanTask, PlanTaskStatus, PlanUpdate};
 pub use prompt::PromptRegistry;
 pub use relationship::{
     PrincipalSummary, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
+    TrustDecayConfig,
 };
 pub use snapshot::{BudgetStatus, SnapshotStore, StateSnapshot, ThreadSummary, VesselStatus};
 pub use thread::{ThreadOutput, ThreadPriority, ThreadSchedule, ThreadSpec, ThreadStatus};

@@ -110,6 +110,9 @@ fn export_typescript_types() {
     emit!(output, &cfg, ToolBudgetConfig);
     emit!(output, &cfg, EscalationPolicy);
 
+    // ── Config types (E1-S3) ──
+    emit!(output, &cfg, exoskeleton_core::TrustDecayConfig);
+
     // ── Conversation types (E1-S2) ──
     emit!(output, &cfg, ConversationMessage);
     emit!(output, &cfg, Conversation);
@@ -161,6 +164,10 @@ fn export_typescript_types() {
     assert!(
         content.contains("ForkResponse"),
         "Missing ForkResponse type"
+    );
+    assert!(
+        content.contains("TrustDecayConfig"),
+        "Missing TrustDecayConfig type"
     );
     assert!(
         content.contains("Conversation"),

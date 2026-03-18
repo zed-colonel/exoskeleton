@@ -53,4 +53,17 @@ pub trait MemoryStore: Send + Sync {
 
     /// Count the total number of long-term notes.
     fn count_long_term(&self) -> Result<u64, ExoError>;
+
+    /// Evict episodic summaries beyond a given capacity (E1-S3, W-16).
+    ///
+    /// Deletes the oldest entries (by `end_tick ASC`) until at most `capacity`
+    /// entries remain. Returns the count of entries evicted.
+    ///
+    /// This is called in the Amend step AFTER Memory Consolidation outputs are
+    /// processed, ensuring important entries get promoted to long-term notes
+    /// before eviction (consolidation-before-eviction guarantee).
+    ///
+    /// Evicted entries remain as artifacts in the ArtifactStore (I3: audit trail).
+    /// Only the MemoryStore row is deleted.
+    fn evict_episodic_beyond(&self, capacity: u64) -> Result<u64, ExoError>;
 }

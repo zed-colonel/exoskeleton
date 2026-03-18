@@ -34,6 +34,8 @@ pub fn align(
     // 2. Compile fresh RelationshipSnapshot from ledger
     let snapshot = match exoskeleton_relationship::compile_relationship_snapshot(
         kernel.relationship_ledger.as_ref(),
+        kernel.trust_decay_config.as_ref(),
+        chrono::Utc::now(),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -137,6 +139,8 @@ mod tests {
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+            trust_decay_config: None,
+            episodic_memory_capacity: None,
         }
     }
 

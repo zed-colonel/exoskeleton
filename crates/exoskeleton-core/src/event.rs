@@ -74,6 +74,8 @@ pub enum EventType {
     MessageReceived,
     /// A snapshot fork was created from this vessel (E3-S3).
     VesselForked,
+    /// Episodic memory entries were evicted to maintain capacity (E1-S3).
+    EpisodicEvicted,
     /// An error occurred.
     Error,
 }
@@ -146,6 +148,7 @@ mod tests {
             EventType::BudgetConsumed,
             EventType::MessageReceived,
             EventType::VesselForked,
+            EventType::EpisodicEvicted,
             EventType::Error,
         ];
         for event_type in &variants {

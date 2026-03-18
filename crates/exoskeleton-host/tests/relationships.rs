@@ -96,7 +96,7 @@ fn relationship_snapshot_from_ledger() {
         .unwrap();
 
     // Compile snapshot
-    let snapshot = compile_relationship_snapshot(ledger.as_ref()).unwrap();
+    let snapshot = compile_relationship_snapshot(ledger.as_ref(), None, Utc::now()).unwrap();
     assert_eq!(snapshot.principals.len(), 1);
     assert_eq!(snapshot.principals[0].principal_id, p);
     // 0.5 + 0.05 = 0.55
@@ -113,7 +113,7 @@ fn relationship_snapshot_from_ledger() {
 #[test]
 fn align_passthrough_no_relationships() {
     let ledger = InMemoryRelationshipLedger::new();
-    let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+    let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     assert!(snapshot.principals.is_empty());
 
     // With no principals, all actions should pass through
@@ -165,7 +165,7 @@ fn align_blocks_actions_with_low_trust() {
             .unwrap();
     }
 
-    let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+    let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     assert!(snapshot.principals[0].trust_level < 0.3);
 
     let config = exoskeleton_relationship::AlignConfig::default();
@@ -193,7 +193,7 @@ fn multi_tick_relationship_evolution() {
     ledger
         .append(&make_record(p, RelationalSignalType::TrustUpdate, tick1, 0))
         .unwrap();
-    let snap1 = compile_relationship_snapshot(&ledger).unwrap();
+    let snap1 = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     assert_eq!(snap1.principals.len(), 1);
     assert!((snap1.principals[0].trust_level - 0.5).abs() < f64::EPSILON);
 
@@ -207,7 +207,7 @@ fn multi_tick_relationship_evolution() {
             10,
         ))
         .unwrap();
-    let snap2 = compile_relationship_snapshot(&ledger).unwrap();
+    let snap2 = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     assert_eq!(snap2.principals[0].active_commitments, 1);
 
     // Tick 3: commitment fulfilled
@@ -220,13 +220,13 @@ fn multi_tick_relationship_evolution() {
             20,
         ))
         .unwrap();
-    let snap3 = compile_relationship_snapshot(&ledger).unwrap();
+    let snap3 = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     assert_eq!(snap3.principals[0].active_commitments, 0);
     assert!((snap3.principals[0].trust_level - 0.55).abs() < f64::EPSILON);
 
     // Each snapshot is recompiled fresh (I5), not carried forward
     // Re-compile from the same ledger produces identical results
-    let snap3_again = compile_relationship_snapshot(&ledger).unwrap();
+    let snap3_again = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     assert_eq!(
         snap3.principals[0].trust_level,
         snap3_again.principals[0].trust_level
@@ -289,7 +289,7 @@ fn relationship_durability_across_restart() {
 
         // Verify pre-crash state
         assert_eq!(ledger.count().unwrap(), 4);
-        let snap = compile_relationship_snapshot(ledger.as_ref()).unwrap();
+        let snap = compile_relationship_snapshot(ledger.as_ref(), None, Utc::now()).unwrap();
         assert_eq!(snap.principals.len(), 2);
     }
     // Drop — simulates crash
@@ -307,7 +307,7 @@ fn relationship_durability_across_restart() {
         assert!(principals.contains(&p2));
 
         // Snapshot recompiled from ledger matches pre-crash state
-        let snap = compile_relationship_snapshot(ledger.as_ref()).unwrap();
+        let snap = compile_relationship_snapshot(ledger.as_ref(), None, Utc::now()).unwrap();
         assert_eq!(snap.principals.len(), 2);
 
         let s1 = snap
@@ -381,7 +381,7 @@ fn atomic_ledger_crash_consistency() {
         }
 
         // Snapshot compilation works correctly
-        let snap = compile_relationship_snapshot(ledger.as_ref()).unwrap();
+        let snap = compile_relationship_snapshot(ledger.as_ref(), None, Utc::now()).unwrap();
         assert_eq!(snap.principals.len(), 1);
     }
 }
@@ -414,7 +414,7 @@ fn context_compilation_with_relationships() {
         .unwrap();
 
     // Compile relationship snapshot
-    let rel_snapshot = compile_relationship_snapshot(ledger.as_ref()).unwrap();
+    let rel_snapshot = compile_relationship_snapshot(ledger.as_ref(), None, Utc::now()).unwrap();
 
     // Store as artifact and retrieve
     let artifact =
@@ -471,7 +471,7 @@ fn align_destructive_tool_blocked_at_intermediate_trust() {
     record.metadata.insert("trust_level".into(), "0.4".into());
     ledger.append(&record).unwrap();
 
-    let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+    let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
     let config = exoskeleton_relationship::AlignConfig::default();
 
     // Non-destructive tool should pass
@@ -552,7 +552,8 @@ fn signal_processing_end_to_end() {
     assert_eq!(records[0].metadata.get("display_name").unwrap(), "TestUser");
 
     // Verify: snapshot reflects the signal with correct trust
-    let snapshot = compile_relationship_snapshot(relationship_store.as_ref()).unwrap();
+    let snapshot =
+        compile_relationship_snapshot(relationship_store.as_ref(), None, Utc::now()).unwrap();
     assert_eq!(snapshot.principals.len(), 1);
     assert!(
         (snapshot.principals[0].trust_level - 0.9).abs() < f64::EPSILON,
@@ -579,7 +580,7 @@ fn context_prompt_contains_principal_details() {
     record.metadata.insert("trust_level".into(), "0.95".into());
     ledger.append(&record).unwrap();
 
-    let rel_snapshot = compile_relationship_snapshot(ledger.as_ref()).unwrap();
+    let rel_snapshot = compile_relationship_snapshot(ledger.as_ref(), None, Utc::now()).unwrap();
 
     let vessel_id = VesselId::new();
     let snapshot = exoskeleton_core::StateSnapshot::initial(vessel_id, "test".into());
@@ -705,7 +706,7 @@ mod proptest_tests {
                 let _ = ledger.append(&record);
             }
 
-            let result = compile_relationship_snapshot(&ledger);
+            let result = compile_relationship_snapshot(&ledger, None, Utc::now());
             prop_assert!(result.is_ok());
         }
 
@@ -732,7 +733,7 @@ mod proptest_tests {
                 let _ = ledger.append(&record);
             }
 
-            let snap = compile_relationship_snapshot(&ledger).unwrap();
+            let snap = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
             for principal in &snap.principals {
                 prop_assert!(principal.trust_level >= 0.0);
                 prop_assert!(principal.trust_level <= 1.0);

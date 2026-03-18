@@ -130,6 +130,32 @@ pub fn amend(
     // The thread produces artifacts; the master loop writes to MemoryStore (IBP §4.3).
     process_memory_consolidation_outputs(kernel, perception, tick_number);
 
+    // Episodic memory eviction (E1-S3, W-16)
+    // Runs AFTER Memory Consolidation outputs are processed, ensuring important
+    // entries get promoted to long-term notes before eviction.
+    if let Some(capacity) = kernel.episodic_memory_capacity {
+        match kernel.memory_store.evict_episodic_beyond(capacity) {
+            Ok(evicted) if evicted > 0 => {
+                tracing::info!(evicted, capacity, "evicted old episodic memory entries");
+                let event = EventEntry {
+                    id: LedgerEntryId::new(),
+                    tick_id: Some(tick_id),
+                    event_type: EventType::EpisodicEvicted,
+                    payload_ref: None,
+                    summary: format!("Evicted {evicted} episodic entries (capacity: {capacity})"),
+                    timestamp: Utc::now(),
+                };
+                if let Err(e) = kernel.event_ledger.append(&event) {
+                    tracing::warn!(error = %e, "failed to log EpisodicEvicted event");
+                }
+            }
+            Ok(_) => {} // No eviction needed
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to evict episodic memory");
+            }
+        }
+    }
+
     // Stale conversation detection (E1-S2)
     mark_stale_conversations(kernel);
 
@@ -538,6 +564,8 @@ mod tests {
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+            trust_decay_config: None,
+            episodic_memory_capacity: None,
         };
         (kernel, inbox)
     }
@@ -1263,5 +1291,208 @@ mod tests {
         let episodics = kernel.memory_store.recent_episodic(10).unwrap();
         // memory_notes is empty in test_params, so no episodics at all
         assert!(episodics.is_empty());
+    }
+
+    // ── E1-S3 W-16: Episodic Memory Eviction (Amend-Level) ──
+
+    /// E1-T81: Eviction runs AFTER Memory Consolidation outputs are processed,
+    /// proving the consolidation-before-eviction ordering guarantee.
+    #[test]
+    fn amend_eviction_runs_after_mc_outputs_processed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut kernel, _inbox) = test_kernel(dir.path());
+        kernel.episodic_memory_capacity = Some(5);
+
+        // Pre-populate 5 episodic entries (ticks 1-5)
+        for tick in 1..=5u64 {
+            let entry = EpisodicSummary {
+                id: ArtifactId::from_content(format!("pre-existing-{tick}").as_bytes()),
+                start_tick: tick,
+                end_tick: tick,
+                summary: format!("Pre-existing entry {tick}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            kernel.memory_store.write_episodic(&entry).unwrap();
+        }
+        assert_eq!(kernel.memory_store.count_episodic().unwrap(), 5);
+
+        // Set up MC contribution that will write an episodic summary
+        let tick_id = TickId::new();
+        let tick_number = 6;
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (decision, mut perception, alignment, act_result, reflection) = test_params();
+
+        use exoskeleton_threads::builtin::memory_consolidation;
+        kernel
+            .thread_registry
+            .register(memory_consolidation::spec())
+            .unwrap();
+
+        let mc_summary = "MC consolidated ticks 1-5";
+        let mc_output = exoskeleton_core::ThreadOutput {
+            thread_id: exoskeleton_threads::MEMORY_CONSOLIDATION_ID,
+            tick_id,
+            artifact_id: ArtifactId::from_content(mc_summary.as_bytes()),
+            summary: mc_summary.into(),
+            recommendations: vec![],
+        };
+        kernel.thread_registry.save_output(&mc_output).unwrap();
+
+        perception.thread_outputs = vec![exoskeleton_core::tick::ThreadContribution {
+            thread_id: exoskeleton_threads::MEMORY_CONSOLIDATION_ID,
+            artifact_id: mc_output.artifact_id.clone(),
+            summary: mc_summary.into(),
+        }];
+
+        amend(
+            &kernel,
+            tick_id,
+            tick_number,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // MC added 1 episodic entry → 6 total → capacity 5 → 1 evicted
+        // The MC entry must survive (consolidation happened before eviction)
+        let episodics = kernel.memory_store.recent_episodic(10).unwrap();
+        assert_eq!(episodics.len(), 5, "should be at capacity after eviction");
+        assert!(
+            episodics
+                .iter()
+                .any(|e| e.summary.contains("MC consolidated")),
+            "MC episodic summary must survive eviction (consolidation-before-eviction)"
+        );
+        // Oldest pre-existing entry (tick 1) should have been evicted
+        assert!(
+            !episodics
+                .iter()
+                .any(|e| e.summary == "Pre-existing entry 1"),
+            "oldest entry should be evicted"
+        );
+    }
+
+    /// E1-T82: EpisodicEvicted event is logged with the correct eviction count.
+    #[test]
+    fn amend_logs_episodic_evicted_event_with_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut kernel, _inbox) = test_kernel(dir.path());
+        kernel.episodic_memory_capacity = Some(3);
+
+        // Pre-populate 5 episodic entries
+        for tick in 1..=5u64 {
+            let entry = EpisodicSummary {
+                id: ArtifactId::from_content(format!("entry-{tick}").as_bytes()),
+                start_tick: tick,
+                end_tick: tick,
+                summary: format!("Entry {tick}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            kernel.memory_store.write_episodic(&entry).unwrap();
+        }
+
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (decision, perception, alignment, act_result, reflection) = test_params();
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // Should have evicted 2 entries (5 - 3 = 2)
+        assert_eq!(kernel.memory_store.count_episodic().unwrap(), 3);
+
+        // EpisodicEvicted event should be in the ledger
+        let events = kernel.event_ledger.for_tick(tick_id).unwrap();
+        let evicted_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == EventType::EpisodicEvicted)
+            .collect();
+        assert_eq!(evicted_events.len(), 1, "exactly one EpisodicEvicted event");
+        assert!(
+            evicted_events[0].summary.contains("2"),
+            "summary should mention 2 evicted entries, got: {}",
+            evicted_events[0].summary
+        );
+    }
+
+    /// E1-T83: No eviction occurs when episodic_memory_capacity is None.
+    #[test]
+    fn amend_no_eviction_when_capacity_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, _inbox) = test_kernel(dir.path());
+        // episodic_memory_capacity defaults to None in test_kernel
+
+        // Pre-populate 100 episodic entries
+        for tick in 1..=100u64 {
+            let entry = EpisodicSummary {
+                id: ArtifactId::from_content(format!("bulk-{tick}").as_bytes()),
+                start_tick: tick,
+                end_tick: tick,
+                summary: format!("Bulk entry {tick}"),
+                key_events: vec![],
+                token_count: 10,
+                created_at: Utc::now(),
+            };
+            kernel.memory_store.write_episodic(&entry).unwrap();
+        }
+
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (decision, perception, alignment, act_result, reflection) = test_params();
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // All 100 entries should remain
+        assert_eq!(kernel.memory_store.count_episodic().unwrap(), 100);
+
+        // No EpisodicEvicted events
+        let events = kernel.event_ledger.for_tick(tick_id).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.event_type == EventType::EpisodicEvicted),
+            "no eviction events when capacity is None"
+        );
     }
 }

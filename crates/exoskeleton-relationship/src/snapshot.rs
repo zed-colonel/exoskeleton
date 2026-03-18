@@ -3,8 +3,10 @@
 //! Pure function that compiles a fresh `RelationshipSnapshot` from the full
 //! ledger. Called every tick in the Align step (I5: compiled, not accumulated).
 
-use chrono::Utc;
-use exoskeleton_core::{ExoError, PrincipalSummary, RelationalSignalType, RelationshipSnapshot};
+use chrono::{DateTime, Utc};
+use exoskeleton_core::{
+    ExoError, PrincipalSummary, RelationalSignalType, RelationshipSnapshot, TrustDecayConfig,
+};
 
 use crate::ledger::RelationshipLedger;
 
@@ -20,7 +22,7 @@ use crate::ledger::RelationshipLedger;
 /// - `CommitmentBroken` → -0.15 (floored at 0.0)
 /// - `FeedbackReceived` → ±0.02 (positive by default)
 /// - `AlignmentMismatch` → -0.05
-/// - Decay: no time-based decay in v1.0-alpha (deferred)
+/// - Decay: exponential time-based decay toward baseline (E1-S3, W-15)
 ///
 /// Active commitments: count of `CommitmentMade` signals minus
 /// `CommitmentFulfilled` and `CommitmentBroken` signals per principal.
@@ -28,6 +30,8 @@ use crate::ledger::RelationshipLedger;
 /// Last interaction: timestamp of the most recent record per principal.
 pub fn compile_relationship_snapshot(
     ledger: &dyn RelationshipLedger,
+    decay_config: Option<&TrustDecayConfig>,
+    now: DateTime<Utc>,
 ) -> Result<RelationshipSnapshot, ExoError> {
     let principal_ids = ledger.distinct_principals()?;
 
@@ -133,6 +137,18 @@ pub fn compile_relationship_snapshot(
             notes_parts.push(format!("{:?}", nr.signal_type));
         }
 
+        // Apply time-based trust decay (E1-S3, W-15)
+        if let Some(config) = decay_config {
+            if let Some(last) = last_interaction {
+                let elapsed_days = (now - last).num_days();
+                if elapsed_days >= config.min_inactivity_days as i64 {
+                    let decay_factor = 1.0 - (-config.decay_rate * elapsed_days as f64).exp();
+                    trust_level = trust_level + decay_factor * (config.baseline - trust_level);
+                    trust_level = trust_level.clamp(0.0, 1.0);
+                }
+            }
+        }
+
         let notes = if notes_parts.is_empty() {
             None
         } else {
@@ -185,7 +201,7 @@ mod tests {
     #[test]
     fn empty_ledger_produces_empty_snapshot() {
         let ledger = InMemoryRelationshipLedger::new();
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert!(snapshot.principals.is_empty());
     }
 
@@ -197,7 +213,7 @@ mod tests {
             .append(&make_record(p, RelationalSignalType::TrustUpdate, 0))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert_eq!(snapshot.principals.len(), 1);
         // TrustUpdate resets to 0.5 (neutral)
         assert!((snapshot.principals[0].trust_level - 0.5).abs() < f64::EPSILON);
@@ -223,7 +239,7 @@ mod tests {
             .append(&make_record(p, RelationalSignalType::FeedbackReceived, 2))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert_eq!(snapshot.principals.len(), 1);
         let expected = 0.5 + 0.05 + 0.02;
         assert!(
@@ -254,7 +270,7 @@ mod tests {
             .unwrap();
         // active = 1
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert_eq!(snapshot.principals[0].active_commitments, 1);
     }
 
@@ -270,7 +286,7 @@ mod tests {
             .append(&make_record(p, RelationalSignalType::CommitmentBroken, 1))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         let expected = 0.5 - 0.15;
         assert!(
             (snapshot.principals[0].trust_level - expected).abs() < f64::EPSILON,
@@ -296,7 +312,7 @@ mod tests {
             ))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         let expected = 0.5 + 0.05;
         assert!(
             (snapshot.principals[0].trust_level - expected).abs() < f64::EPSILON,
@@ -324,7 +340,7 @@ mod tests {
                 .unwrap();
         }
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert!(snapshot.principals[0].trust_level >= 0.0);
         assert!(snapshot.principals[0].trust_level <= 1.0);
     }
@@ -343,7 +359,7 @@ mod tests {
             ))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert_eq!(snapshot.principals[0].active_commitments, 0);
     }
 
@@ -359,7 +375,7 @@ mod tests {
         let t2 = r2.timestamp;
         ledger.append(&r2).unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         let last = snapshot.principals[0].last_interaction.unwrap();
         assert_eq!(last, t2);
     }
@@ -390,7 +406,7 @@ mod tests {
             .append(&make_record(p2, RelationalSignalType::CommitmentBroken, 3))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert_eq!(snapshot.principals.len(), 2);
 
         let s1 = snapshot
@@ -420,7 +436,7 @@ mod tests {
             .append(&make_record(p, RelationalSignalType::ToneObservation, 1))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert!(snapshot.principals[0].notes.is_some());
         let notes = snapshot.principals[0].notes.as_ref().unwrap();
         assert!(notes.contains("FeedbackReceived"));
@@ -436,7 +452,7 @@ mod tests {
         record.metadata.insert("trust_level".into(), "0.85".into());
         ledger.append(&record).unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert!(
             (snapshot.principals[0].trust_level - 0.85).abs() < f64::EPSILON,
             "expected 0.85, got {}",
@@ -454,7 +470,7 @@ mod tests {
             .append(&make_record(p, RelationalSignalType::TrustUpdate, 0))
             .unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert!(
             (snapshot.principals[0].trust_level - 0.5).abs() < f64::EPSILON,
             "expected 0.5, got {}",
@@ -474,7 +490,7 @@ mod tests {
         record.metadata.insert("role".into(), "operator".into());
         ledger.append(&record).unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         assert_eq!(snapshot.principals[0].display_name, "Alice");
         assert_eq!(snapshot.principals[0].role, "operator");
     }
@@ -490,12 +506,227 @@ mod tests {
             .insert("sentiment".into(), "negative".into());
         ledger.append(&record).unwrap();
 
-        let snapshot = compile_relationship_snapshot(&ledger).unwrap();
+        let snapshot = compile_relationship_snapshot(&ledger, None, Utc::now()).unwrap();
         let expected = 0.5 - 0.02;
         assert!(
             (snapshot.principals[0].trust_level - expected).abs() < f64::EPSILON,
             "expected {expected}, got {}",
             snapshot.principals[0].trust_level
+        );
+    }
+
+    // ── E1-T67–E1-T74: Trust Decay Tests ──
+
+    fn make_record_at(
+        principal_id: PrincipalId,
+        signal_type: RelationalSignalType,
+        timestamp: chrono::DateTime<Utc>,
+    ) -> exoskeleton_core::RelationshipRecord {
+        exoskeleton_core::RelationshipRecord {
+            id: LedgerEntryId::new(),
+            principal_id,
+            signal_type,
+            content_ref: ArtifactId::from_content(b"test"),
+            tick_id: TickId::new(),
+            timestamp,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn trust_decays_toward_baseline_after_inactivity() {
+        // E1-T67: 30 days inactive, rate 0.01 → ~26% decay toward 0.5
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let thirty_days_ago = now - chrono::Duration::days(30);
+
+        // Build trust to 0.8 via explicit TrustUpdate
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, thirty_days_ago);
+        record.metadata.insert("trust_level".into(), "0.8".into());
+        ledger.append(&record).unwrap();
+
+        let config = exoskeleton_core::TrustDecayConfig::default();
+        let snapshot = compile_relationship_snapshot(&ledger, Some(&config), now).unwrap();
+
+        // Expected: 0.8 + (1 - exp(-0.01 * 30)) * (0.5 - 0.8)
+        let decay_factor = 1.0 - (-0.01_f64 * 30.0).exp();
+        let expected = 0.8 + decay_factor * (0.5 - 0.8);
+        assert!(
+            (snapshot.principals[0].trust_level - expected).abs() < 0.001,
+            "expected ~{expected:.4}, got {:.4}",
+            snapshot.principals[0].trust_level
+        );
+    }
+
+    #[test]
+    fn recently_active_principal_trust_unchanged() {
+        // E1-T68: Last interaction today → no decay
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, now);
+        record.metadata.insert("trust_level".into(), "0.9".into());
+        ledger.append(&record).unwrap();
+
+        let config = exoskeleton_core::TrustDecayConfig::default();
+        let snapshot = compile_relationship_snapshot(&ledger, Some(&config), now).unwrap();
+
+        assert!(
+            (snapshot.principals[0].trust_level - 0.9).abs() < f64::EPSILON,
+            "trust should be unchanged: {}",
+            snapshot.principals[0].trust_level
+        );
+    }
+
+    #[test]
+    fn high_trust_decays_downward() {
+        // E1-T69: Trust above 0.5 decays toward 0.5
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let long_ago = now - chrono::Duration::days(70);
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, long_ago);
+        record.metadata.insert("trust_level".into(), "0.9".into());
+        ledger.append(&record).unwrap();
+
+        let config = exoskeleton_core::TrustDecayConfig::default();
+        let snapshot = compile_relationship_snapshot(&ledger, Some(&config), now).unwrap();
+
+        assert!(
+            snapshot.principals[0].trust_level < 0.9,
+            "trust should decay below 0.9: {}",
+            snapshot.principals[0].trust_level
+        );
+        assert!(
+            snapshot.principals[0].trust_level > 0.5,
+            "trust should still be above baseline: {}",
+            snapshot.principals[0].trust_level
+        );
+    }
+
+    #[test]
+    fn low_trust_decays_upward_rehabilitation() {
+        // E1-T70: Trust below 0.5 decays upward toward 0.5
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let long_ago = now - chrono::Duration::days(70);
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, long_ago);
+        record.metadata.insert("trust_level".into(), "0.1".into());
+        ledger.append(&record).unwrap();
+
+        let config = exoskeleton_core::TrustDecayConfig::default();
+        let snapshot = compile_relationship_snapshot(&ledger, Some(&config), now).unwrap();
+
+        assert!(
+            snapshot.principals[0].trust_level > 0.1,
+            "trust should rehabilitate above 0.1: {}",
+            snapshot.principals[0].trust_level
+        );
+        assert!(
+            snapshot.principals[0].trust_level < 0.5,
+            "trust should still be below baseline: {}",
+            snapshot.principals[0].trust_level
+        );
+    }
+
+    #[test]
+    fn min_inactivity_threshold_respected() {
+        // E1-T71: 3 days inactive, 7-day threshold → no decay
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let three_days_ago = now - chrono::Duration::days(3);
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, three_days_ago);
+        record.metadata.insert("trust_level".into(), "0.8".into());
+        ledger.append(&record).unwrap();
+
+        let config = exoskeleton_core::TrustDecayConfig::default(); // min_inactivity_days = 7
+        let snapshot = compile_relationship_snapshot(&ledger, Some(&config), now).unwrap();
+
+        assert!(
+            (snapshot.principals[0].trust_level - 0.8).abs() < f64::EPSILON,
+            "trust should be unchanged within threshold: {}",
+            snapshot.principals[0].trust_level
+        );
+    }
+
+    #[test]
+    fn custom_decay_rate_produces_different_amount() {
+        // E1-T72: Higher rate → more decay
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let thirty_days_ago = now - chrono::Duration::days(30);
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, thirty_days_ago);
+        record.metadata.insert("trust_level".into(), "0.8".into());
+        ledger.append(&record).unwrap();
+
+        let slow_config = exoskeleton_core::TrustDecayConfig {
+            decay_rate: 0.005,
+            ..Default::default()
+        };
+        let fast_config = exoskeleton_core::TrustDecayConfig {
+            decay_rate: 0.05,
+            ..Default::default()
+        };
+
+        let slow = compile_relationship_snapshot(&ledger, Some(&slow_config), now).unwrap();
+        let fast = compile_relationship_snapshot(&ledger, Some(&fast_config), now).unwrap();
+
+        // Faster decay should produce lower trust (closer to 0.5 baseline)
+        assert!(
+            fast.principals[0].trust_level < slow.principals[0].trust_level,
+            "fast decay ({}) should be lower than slow ({})",
+            fast.principals[0].trust_level,
+            slow.principals[0].trust_level
+        );
+    }
+
+    #[test]
+    fn trust_stays_clamped_after_decay() {
+        // E1-T73: Trust stays within [0.0, 1.0]
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let very_long_ago = now - chrono::Duration::days(10000);
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, very_long_ago);
+        record.metadata.insert("trust_level".into(), "0.99".into());
+        ledger.append(&record).unwrap();
+
+        let config = exoskeleton_core::TrustDecayConfig::default();
+        let snapshot = compile_relationship_snapshot(&ledger, Some(&config), now).unwrap();
+
+        assert!(snapshot.principals[0].trust_level >= 0.0);
+        assert!(snapshot.principals[0].trust_level <= 1.0);
+    }
+
+    #[test]
+    fn none_decay_config_preserves_existing_behavior() {
+        // E1-T74: None decay config → identical to pre-E1-S3
+        let ledger = InMemoryRelationshipLedger::new();
+        let p = PrincipalId::new();
+        let now = Utc::now();
+        let long_ago = now - chrono::Duration::days(365);
+
+        let mut record = make_record_at(p, RelationalSignalType::TrustUpdate, long_ago);
+        record.metadata.insert("trust_level".into(), "0.8".into());
+        ledger.append(&record).unwrap();
+
+        let with_none = compile_relationship_snapshot(&ledger, None, now).unwrap();
+
+        // Without decay config, trust should remain exactly at signal value
+        assert!(
+            (with_none.principals[0].trust_level - 0.8).abs() < f64::EPSILON,
+            "trust should be unchanged with None config: {}",
+            with_none.principals[0].trust_level
         );
     }
 }

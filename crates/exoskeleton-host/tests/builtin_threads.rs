@@ -126,6 +126,50 @@ impl LlmHttpBackend for FailOnIndexBackend {
     }
 }
 
+/// A mock that fails when the system prompt contains any of the given substrings (E1-S3).
+/// Parallel-safe: uses prompt content, not call ordering.
+struct FailOnNameBackend {
+    fail_names: Vec<String>,
+    success_content: String,
+}
+
+impl FailOnNameBackend {
+    fn new(fail_names: Vec<&str>, success_content: String) -> Self {
+        Self {
+            fail_names: fail_names.into_iter().map(String::from).collect(),
+            success_content,
+        }
+    }
+}
+
+impl LlmHttpBackend for FailOnNameBackend {
+    fn call(
+        &self,
+        _client: &reqwest::Client,
+        request: &LlmRequest,
+        _cancellation: &CancellationToken,
+    ) -> Result<LlmResponse, exoskeleton_core::ExoError> {
+        let prompt = request.system_prompt.as_deref().unwrap_or("");
+        for name in &self.fail_names {
+            if prompt.contains(name.as_str()) {
+                return Err(exoskeleton_core::ExoError::LlmInvocation(format!(
+                    "simulated failure for {name}"
+                )));
+            }
+        }
+        Ok(LlmResponse {
+            content: self.success_content.clone(),
+            model: "mock".into(),
+            tokens_in: 100,
+            tokens_out: 50,
+            latency_ms: 10,
+            stop_reason: StopReason::EndTurn,
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        })
+    }
+}
+
 // ── Helpers ──
 
 fn send_kernel(kernel: &KernelContext) -> KernelContext {
@@ -150,6 +194,8 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         metrics: None,
         event_tx: kernel.event_tx.clone(),
         prompt_registry: kernel.prompt_registry.clone(),
+        trust_decay_config: kernel.trust_decay_config.clone(),
+        episodic_memory_capacity: kernel.episodic_memory_capacity,
     }
 }
 
@@ -219,6 +265,8 @@ async fn setup_builtin_threads(
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+        trust_decay_config: None,
+        episodic_memory_capacity: None,
     };
 
     (kernel, handler, mock)
@@ -280,6 +328,8 @@ async fn setup_builtin_threads_custom(
         metrics: None,
         event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+        trust_decay_config: None,
+        episodic_memory_capacity: None,
     };
 
     (kernel, handler)
@@ -855,10 +905,9 @@ fn builtin_threads_priority_values() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_thread_failure_doesnt_abort_tick() {
     let dir = tempfile::tempdir().unwrap();
-    // Self-Critique (call index 1) fails, others succeed
-    // Call order: Threat Monitor (0), Self-Critique (1), MC (2), Decide (3)
-    let backend = Arc::new(FailOnIndexBackend::new(
-        vec![1], // Self-Critique fails
+    // Self-Critique fails (parallel-safe: match by thread name in system prompt)
+    let backend = Arc::new(FailOnNameBackend::new(
+        vec!["Self-Critique"],
         THREAT_RESPONSE.into(),
     ));
     let (kernel, handler) = setup_builtin_threads_custom(dir.path(), backend).await;
@@ -957,8 +1006,11 @@ async fn all_thread_failures_still_completes_tick() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_error_events_logged() {
     let dir = tempfile::tempdir().unwrap();
-    // MC (call index 2) fails
-    let backend = Arc::new(FailOnIndexBackend::new(vec![2], THREAT_RESPONSE.into()));
+    // MC fails (parallel-safe: match by thread name in system prompt)
+    let backend = Arc::new(FailOnNameBackend::new(
+        vec!["Memory Consolidation"],
+        THREAT_RESPONSE.into(),
+    ));
     let (kernel, handler) = setup_builtin_threads_custom(dir.path(), backend).await;
 
     let k = send_kernel(&kernel);
