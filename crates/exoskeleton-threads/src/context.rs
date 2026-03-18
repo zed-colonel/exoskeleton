@@ -47,21 +47,32 @@ pub fn compile_thread_context(
         ),
     };
 
-    let plan_display = snapshot.plan.as_deref().unwrap_or("None");
+    let plan_display = snapshot
+        .plan
+        .as_ref()
+        .map(|p| p.objective.as_str())
+        .unwrap_or("None");
     let last_action_display = snapshot.last_action_summary.as_deref().unwrap_or("None");
+    let wm_display = if snapshot.working_memory.is_empty() {
+        "None".to_string()
+    } else {
+        snapshot
+            .working_memory
+            .entries
+            .iter()
+            .map(|e| format!("{}: {}", e.key, e.value))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
 
     let snapshot_section = format!(
         "=== VESSEL STATE ===\n\
          Mission: {}\n\
          Status: {:?}\n\
          Plan: {}\n\
-         Working Context: {}\n\
+         Working Memory: {}\n\
          Last Action: {}",
-        snapshot.mission,
-        snapshot.status,
-        plan_display,
-        snapshot.working_context,
-        last_action_display,
+        snapshot.mission, snapshot.status, plan_display, wm_display, last_action_display,
     );
 
     let outputs_section = if recent_outputs.is_empty() {

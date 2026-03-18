@@ -228,7 +228,7 @@ mod tests {
             mission: "test".into(),
             plan: None,
             status: VesselStatus::Idle,
-            working_context: String::new(),
+            working_memory: crate::working_memory::WorkingMemory::new(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),

@@ -146,7 +146,7 @@ pub fn decide(
         actions: protocol.actions,
         snapshot_delta: SnapshotDelta {
             plan_update: protocol.plan_update,
-            working_context_update: protocol.working_context_update,
+            working_memory_ops: protocol.working_memory_ops,
         },
         memory_notes: protocol.memory_notes,
         llm_call_record,
@@ -343,7 +343,7 @@ fn parse_decision(response_text: &str) -> (DecisionProtocol, String) {
     let protocol = DecisionProtocol {
         reasoning: response_text.to_string(),
         plan_update: None,
-        working_context_update: None,
+        working_memory_ops: None,
         actions: vec![],
         memory_notes: vec![],
     };
@@ -355,6 +355,7 @@ mod tests {
     use std::sync::Arc;
 
     use exoskeleton_core::artifact::ArtifactKind;
+    use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{ArtifactStore, LiveEvent};
@@ -362,7 +363,6 @@ mod tests {
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
 
-    use super::super::types::PlannedAction;
     use super::super::KernelContext;
     use super::*;
     use crate::cognitive_engine::CognitiveHandler;
@@ -392,6 +392,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
@@ -409,18 +410,15 @@ mod tests {
     }
 
     fn valid_decision_json() -> String {
-        serde_json::to_string(&DecisionProtocol {
-            reasoning: "I need to write a file".into(),
-            plan_update: Some("Write output".into()),
-            working_context_update: Some("Writing file".into()),
-            actions: vec![PlannedAction {
-                tool_name: "fs.write".into(),
-                params: serde_json::json!({"path": "/tmp/out.txt"}),
-                rationale: "Write output".into(),
-            }],
-            memory_notes: vec!["File written".into()],
-        })
-        .unwrap()
+        // Use legacy string format to verify backward-compatible deserialization
+        r#"{
+            "reasoning": "I need to write a file",
+            "plan_update": "Write output",
+            "working_context_update": "Writing file",
+            "actions": [{"tool_name": "fs.write", "params": {"path": "/tmp/out.txt"}, "rationale": "Write output"}],
+            "memory_notes": ["File written"]
+        }"#
+        .to_string()
     }
 
     fn mock_response_with_content(content: String) -> LlmResponse {
@@ -465,14 +463,8 @@ mod tests {
         assert_eq!(result.reasoning, "I need to write a file");
         assert_eq!(result.actions.len(), 1);
         assert_eq!(result.actions[0].tool_name, "fs.write");
-        assert_eq!(
-            result.snapshot_delta.plan_update,
-            Some("Write output".into())
-        );
-        assert_eq!(
-            result.snapshot_delta.working_context_update,
-            Some("Writing file".into())
-        );
+        assert!(result.snapshot_delta.plan_update.is_some());
+        assert!(result.snapshot_delta.working_memory_ops.is_some());
         assert_eq!(result.memory_notes, vec!["File written"]);
     }
 
@@ -510,6 +502,7 @@ mod tests {
         assert_eq!(result.reasoning, "I don't know what to do.");
         assert!(result.actions.is_empty());
         assert!(result.snapshot_delta.plan_update.is_none());
+        assert!(result.snapshot_delta.working_memory_ops.is_none());
         assert!(result.memory_notes.is_empty());
     }
 
@@ -671,6 +664,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: Some(Arc::new(tokio::sync::Mutex::new(tracker))),
             tool_budget_gate: None,
             metrics: None,

@@ -6,6 +6,7 @@
 
 pub mod artifact;
 pub mod budget;
+pub mod conversation;
 pub mod envelope;
 pub mod error;
 pub mod event;
@@ -13,11 +14,13 @@ pub mod id;
 pub mod inbox;
 pub mod llm;
 pub mod memory;
+pub mod plan;
 pub mod prompt;
 pub mod relationship;
 pub mod snapshot;
 pub mod thread;
 pub mod tick;
+pub mod working_memory;
 
 // Re-export all public types for ergonomic imports.
 pub use artifact::{Artifact, ArtifactKind, ArtifactRef, ArtifactStore};
@@ -25,16 +28,21 @@ pub use budget::{
     BudgetDimensionState, BudgetState, BudgetStore, CognitiveBudgetConfig, EscalationPolicy,
     PersistedBudgetState, ThrashAssessment, ThrashLevel, ToolBudgetConfig,
 };
+pub use conversation::{
+    Conversation, ConversationMessage, ConversationState, ConversationStore,
+    InMemoryConversationStore,
+};
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
 pub use event::{EventEntry, EventLedger, EventType, LiveEvent};
 pub use id::{
-    sha256_hex, ArtifactId, ArtifactIdError, EnvelopeId, LedgerEntryId, PrincipalId, ThreadId,
-    TickId, VesselId,
+    sha256_hex, ArtifactId, ArtifactIdError, ConversationId, EnvelopeId, LedgerEntryId, PlanTaskId,
+    PrincipalId, ThreadId, TickId, VesselId,
 };
 pub use inbox::Inbox;
 pub use llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
 pub use memory::{EpisodicSummary, LongTermNote, MemoryTier};
+pub use plan::{Plan, PlanOp, PlanTask, PlanTaskStatus, PlanUpdate};
 pub use prompt::PromptRegistry;
 pub use relationship::{
     PrincipalSummary, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
@@ -45,6 +53,7 @@ pub use tick::{
     ActionOutcome, ActionRecord, LlmCallRecord, ThreadContribution, TickPhase, TickRecord,
     TickStore,
 };
+pub use working_memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemoryOp};
 
 #[cfg(test)]
 mod tests {
@@ -77,7 +86,7 @@ mod tests {
                 mission: "proptest mission".into(),
                 plan: None,
                 status,
-                working_context: String::new(),
+                working_memory: WorkingMemory::new(),
                 thread_summaries: Vec::new(),
                 relationship_snapshot_ref: None,
                 budget_status: BudgetStatus::unlimited(),

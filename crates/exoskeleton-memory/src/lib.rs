@@ -70,7 +70,9 @@ mod tests {
                 recent_events: &[],
                 episodic_summaries: &[],
                 long_term_notes: &[],
-                working_context: "",
+                plan: None,
+                working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+                conversations: &[],
                 system_section_override: None,
             };
 

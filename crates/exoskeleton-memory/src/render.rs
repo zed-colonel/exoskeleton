@@ -7,9 +7,12 @@
 //! Section headers use the `=== SECTION NAME ===` format for clear delineation.
 //! Renderers return empty string for empty input — the compiler skips those sections.
 
+use exoskeleton_core::conversation::{Conversation, ConversationState};
+use exoskeleton_core::plan::{Plan, PlanTaskStatus};
+use exoskeleton_core::working_memory::WorkingMemory;
 use exoskeleton_core::{
     EpisodicSummary, EventEntry, LongTermNote, PrincipalSummary, RelationshipSnapshot,
-    StateSnapshot, ThreadContribution, VesselId,
+    StateSnapshot, ThreadContribution, VesselId, WorkingMemoryEntry,
 };
 
 /// Render the system section: vessel identity, mission, operating mode.
@@ -37,12 +40,6 @@ pub fn render_snapshot_section(snapshot: &StateSnapshot) -> String {
          Status: {:?}\n",
         snapshot.tick_number, snapshot.status
     );
-    if let Some(ref plan) = snapshot.plan {
-        s.push_str(&format!("Plan: {plan}\n"));
-    }
-    if !snapshot.working_context.is_empty() {
-        s.push_str(&format!("Focus: {}\n", snapshot.working_context));
-    }
     s.push_str(&format!(
         "Budget: {} local + {} frontier tokens, {} cost-cents, {}s remaining\n",
         snapshot.budget_status.local_tokens_remaining,
@@ -167,15 +164,100 @@ pub fn render_long_term_memory(notes: &[LongTermNote]) -> String {
     s
 }
 
-/// Render the working context section.
-///
-/// Shows the current task-specific focus text.
-/// Returns empty string if working context is empty.
-pub fn render_working_context(context: &str) -> String {
-    if context.is_empty() {
+/// Render the plan section with status indicators.
+pub fn render_plan(plan: &Plan) -> String {
+    let mut s = format!("=== PLAN ===\nObjective: {}\n", plan.objective);
+    if plan.tasks.is_empty() {
+        s.push_str("(no tasks defined)\n");
+        return s;
+    }
+    for task in &plan.tasks {
+        let indicator = match task.status {
+            PlanTaskStatus::Pending => "[ ]",
+            PlanTaskStatus::InProgress => "[>]",
+            PlanTaskStatus::Completed => "[x]",
+            PlanTaskStatus::Failed => "[!]",
+            PlanTaskStatus::Blocked => "[#]",
+            PlanTaskStatus::Skipped => "[-]",
+        };
+        s.push_str(&format!(
+            "{} {} ({})\n",
+            indicator, task.description, task.id
+        ));
+        if !task.depends_on.is_empty() {
+            let deps: Vec<String> = task.depends_on.iter().map(|d| d.to_string()).collect();
+            s.push_str(&format!("    depends on: {}\n", deps.join(", ")));
+        }
+        if let Some(ref hint) = task.tool_hint {
+            s.push_str(&format!("    tool: {hint}\n"));
+        }
+    }
+    s
+}
+
+/// Render working memory sorted by relevance (desc), with TTL info.
+pub fn render_working_memory(memory: &WorkingMemory) -> String {
+    if memory.is_empty() {
         return String::new();
     }
-    format!("=== WORKING CONTEXT ===\n{context}\n")
+    let mut s = "=== WORKING MEMORY ===\n".to_string();
+    let mut sorted: Vec<&WorkingMemoryEntry> = memory.entries.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for entry in sorted {
+        s.push_str(&format!("- {}: {}", entry.key, entry.value));
+        if let Some(ttl) = entry.ttl_ticks {
+            s.push_str(&format!(
+                " (ttl: {}t, written: t{})",
+                ttl, entry.written_at_tick
+            ));
+        }
+        s.push_str(&format!(" [rel: {:.1}]\n", entry.relevance));
+    }
+    s
+}
+
+/// Render active conversations for the LLM context.
+///
+/// Shows each conversation's participants, message count, and the last few
+/// message references. Conversations are shown in the order provided (typically
+/// newest-updated first from the ConversationStore).
+/// Returns empty string if no conversations exist.
+pub fn render_conversations(conversations: &[Conversation]) -> String {
+    if conversations.is_empty() {
+        return String::new();
+    }
+    let mut s = "=== CONVERSATIONS ===\n".to_string();
+    for conv in conversations {
+        let participants: Vec<String> = conv.participants.iter().map(|p| p.to_string()).collect();
+        let status = match conv.state {
+            ConversationState::Active => "active",
+            ConversationState::Stale => "stale",
+            ConversationState::Closed => "closed",
+        };
+        s.push_str(&format!(
+            "- {} [{}] ({} msgs, {})\n",
+            conv.topic.as_deref().unwrap_or("(untitled)"),
+            conv.id,
+            conv.message_refs.len(),
+            status,
+        ));
+        s.push_str(&format!("  Participants: {}\n", participants.join(", ")));
+        // Show last 3 message references (most recent context)
+        let recent: Vec<_> = conv.message_refs.iter().rev().take(3).collect();
+        for msg in recent.into_iter().rev() {
+            s.push_str(&format!(
+                "  [{} {}]: envelope:{}\n",
+                msg.source,
+                msg.timestamp.format("%H:%M:%S"),
+                msg.envelope_id,
+            ));
+        }
+    }
+    s
 }
 
 #[cfg(test)]
@@ -213,17 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn render_snapshot_with_plan() {
-        let mut snap = StateSnapshot::initial(VesselId::new(), "test".into());
-        snap.plan = Some("Execute plan A".into());
-        let output = render_snapshot_section(&snap);
-        assert!(output.contains("Plan: Execute plan A"));
-    }
-
-    #[test]
     fn render_snapshot_without_plan() {
         let snap = StateSnapshot::initial(VesselId::new(), "test".into());
         let output = render_snapshot_section(&snap);
+        // Plan is now a separate section, not in snapshot
         assert!(!output.contains("Plan:"));
     }
 
@@ -429,16 +504,208 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    // ── E1-T56: render_plan with tasks shows status indicators ──
     #[test]
-    fn render_working_context_nonempty() {
-        let output = render_working_context("Evaluating options for next action");
-        assert!(output.contains("WORKING CONTEXT"));
-        assert!(output.contains("Evaluating options"));
+    fn render_plan_with_tasks() {
+        use std::collections::HashMap;
+
+        use exoskeleton_core::plan::{PlanTask, PlanTaskStatus};
+        use exoskeleton_core::PlanTaskId;
+
+        let plan = Plan {
+            objective: "Achieve goal X".into(),
+            tasks: vec![
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "First task".into(),
+                    status: PlanTaskStatus::Completed,
+                    depends_on: vec![],
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "Second task".into(),
+                    status: PlanTaskStatus::Pending,
+                    depends_on: vec![],
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "Failed task".into(),
+                    status: PlanTaskStatus::Failed,
+                    depends_on: vec![],
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+            ],
+            updated_at: Utc::now(),
+        };
+        let output = render_plan(&plan);
+        assert!(output.contains("[x]"));
+        assert!(output.contains("[ ]"));
+        assert!(output.contains("[!]"));
+        assert!(output.contains("PLAN"));
+        assert!(output.contains("Achieve goal X"));
     }
 
+    // ── E1-T57: render_plan with dependencies ──
     #[test]
-    fn render_working_context_empty() {
-        let output = render_working_context("");
+    fn render_plan_with_dependencies() {
+        use std::collections::HashMap;
+
+        use exoskeleton_core::plan::{PlanTask, PlanTaskStatus};
+        use exoskeleton_core::PlanTaskId;
+
+        let dep_id = PlanTaskId::new();
+        let plan = Plan {
+            objective: "Test".into(),
+            tasks: vec![PlanTask {
+                id: PlanTaskId::new(),
+                description: "Depends on another".into(),
+                status: PlanTaskStatus::Blocked,
+                depends_on: vec![dep_id],
+                tool_hint: Some("fs.write".into()),
+                metadata: HashMap::new(),
+            }],
+            updated_at: Utc::now(),
+        };
+        let output = render_plan(&plan);
+        assert!(output.contains("depends on:"));
+        assert!(output.contains("tool: fs.write"));
+        assert!(output.contains("[#]"));
+    }
+
+    // ── E1-T58: render_plan empty tasks ──
+    #[test]
+    fn render_plan_empty_tasks() {
+        let plan = Plan {
+            objective: "Empty plan".into(),
+            tasks: vec![],
+            updated_at: Utc::now(),
+        };
+        let output = render_plan(&plan);
+        assert!(output.contains("(no tasks defined)"));
+    }
+
+    // ── E1-T59: render_working_memory sorts by relevance ──
+    #[test]
+    fn render_working_memory_sorted_by_relevance() {
+        use exoskeleton_core::working_memory::WorkingMemoryEntry;
+
+        let memory = WorkingMemory {
+            entries: vec![
+                WorkingMemoryEntry {
+                    key: "low".into(),
+                    value: "low-rel".into(),
+                    written_at_tick: 0,
+                    ttl_ticks: None,
+                    relevance: 0.1,
+                },
+                WorkingMemoryEntry {
+                    key: "high".into(),
+                    value: "high-rel".into(),
+                    written_at_tick: 0,
+                    ttl_ticks: None,
+                    relevance: 0.9,
+                },
+            ],
+        };
+        let output = render_working_memory(&memory);
+        let high_pos = output.find("high").unwrap();
+        let low_pos = output.find("low").unwrap();
+        assert!(high_pos < low_pos, "high relevance should appear first");
+    }
+
+    // ── E1-T60: render_working_memory shows TTL info ──
+    #[test]
+    fn render_working_memory_shows_ttl() {
+        use exoskeleton_core::working_memory::WorkingMemoryEntry;
+
+        let memory = WorkingMemory {
+            entries: vec![WorkingMemoryEntry {
+                key: "obs".into(),
+                value: "something".into(),
+                written_at_tick: 5,
+                ttl_ticks: Some(10),
+                relevance: 0.8,
+            }],
+        };
+        let output = render_working_memory(&memory);
+        assert!(output.contains("ttl: 10t"));
+        assert!(output.contains("written: t5"));
+        assert!(output.contains("[rel: 0.8]"));
+    }
+
+    // ── E1-T61: render_working_memory empty ──
+    #[test]
+    fn render_working_memory_empty() {
+        let memory = WorkingMemory::new();
+        let output = render_working_memory(&memory);
         assert!(output.is_empty());
+    }
+
+    // ── E1-T55: render_conversations with conversations ──
+    #[test]
+    fn render_conversations_with_conversations() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::EnvelopeId;
+
+        let p1 = PrincipalId::new();
+        let now = Utc::now();
+        let mut conv = Conversation::from_first_message(
+            p1,
+            EnvelopeId::new(),
+            ArtifactId::from_content(b"msg1"),
+            now,
+        );
+        conv.topic = Some("Debugging issue #42".into());
+
+        let output = super::render_conversations(&[conv]);
+        assert!(output.contains("CONVERSATIONS"));
+        assert!(output.contains("Debugging issue #42"));
+        assert!(output.contains("1 msgs"));
+        assert!(output.contains("active"));
+        assert!(output.contains("Participants:"));
+    }
+
+    // ── E1-T56: render_conversations empty returns empty ──
+    #[test]
+    fn render_conversations_empty() {
+        let output = super::render_conversations(&[]);
+        assert!(output.is_empty());
+    }
+
+    // ── E1-T57: render_conversations shows last 3 messages ──
+    #[test]
+    fn render_conversations_last_3_messages() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::EnvelopeId;
+
+        let p = PrincipalId::new();
+        let t0 = Utc::now();
+        let mut conv = Conversation::from_first_message(
+            p,
+            EnvelopeId::new(),
+            ArtifactId::from_content(b"m1"),
+            t0,
+        );
+        for i in 1..5 {
+            conv.add_message(
+                p,
+                EnvelopeId::new(),
+                ArtifactId::from_content(format!("m{}", i + 1).as_bytes()),
+                t0 + chrono::Duration::seconds(i),
+            );
+        }
+        assert_eq!(conv.message_count(), 5);
+
+        let output = super::render_conversations(&[conv]);
+        // Should show "5 msgs" but only last 3 message lines
+        assert!(output.contains("5 msgs"));
+        let envelope_lines: Vec<&str> =
+            output.lines().filter(|l| l.contains("envelope:")).collect();
+        assert_eq!(envelope_lines.len(), 3, "should show last 3 messages only");
     }
 }

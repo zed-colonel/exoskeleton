@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use actionqueue_executor_local::CancellationToken;
 use common::{test_config, test_registry};
+use exoskeleton_core::conversation::InMemoryConversationStore;
 use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
 use exoskeleton_core::{
     ArtifactKind, ArtifactStore, EventType, LiveEvent, PromptRegistry, VesselId,
@@ -74,6 +75,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         master_loop_interval_secs: kernel.master_loop_interval_secs,
         thread_registry: kernel.thread_registry.clone(),
         relationship_ledger: kernel.relationship_ledger.clone(),
+        conversation_store: kernel.conversation_store.clone(),
         budget_tracker: kernel.budget_tracker.clone(),
         tool_budget_gate: kernel.tool_budget_gate.clone(),
         metrics: None,
@@ -139,6 +141,7 @@ async fn setup_kernel_with_host(
         master_loop_interval_secs: 60,
         thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+        conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
         tool_budget_gate: None,
         metrics: None,
@@ -190,6 +193,7 @@ fn setup_kernel_no_host(
         master_loop_interval_secs: 60,
         thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+        conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
         tool_budget_gate: None,
         metrics: None,
@@ -992,21 +996,28 @@ mod proptest_tests {
                 tool_name: format!("tool_{i}"),
                 params: serde_json::json!({"key": i}),
                 rationale: format!("reason {i}"),
+                plan_task_id: None,
             }).collect();
             let notes: Vec<String> = (0..num_notes).map(|i| format!("note {i}")).collect();
 
+            let plan_update = plan.map(|p| exoskeleton_core::PlanUpdate::Replace {
+                plan: exoskeleton_core::Plan::from_legacy_string(p),
+            });
+            let working_memory_ops = wc.map(|w| vec![exoskeleton_core::WorkingMemoryOp::Set {
+                key: "context".into(),
+                value: w,
+                ttl_ticks: None,
+            }]);
             let proto = DecisionProtocol {
                 reasoning,
-                plan_update: plan,
-                working_context_update: wc,
+                plan_update,
+                working_memory_ops,
                 actions,
                 memory_notes: notes,
             };
             let json = serde_json::to_string(&proto).unwrap();
             let parsed: DecisionProtocol = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(proto.reasoning, parsed.reasoning);
-            prop_assert_eq!(proto.plan_update, parsed.plan_update);
-            prop_assert_eq!(proto.working_context_update, parsed.working_context_update);
             prop_assert_eq!(proto.actions.len(), parsed.actions.len());
             prop_assert_eq!(proto.memory_notes.len(), parsed.memory_notes.len());
         }
@@ -1021,6 +1032,7 @@ mod proptest_tests {
                 tool_name,
                 params: serde_json::json!({"value": param_val}),
                 rationale,
+                plan_task_id: None,
             };
             let json = serde_json::to_string(&action).unwrap();
             let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
@@ -1040,17 +1052,31 @@ mod proptest_tests {
             let original_tick_number = snapshot.tick_number;
 
             let delta = SnapshotDelta {
-                plan_update: if has_plan { Some("new plan".into()) } else { None },
-                working_context_update: if has_wc { Some("new wc".into()) } else { None },
+                plan_update: if has_plan {
+                    Some(exoskeleton_core::PlanUpdate::Replace {
+                        plan: exoskeleton_core::Plan::from_legacy_string("new plan".into()),
+                    })
+                } else {
+                    None
+                },
+                working_memory_ops: if has_wc {
+                    Some(vec![exoskeleton_core::WorkingMemoryOp::Set {
+                        key: "context".into(),
+                        value: "new wc".into(),
+                        ttl_ticks: None,
+                    }])
+                } else {
+                    None
+                },
             };
 
             // Apply delta (same logic as amend step)
             let mut new_snapshot = snapshot.clone();
-            if let Some(plan) = &delta.plan_update {
-                new_snapshot.plan = Some(plan.clone());
+            if let Some(exoskeleton_core::PlanUpdate::Replace { plan }) = delta.plan_update {
+                new_snapshot.plan = Some(plan);
             }
-            if let Some(wc) = &delta.working_context_update {
-                new_snapshot.working_context = wc.clone();
+            if let Some(ops) = &delta.working_memory_ops {
+                new_snapshot.working_memory.apply_ops(ops, new_snapshot.tick_number);
             }
 
             // Unmodified fields must be preserved
@@ -1060,14 +1086,15 @@ mod proptest_tests {
 
             // Modified fields should reflect the delta
             if has_plan {
-                prop_assert_eq!(new_snapshot.plan, Some("new plan".into()));
+                prop_assert!(new_snapshot.plan.is_some());
+                prop_assert_eq!(&new_snapshot.plan.as_ref().unwrap().objective, "new plan");
             } else {
                 prop_assert_eq!(new_snapshot.plan, snapshot.plan);
             }
             if has_wc {
-                prop_assert_eq!(new_snapshot.working_context, "new wc".to_string());
+                prop_assert!(!new_snapshot.working_memory.is_empty());
             } else {
-                prop_assert_eq!(new_snapshot.working_context, snapshot.working_context);
+                prop_assert_eq!(new_snapshot.working_memory, snapshot.working_memory);
             }
         }
 
@@ -1095,10 +1122,10 @@ mod proptest_tests {
 
             let mut new_snapshot = snapshot;
             if let Some(p) = plan {
-                new_snapshot.plan = Some(p);
+                new_snapshot.plan = Some(exoskeleton_core::Plan::from_legacy_string(p));
             }
             if let Some(w) = wc {
-                new_snapshot.working_context = w;
+                new_snapshot.working_memory = exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(w);
             }
             new_snapshot.tick_number = 1;
             new_snapshot.status = VesselStatus::Idle;

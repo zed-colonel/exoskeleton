@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use actionqueue_executor_local::{CancellationToken, HandlerOutput};
 use chrono::Utc;
+use exoskeleton_core::conversation::ConversationStore;
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::{
@@ -57,6 +58,8 @@ pub struct KernelContext {
     pub thread_registry: Arc<ThreadRegistry>,
     /// Relationship ledger for relational signal persistence (Sprint 8).
     pub relationship_ledger: Arc<dyn RelationshipLedger>,
+    /// Conversation store for multi-turn interaction tracking (E1-S2).
+    pub conversation_store: Arc<dyn ConversationStore>,
     /// Cognitive budget tracker (Sprint 9). `None` if no budget configured.
     pub budget_tracker: Option<Arc<tokio::sync::Mutex<CognitiveBudgetTracker>>>,
     /// Tool budget gate (Sprint 9). `None` if no budget configured.
@@ -276,7 +279,14 @@ pub fn run_tick(
 
     // 15. Reflect
     tracing::info!(tick_number, "Reflect");
-    let reflection = reflect::reflect(&act_result);
+    let reflection = reflect::reflect(
+        handler,
+        kernel,
+        &snapshot,
+        &decision,
+        &act_result,
+        cancellation,
+    );
 
     // 15.5 Thrash detection (Sprint 9) — analyze recent ticks
     let thrash_assessment = {

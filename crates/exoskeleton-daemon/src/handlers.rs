@@ -13,8 +13,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use exoskeleton_core::{
-    ArtifactId, EnvelopeId, EnvelopeKind, ExoError, LlmBackend, MessageEnvelope, PrincipalId,
-    TickId,
+    ArtifactId, ConversationId, EnvelopeId, EnvelopeKind, ExoError, LlmBackend, MessageEnvelope,
+    PrincipalId, TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
 use serde::{Deserialize, Serialize};
@@ -401,6 +401,40 @@ pub async fn get_inbox_history(
     let limit = query.limit.unwrap_or(50).min(1000);
     match state.inspector.inbox_history(limit) {
         Ok(entries) => Json(entries).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/v1/conversations?limit=N (default 20, max 100).
+pub async fn get_conversations(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LimitQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(20).min(100);
+    match state.inspector.conversations(limit) {
+        Ok(conversations) => Json(conversations).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/v1/conversations/:id
+pub async fn get_conversation_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+) -> impl IntoResponse {
+    let conv_id: ConversationId = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid conversation ID (expected UUID)".to_string(),
+            )
+                .into_response();
+        }
+    };
+    match state.inspector.conversation(conv_id) {
+        Ok(Some(conv)) => Json(conv).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

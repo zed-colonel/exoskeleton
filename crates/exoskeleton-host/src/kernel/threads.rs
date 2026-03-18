@@ -263,6 +263,7 @@ pub fn execute_due_threads(
 mod tests {
     use std::sync::Arc;
 
+    use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{
@@ -354,6 +355,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry,
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,

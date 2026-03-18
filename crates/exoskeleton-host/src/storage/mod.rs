@@ -1,7 +1,7 @@
 //! Persistence layer: SQLite-backed stores for artifacts, snapshots, events, ticks, memory,
-//! threads, relationships, budget.
+//! threads, relationships, budget, conversations.
 //!
-//! All meaningful state in Exoskeleton is stored through these eight stores.
+//! All meaningful state in Exoskeleton is stored through these nine stores.
 //! Together with the ActionQueue WALs (Cognitive AQ + Tool AQ), they provide
 //! the complete replay substrate required by I3.
 //!
@@ -14,6 +14,7 @@
 //! - `threads.db` — thread specs + outputs (Sprint 6)
 //! - `relationships.db` — append-only relationship ledger (Sprint 8)
 //! - `budget.db` — budget window state (Sprint 9)
+//! - `conversations.db` — conversation grouping + state (E1-S2)
 //!
 //! Separate files avoid WAL contention between tables and simplify backup/restore.
 //! Exception: `memory.db` contains two tables (episodic + long-term) since they
@@ -21,6 +22,7 @@
 
 pub mod artifact_store;
 pub mod budget_store;
+pub mod conversation_store;
 pub mod event_ledger;
 pub mod memory_store;
 pub mod relationship_store;
@@ -33,6 +35,7 @@ use std::sync::Arc;
 
 pub use artifact_store::SqliteArtifactStore;
 pub use budget_store::SqliteBudgetStore;
+pub use conversation_store::SqliteConversationStore;
 pub use event_ledger::SqliteEventLedger;
 use exoskeleton_core::ExoError;
 pub use memory_store::SqliteMemoryStore;
@@ -51,6 +54,8 @@ pub use tick_store::SqliteTickStore;
 /// - `{data_dir}/exo/memory.db` — memory tiers: episodic + long-term (Sprint 3)
 /// - `{data_dir}/exo/threads.db` — thread specs + outputs (Sprint 6)
 /// - `{data_dir}/exo/relationships.db` — append-only relationship ledger (Sprint 8)
+/// - `{data_dir}/exo/budget.db` — budget window state (Sprint 9)
+/// - `{data_dir}/exo/conversations.db` — conversation grouping + state (E1-S2)
 ///
 /// Each store has its own database file (not one monolithic DB) for:
 /// - Independent WAL performance (no cross-table WAL contention)
@@ -66,6 +71,7 @@ pub struct StorageManager {
     thread_store: Arc<SqliteThreadStore>,
     relationship_store: Arc<SqliteRelationshipLedger>,
     budget_store: Arc<SqliteBudgetStore>,
+    conversation_store: Arc<SqliteConversationStore>,
 }
 
 impl StorageManager {
@@ -108,6 +114,9 @@ impl StorageManager {
             exo_dir.join("relationships.db"),
         )?);
         let budget_store = Arc::new(SqliteBudgetStore::open(exo_dir.join("budget.db"))?);
+        let conversation_store = Arc::new(SqliteConversationStore::open(
+            exo_dir.join("conversations.db"),
+        )?);
 
         Ok(Self {
             artifact_store,
@@ -118,6 +127,7 @@ impl StorageManager {
             thread_store,
             relationship_store,
             budget_store,
+            conversation_store,
         })
     }
 
@@ -160,6 +170,11 @@ impl StorageManager {
     pub fn budget_store(&self) -> &Arc<SqliteBudgetStore> {
         &self.budget_store
     }
+
+    /// Access the conversation store (E1-S2).
+    pub fn conversation_store(&self) -> &Arc<SqliteConversationStore> {
+        &self.conversation_store
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +203,7 @@ mod tests {
         assert!(exo_dir.join("threads.db").exists()); // Sprint 6
         assert!(exo_dir.join("relationships.db").exists()); // Sprint 8
         assert!(exo_dir.join("budget.db").exists()); // Sprint 9
+        assert!(exo_dir.join("conversations.db").exists()); // E1-S2
     }
 
     #[test]
@@ -328,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_stores_accessible() {
+    fn all_nine_stores_accessible() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = StorageManager::open(dir.path()).unwrap();
 
@@ -419,6 +435,17 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+
+        // Conversation store (E1-S2)
+        use exoskeleton_core::conversation::ConversationStore;
+        let conv = exoskeleton_core::Conversation::from_first_message(
+            exoskeleton_core::PrincipalId::new(),
+            exoskeleton_core::EnvelopeId::new(),
+            ArtifactId::from_content(b"nine-stores-conv"),
+            chrono::Utc::now(),
+        );
+        mgr.conversation_store().save(&conv).unwrap();
+        assert!(mgr.conversation_store().get(conv.id).unwrap().is_some());
     }
 
     // ── E3-S3: StorageManager::create_fresh ──
@@ -436,6 +463,7 @@ mod tests {
         assert!(exo_dir.join("threads.db").exists());
         assert!(exo_dir.join("relationships.db").exists());
         assert!(exo_dir.join("budget.db").exists());
+        assert!(exo_dir.join("conversations.db").exists());
     }
 
     #[test]

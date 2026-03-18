@@ -94,6 +94,7 @@ pub fn align(
 mod tests {
     use std::sync::Arc;
 
+    use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::tick::LlmCallRecord;
     use exoskeleton_core::{ArtifactId, LiveEvent, VesselId};
@@ -130,6 +131,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: ledger,
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
@@ -161,12 +163,14 @@ mod tests {
             tool_name: name.into(),
             params: serde_json::json!({}),
             rationale: format!("test {name}"),
+            plan_task_id: None,
         }
     }
 
     fn empty_perception() -> PerceptionResult {
         PerceptionResult {
             new_messages: vec![],
+            active_conversations: vec![],
             thread_outputs: vec![],
             pending_action_results: vec![],
         }

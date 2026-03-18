@@ -65,7 +65,9 @@ pub fn orient(
         recent_events: &recent_events,
         episodic_summaries: &episodic_summaries,
         long_term_notes: &long_term_notes,
-        working_context: &snapshot.working_context,
+        plan: snapshot.plan.as_ref(),
+        working_memory: &snapshot.working_memory,
+        conversations: &perception.active_conversations,
         system_section_override: system_section.as_deref(),
     };
 
@@ -79,6 +81,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
+    use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{
         EventEntry, EventType, LedgerEntryId, LiveEvent, StateSnapshot, VesselId,
@@ -115,6 +118,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
@@ -126,6 +130,7 @@ mod tests {
     fn empty_perception() -> PerceptionResult {
         PerceptionResult {
             new_messages: vec![],
+            active_conversations: vec![],
             thread_outputs: vec![],
             pending_action_results: vec![],
         }

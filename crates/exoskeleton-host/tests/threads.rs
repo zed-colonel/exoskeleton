@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actionqueue_executor_local::CancellationToken;
+use exoskeleton_core::conversation::InMemoryConversationStore;
 use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse, StopReason};
 use exoskeleton_core::{
     ArtifactStore, EventType, LiveEvent, PromptRegistry, ThreadId, ThreadPriority, ThreadSchedule,
@@ -166,6 +167,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         master_loop_interval_secs: kernel.master_loop_interval_secs,
         thread_registry: kernel.thread_registry.clone(),
         relationship_ledger: kernel.relationship_ledger.clone(),
+        conversation_store: kernel.conversation_store.clone(),
         budget_tracker: kernel.budget_tracker.clone(),
         tool_budget_gate: kernel.tool_budget_gate.clone(),
         metrics: None,
@@ -245,6 +247,7 @@ async fn setup_with_threads(
         master_loop_interval_secs: 60,
         thread_registry,
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+        conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
         tool_budget_gate: None,
         metrics: None,
@@ -308,6 +311,7 @@ async fn setup_with_threads_custom_backend(
         master_loop_interval_secs: 60,
         thread_registry,
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+        conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
         tool_budget_gate: None,
         metrics: None,

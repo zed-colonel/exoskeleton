@@ -442,7 +442,9 @@ fn context_compilation_with_relationships() {
         recent_events: &[],
         episodic_summaries: &[],
         long_term_notes: &[],
-        working_context: "",
+        plan: None,
+        working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+        conversations: &[],
         system_section_override: None,
     };
 
@@ -593,7 +595,9 @@ fn context_prompt_contains_principal_details() {
         recent_events: &[],
         episodic_summaries: &[],
         long_term_notes: &[],
-        working_context: "",
+        plan: None,
+        working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+        conversations: &[],
         system_section_override: None,
     };
 

@@ -185,6 +185,7 @@ impl Vessel {
             master_loop_interval_secs: config.master_loop_interval_secs,
             thread_registry: thread_registry.clone(),
             relationship_ledger: relationship_ledger.clone(),
+            conversation_store: storage.conversation_store().clone(),
             budget_tracker: budget_tracker.clone(),
             tool_budget_gate: tool_budget_gate.clone(),
             metrics: None,

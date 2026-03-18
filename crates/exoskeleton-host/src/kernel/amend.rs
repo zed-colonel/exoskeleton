@@ -55,13 +55,45 @@ pub fn amend(
     new_snapshot.tick_number = tick_number;
     new_snapshot.updated_at = Utc::now();
 
-    // Apply SnapshotDelta from Decide step
-    if let Some(plan) = &decision.snapshot_delta.plan_update {
-        new_snapshot.plan = Some(plan.clone());
+    // Apply plan update from Decide step
+    if let Some(plan_update) = &decision.snapshot_delta.plan_update {
+        let current_plan = new_snapshot
+            .plan
+            .take()
+            .unwrap_or_else(|| exoskeleton_core::Plan {
+                objective: String::new(),
+                tasks: Vec::new(),
+                updated_at: Utc::now(),
+            });
+        new_snapshot.plan = Some(current_plan.apply_update(plan_update.clone()));
     }
-    if let Some(wc) = &decision.snapshot_delta.working_context_update {
-        new_snapshot.working_context = wc.clone();
+
+    // Apply working memory ops from Decide step
+    if let Some(ops) = &decision.snapshot_delta.working_memory_ops {
+        new_snapshot.working_memory.apply_ops(ops, tick_number);
     }
+
+    // Apply task status updates from Reflect step (overrides Decide)
+    for task_update in &reflection.task_updates {
+        if let Some(ref mut plan) = new_snapshot.plan {
+            plan.apply_op(exoskeleton_core::PlanOp::UpdateStatus {
+                task_id: task_update.task_id,
+                new_status: task_update.new_status,
+            });
+            plan.updated_at = Utc::now();
+        }
+    }
+
+    // Apply working memory ops from Reflect step (additive)
+    for op in &reflection.working_memory_ops {
+        new_snapshot.working_memory.apply_op(op, tick_number);
+    }
+
+    // TTL eviction
+    new_snapshot.working_memory.evict_expired(tick_number);
+
+    // Entry cap enforcement (50 entries max)
+    new_snapshot.working_memory.enforce_cap(50);
 
     // Update status back to Idle after completing the tick
     new_snapshot.status = VesselStatus::Idle;
@@ -97,6 +129,9 @@ pub fn amend(
     // Process Memory Consolidation thread outputs (Sprint 7)
     // The thread produces artifacts; the master loop writes to MemoryStore (IBP §4.3).
     process_memory_consolidation_outputs(kernel, perception, tick_number);
+
+    // Stale conversation detection (E1-S2)
+    mark_stale_conversations(kernel);
 
     // Store RelationshipSnapshot as artifact and update ref (Sprint 8)
     if let Some(rel_snapshot) = &alignment.relationship_snapshot {
@@ -215,7 +250,13 @@ pub fn amend(
             .iter()
             .map(|e| e.record.clone())
             .collect(),
-        llm_calls: vec![decision.llm_call_record.clone()],
+        llm_calls: {
+            let mut calls = vec![decision.llm_call_record.clone()];
+            if let Some(ref record) = reflection.llm_call_record {
+                calls.push(record.clone());
+            }
+            calls
+        },
         decision_rationale: Some(decision.reasoning.clone()),
         context_breakdown_ref,
     };
@@ -407,11 +448,48 @@ fn process_memory_consolidation_outputs(
     }
 }
 
+/// Mark active conversations as stale if no new messages within threshold.
+///
+/// Runs once per tick. Lightweight: reads active conversations, checks timestamps,
+/// updates state. Errors are logged but do not halt the tick.
+const STALE_THRESHOLD_MINUTES: i64 = 30;
+
+fn mark_stale_conversations(kernel: &KernelContext) {
+    use exoskeleton_core::conversation::ConversationState;
+
+    let active = match kernel.conversation_store.active_conversations(100) {
+        Ok(convs) => convs,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load active conversations for stale detection");
+            return;
+        }
+    };
+
+    let now = Utc::now();
+    let threshold = chrono::Duration::minutes(STALE_THRESHOLD_MINUTES);
+
+    for conv in active {
+        if (now - conv.updated_at) > threshold {
+            let mut stale_conv = conv;
+            stale_conv.state = ConversationState::Stale;
+            stale_conv.updated_at = now;
+            if let Err(e) = kernel.conversation_store.save(&stale_conv) {
+                tracing::warn!(
+                    error = %e,
+                    conv_id = %stale_conv.id,
+                    "failed to mark conversation stale"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
+    use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::tick::LlmCallRecord;
     use exoskeleton_core::{
@@ -454,6 +532,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
@@ -491,6 +570,7 @@ mod tests {
         };
         let perception = PerceptionResult {
             new_messages: vec![],
+            active_conversations: vec![],
             thread_outputs: vec![],
             pending_action_results: vec![],
         };
@@ -505,6 +585,10 @@ mod tests {
             action_success_rate: f64::NAN,
             observations: vec![],
             concerns: vec![],
+            task_updates: vec![],
+            working_memory_ops: vec![],
+            should_replan: false,
+            llm_call_record: None,
         };
         (decision, perception, alignment, act_result, reflection)
     }
@@ -563,7 +647,9 @@ mod tests {
         let snapshot_before = test_snapshot(kernel.vessel_id);
         let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
         let (mut decision, perception, alignment, act_result, reflection) = test_params();
-        decision.snapshot_delta.plan_update = Some("Updated plan from decide".into());
+        decision.snapshot_delta.plan_update = Some(exoskeleton_core::PlanUpdate::Replace {
+            plan: exoskeleton_core::Plan::from_legacy_string("Updated plan from decide".into()),
+        });
 
         amend(
             &kernel,
@@ -582,18 +668,24 @@ mod tests {
         .unwrap();
 
         let saved = kernel.snapshot_store.latest().unwrap().unwrap();
-        assert_eq!(saved.plan, Some("Updated plan from decide".into()));
+        let plan = saved.plan.unwrap();
+        assert_eq!(plan.objective, "Updated plan from decide");
     }
 
     #[test]
-    fn amend_applies_working_context_update() {
+    fn amend_applies_working_memory_ops() {
         let dir = tempfile::tempdir().unwrap();
         let (kernel, _inbox) = test_kernel(dir.path());
         let tick_id = TickId::new();
         let snapshot_before = test_snapshot(kernel.vessel_id);
         let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
         let (mut decision, perception, alignment, act_result, reflection) = test_params();
-        decision.snapshot_delta.working_context_update = Some("New working context".into());
+        decision.snapshot_delta.working_memory_ops =
+            Some(vec![exoskeleton_core::WorkingMemoryOp::Set {
+                key: "context".into(),
+                value: "New working context".into(),
+                ttl_ticks: None,
+            }]);
 
         amend(
             &kernel,
@@ -612,7 +704,8 @@ mod tests {
         .unwrap();
 
         let saved = kernel.snapshot_store.latest().unwrap().unwrap();
-        assert_eq!(saved.working_context, "New working context");
+        assert_eq!(saved.working_memory.entries.len(), 1);
+        assert_eq!(saved.working_memory.entries[0].value, "New working context");
     }
 
     #[test]
@@ -916,6 +1009,7 @@ mod tests {
                 tool_name: "delay".into(),
                 params: serde_json::json!({"duration_ms": 10}),
                 rationale: "test".into(),
+                plan_task_id: None,
             },
             result: Ok(serde_json::json!({"slept_ms": 10})),
             record: exoskeleton_core::tick::ActionRecord {

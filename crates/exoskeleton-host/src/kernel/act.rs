@@ -234,6 +234,7 @@ mod tests {
     use std::time::Duration;
 
     use actionqueue_executor_local::CancellationToken;
+    use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{ArtifactKind, EventType};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
@@ -271,6 +272,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
@@ -314,6 +316,7 @@ mod tests {
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
             tool_budget_gate: None,
             metrics: None,
@@ -335,6 +338,7 @@ mod tests {
             tool_name: "delay".into(),
             params: serde_json::json!({"duration_ms": ms}),
             rationale: "test delay".into(),
+            plan_task_id: None,
         }
     }
 
@@ -343,6 +347,7 @@ mod tests {
             tool_name: "nonexistent.tool".into(),
             params: serde_json::json!({"key": "value"}),
             rationale: "test unknown tool".into(),
+            plan_task_id: None,
         }
     }
 
@@ -711,6 +716,7 @@ mod tests {
             master_loop_interval_secs: kernel.master_loop_interval_secs,
             thread_registry: kernel.thread_registry.clone(),
             relationship_ledger: kernel.relationship_ledger.clone(),
+            conversation_store: kernel.conversation_store.clone(),
             budget_tracker: kernel.budget_tracker.clone(),
             tool_budget_gate: kernel.tool_budget_gate.clone(),
             metrics: kernel.metrics.clone(),

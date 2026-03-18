@@ -64,6 +64,10 @@ impl PromptRegistry {
             include_str!("../../../prompts/charters/memory-consolidation.md"),
         );
         registry.insert(
+            "reflect-system",
+            include_str!("../../../prompts/reflect-system.md"),
+        );
+        registry.insert(
             "bootstrap-first-contact",
             include_str!("../../../prompts/bootstrap/first-contact.md"),
         );
@@ -195,9 +199,9 @@ mod tests {
     // ── E0-T9: with_defaults has all nine prompts ──
 
     #[test]
-    fn with_defaults_has_all_nine_prompts() {
+    fn with_defaults_has_all_ten_prompts() {
         let registry = PromptRegistry::with_defaults();
-        assert_eq!(registry.len(), 9, "should have 9 compiled-in prompts");
+        assert_eq!(registry.len(), 10, "should have 10 compiled-in prompts");
 
         let expected_keys = [
             "decide-system",
@@ -207,6 +211,7 @@ mod tests {
             "charter-threat-monitor",
             "charter-self-critique",
             "charter-memory-consolidation",
+            "reflect-system",
             "bootstrap-first-contact",
             "bootstrap-identity-extraction",
         ];

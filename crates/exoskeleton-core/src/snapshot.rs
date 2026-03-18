@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::id::{ArtifactId, ThreadId, VesselId};
+use crate::plan::Plan;
 use crate::thread::ThreadStatus;
+use crate::working_memory::WorkingMemory;
 use crate::ExoError;
 
 /// The single authoritative view of a vessel's cognitive state (I7).
@@ -21,14 +23,17 @@ pub struct StateSnapshot {
     pub tick_number: u64,
     /// Current high-level objective (the vessel's mission statement).
     pub mission: String,
-    /// Current plan or strategy summary. Updated by the Decide/Amend steps.
+    /// Current structured plan. Updated by the Decide/Amend steps.
     /// `None` if no plan has been formulated yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<String>,
+    #[serde(deserialize_with = "crate::plan::deserialize_plan_compat")]
+    pub plan: Option<Plan>,
     /// Current operational status of the vessel.
     pub status: VesselStatus,
-    /// Current task or focus summary — what the vessel is working on right now.
-    pub working_context: String,
+    /// Keyed working memory scratchpad — entries persist across ticks with TTL.
+    #[serde(alias = "working_context")]
+    #[serde(deserialize_with = "crate::working_memory::deserialize_working_memory_compat")]
+    pub working_memory: WorkingMemory,
     /// Compact summary of each active cognitive thread's state.
     pub thread_summaries: Vec<ThreadSummary>,
     /// Reference to the compiled relationship snapshot artifact.
@@ -60,7 +65,7 @@ impl StateSnapshot {
             mission,
             plan: None,
             status: VesselStatus::Idle,
-            working_context: String::new(),
+            working_memory: WorkingMemory::new(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
@@ -208,9 +213,13 @@ mod tests {
             vessel_id: VesselId::new(),
             tick_number: 42,
             mission: "Test mission".into(),
-            plan: Some("Execute plan A".into()),
+            plan: Some(crate::plan::Plan::from_legacy_string(
+                "Execute plan A".into(),
+            )),
             status: VesselStatus::Thinking,
-            working_context: "Evaluating options".into(),
+            working_memory: crate::working_memory::WorkingMemory::from_legacy_string(
+                "Evaluating options".into(),
+            ),
             thread_summaries: vec![ThreadSummary {
                 thread_id: ThreadId::new(),
                 name: "Threat Monitor".into(),
@@ -252,6 +261,166 @@ mod tests {
         assert!(!obj.contains_key("plan"));
         assert!(!obj.contains_key("relationship_snapshot_ref"));
         assert!(!obj.contains_key("last_action_summary"));
+    }
+
+    // ── E1-T10: Deserialize legacy "plan": "text" as Some(Plan) ──
+    #[test]
+    fn deserialize_legacy_plan_string() {
+        let json = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "plan": "Execute plan A",
+            "status": "idle",
+            "working_context": "",
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json).unwrap();
+        let plan = snap.plan.unwrap();
+        assert_eq!(plan.objective, "Execute plan A");
+        assert!(plan.tasks.is_empty());
+    }
+
+    // ── E1-T11: Deserialize new "plan": {"objective": ...} as Some(Plan) ──
+    #[test]
+    fn deserialize_new_plan_struct() {
+        let json = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "plan": {"objective": "Achieve X", "tasks": [], "updated_at": "2026-01-01T00:00:00Z"},
+            "status": "idle",
+            "working_memory": {"entries": []},
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json).unwrap();
+        let plan = snap.plan.unwrap();
+        assert_eq!(plan.objective, "Achieve X");
+    }
+
+    // ── E1-T12: Deserialize "plan": null and absent field as None ──
+    #[test]
+    fn deserialize_null_and_absent_plan() {
+        // null
+        let json_null = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "plan": null,
+            "status": "idle",
+            "working_memory": {"entries": []},
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json_null).unwrap();
+        assert!(snap.plan.is_none());
+
+        // absent
+        let json_absent = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "status": "idle",
+            "working_memory": {"entries": []},
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json_absent).unwrap();
+        assert!(snap.plan.is_none());
+    }
+
+    // ── E1-T13: New-format StateSnapshot full JSON roundtrip ──
+    #[test]
+    fn snapshot_new_format_roundtrip() {
+        let snap = StateSnapshot {
+            vessel_id: VesselId::new(),
+            tick_number: 10,
+            mission: "test".into(),
+            plan: Some(crate::plan::Plan {
+                objective: "Test".into(),
+                tasks: vec![],
+                updated_at: chrono::Utc::now(),
+            }),
+            status: VesselStatus::Idle,
+            working_memory: crate::working_memory::WorkingMemory {
+                entries: vec![crate::working_memory::WorkingMemoryEntry {
+                    key: "k".into(),
+                    value: "v".into(),
+                    written_at_tick: 1,
+                    ttl_ticks: Some(5),
+                    relevance: 0.8,
+                }],
+            },
+            thread_summaries: vec![],
+            relationship_snapshot_ref: None,
+            budget_status: BudgetStatus::unlimited(),
+            last_action_summary: None,
+            started_at: Some(chrono::Utc::now()),
+            updated_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: StateSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, parsed);
+    }
+
+    // ── E1-T32: Deserialize legacy "working_context": "text" into WorkingMemory ──
+    #[test]
+    fn deserialize_legacy_working_context() {
+        let json = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "status": "idle",
+            "working_context": "Evaluating options",
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.working_memory.entries.len(), 1);
+        assert_eq!(snap.working_memory.entries[0].key, "legacy_context");
+        assert_eq!(snap.working_memory.entries[0].value, "Evaluating options");
+    }
+
+    // ── E1-T33: Deserialize new "working_memory": {"entries":[...]} ──
+    #[test]
+    fn deserialize_new_working_memory() {
+        let json = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "status": "idle",
+            "working_memory": {"entries": [{"key": "k", "value": "v", "written_at_tick": 1, "relevance": 0.5}]},
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.working_memory.entries.len(), 1);
+        assert_eq!(snap.working_memory.entries[0].key, "k");
+    }
+
+    // ── E1-T34: Deserialize absent/empty working context as empty WorkingMemory ──
+    #[test]
+    fn deserialize_empty_working_context() {
+        let json = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "status": "idle",
+            "working_context": "",
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json).unwrap();
+        assert!(snap.working_memory.is_empty());
     }
 
     #[test]

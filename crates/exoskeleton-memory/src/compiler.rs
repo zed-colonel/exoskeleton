@@ -7,6 +7,9 @@
 
 use std::sync::Arc;
 
+use exoskeleton_core::conversation::Conversation;
+use exoskeleton_core::plan::Plan;
+use exoskeleton_core::working_memory::WorkingMemory;
 use exoskeleton_core::{
     EpisodicSummary, EventEntry, ExoError, LongTermNote, RelationshipSnapshot, StateSnapshot,
     ThreadContribution, VesselId,
@@ -39,8 +42,12 @@ pub struct ContextSources<'a> {
     pub episodic_summaries: &'a [EpisodicSummary],
     /// Long-term memory notes (from MemoryStore).
     pub long_term_notes: &'a [LongTermNote],
-    /// Current working context / task focus.
-    pub working_context: &'a str,
+    /// Current structured plan. `None` if no plan formulated yet.
+    pub plan: Option<&'a Plan>,
+    /// Working memory scratchpad.
+    pub working_memory: &'a WorkingMemory,
+    /// Active conversations with message references (E1-S2).
+    pub conversations: &'a [Conversation],
     /// Pre-resolved system section template (Epoch 0).
     /// If Some, used instead of the hardcoded `render_system_section()` output.
     /// The host layer resolves the template and passes the result as data.
@@ -118,8 +125,14 @@ pub struct SectionPriorities {
     pub system: SectionAllocation,
     /// Current StateSnapshot rendered as text.
     pub state_snapshot: SectionAllocation,
+    /// Structured plan with tasks and statuses (E1-S1).
+    pub plan: SectionAllocation,
     /// Compiled relationship summary.
     pub relationship_snapshot: SectionAllocation,
+    /// Conversations placeholder (E1-S2).
+    pub conversations: SectionAllocation,
+    /// Working memory scratchpad (E1-S1).
+    pub working_memory: SectionAllocation,
     /// Latest cognitive thread outputs.
     pub thread_outputs: SectionAllocation,
     /// Recent events from the EventLedger.
@@ -128,8 +141,6 @@ pub struct SectionPriorities {
     pub episodic_memory: SectionAllocation,
     /// Long-term memory notes.
     pub long_term_memory: SectionAllocation,
-    /// Current task-specific working context.
-    pub working_context: SectionAllocation,
 }
 
 impl Default for SectionPriorities {
@@ -141,31 +152,39 @@ impl Default for SectionPriorities {
             },
             state_snapshot: SectionAllocation {
                 priority: SectionPriority::Critical,
-                target_pct: 0.15,
+                target_pct: 0.12,
+            },
+            plan: SectionAllocation {
+                priority: SectionPriority::Critical,
+                target_pct: 0.08,
             },
             relationship_snapshot: SectionAllocation {
                 priority: SectionPriority::High,
+                target_pct: 0.08,
+            },
+            conversations: SectionAllocation {
+                priority: SectionPriority::High,
+                target_pct: 0.07,
+            },
+            working_memory: SectionAllocation {
+                priority: SectionPriority::Medium,
                 target_pct: 0.10,
             },
             thread_outputs: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.15,
+                target_pct: 0.13,
             },
             recent_events: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.15,
+                target_pct: 0.12,
             },
             episodic_memory: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.15,
+                target_pct: 0.12,
             },
             long_term_memory: SectionAllocation {
                 priority: SectionPriority::Low,
-                target_pct: 0.10,
-            },
-            working_context: SectionAllocation {
-                priority: SectionPriority::Medium,
-                target_pct: 0.10,
+                target_pct: 0.08,
             },
         }
     }
@@ -177,8 +196,10 @@ impl SectionPriorities {
         vec![
             ("system", &self.system),
             ("state_snapshot", &self.state_snapshot),
+            ("plan", &self.plan),
             ("relationship_snapshot", &self.relationship_snapshot),
-            ("working_context", &self.working_context),
+            ("conversations", &self.conversations),
+            ("working_memory", &self.working_memory),
             ("thread_outputs", &self.thread_outputs),
             ("recent_events", &self.recent_events),
             ("episodic_memory", &self.episodic_memory),
@@ -459,6 +480,11 @@ impl ContextCompiler {
                 p.state_snapshot.priority,
             ),
             (
+                "plan",
+                sources.plan.map(render::render_plan).unwrap_or_default(),
+                p.plan.priority,
+            ),
+            (
                 "relationship_snapshot",
                 sources
                     .relationship_snapshot
@@ -467,9 +493,14 @@ impl ContextCompiler {
                 p.relationship_snapshot.priority,
             ),
             (
-                "working_context",
-                render::render_working_context(sources.working_context),
-                p.working_context.priority,
+                "conversations",
+                render::render_conversations(sources.conversations),
+                p.conversations.priority,
+            ),
+            (
+                "working_memory",
+                render::render_working_memory(sources.working_memory),
+                p.working_memory.priority,
             ),
             (
                 "thread_outputs",
@@ -525,7 +556,9 @@ mod tests {
         let mut snap = StateSnapshot::initial(VesselId::new(), "Test mission".into());
         snap.tick_number = 5;
         snap.status = VesselStatus::Thinking;
-        snap.working_context = "Evaluating options".into();
+        snap.working_memory = exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+            "Evaluating options".into(),
+        );
         snap.budget_status = BudgetStatus {
             local_tokens_remaining: 40_000,
             frontier_tokens_remaining: 10_000,
@@ -547,7 +580,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
-            working_context: &snapshot.working_context,
+            plan: snapshot.plan.as_ref(),
+            working_memory: &snapshot.working_memory,
+            conversations: &[],
             system_section_override: None,
         }
     }
@@ -600,7 +635,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &notes,
-            working_context: &snap.working_context,
+            plan: snap.plan.as_ref(),
+            working_memory: &snap.working_memory,
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -633,7 +670,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -656,7 +695,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -727,19 +768,23 @@ mod tests {
             recent_events: &events,
             episodic_summaries: &episodic,
             long_term_notes: &notes,
-            working_context: "Current focus",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "Current focus".into(),
+            ),
+            conversations: &[],
             system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
         let prompt = &result.prompt;
 
-        // Verify fixed order: system, state, relationship, working_context,
-        // threads, events, episodic, long_term
+        // Verify fixed order: system, state, plan, relationship, conversations,
+        // working_memory, threads, events, episodic, long_term
         let sys_pos = prompt.find("=== SYSTEM ===").unwrap();
         let state_pos = prompt.find("=== STATE").unwrap();
         let rel_pos = prompt.find("=== RELATIONSHIPS ===").unwrap();
-        let wc_pos = prompt.find("=== WORKING CONTEXT ===").unwrap();
+        let wm_pos = prompt.find("=== WORKING MEMORY ===").unwrap();
         let thread_pos = prompt.find("=== THREAD OUTPUTS ===").unwrap();
         let events_pos = prompt.find("=== RECENT EVENTS ===").unwrap();
         let ep_pos = prompt.find("=== EPISODIC MEMORY ===").unwrap();
@@ -747,8 +792,8 @@ mod tests {
 
         assert!(sys_pos < state_pos);
         assert!(state_pos < rel_pos);
-        assert!(rel_pos < wc_pos);
-        assert!(wc_pos < thread_pos);
+        assert!(rel_pos < wm_pos);
+        assert!(wm_pos < thread_pos);
         assert!(thread_pos < events_pos);
         assert!(events_pos < ep_pos);
         assert!(ep_pos < lt_pos);
@@ -781,7 +826,9 @@ mod tests {
             recent_events: &events,
             episodic_summaries: &[],
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -820,7 +867,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -869,7 +918,11 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &notes,
-            working_context: "Some focus text",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "Some focus text".into(),
+            ),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -889,13 +942,15 @@ mod tests {
         let sources = make_full_sources(&snap);
         let result = compiler.compile(&sources).unwrap();
 
-        // Should have entries for all 8 sections
-        assert_eq!(result.sections.len(), 8);
+        // Should have entries for all 10 sections
+        assert_eq!(result.sections.len(), 10);
         let names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"system"));
         assert!(names.contains(&"state_snapshot"));
+        assert!(names.contains(&"plan"));
         assert!(names.contains(&"relationship_snapshot"));
-        assert!(names.contains(&"working_context"));
+        assert!(names.contains(&"conversations"));
+        assert!(names.contains(&"working_memory"));
         assert!(names.contains(&"thread_outputs"));
         assert!(names.contains(&"recent_events"));
         assert!(names.contains(&"episodic_memory"));
@@ -926,7 +981,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &notes,
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -966,7 +1023,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
         let result = compiler.compile(&sources).unwrap();
@@ -992,7 +1051,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
         let result = compiler.compile(&sources).unwrap();
@@ -1079,7 +1140,11 @@ mod tests {
             recent_events: &events,
             episodic_summaries: &episodic,
             long_term_notes: &notes,
-            working_context: "Evaluating options",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "Evaluating options".into(),
+            ),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -1090,7 +1155,7 @@ mod tests {
         assert!(result.prompt.contains("=== RECENT EVENTS ==="));
         assert!(result.prompt.contains("=== EPISODIC MEMORY ==="));
         assert!(result.prompt.contains("=== LONG-TERM MEMORY ==="));
-        assert!(result.prompt.contains("=== WORKING CONTEXT ==="));
+        assert!(result.prompt.contains("=== WORKING MEMORY ==="));
     }
 
     #[test]
@@ -1168,16 +1233,20 @@ mod tests {
             recent_events: &events,
             episodic_summaries: &episodic,
             long_term_notes: &notes,
-            working_context: "Current task",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "Current task".into(),
+            ),
+            conversations: &[],
             system_section_override: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
-        // All 8 section headers should be present
+        // All populated section headers should be present
         assert!(result.prompt.contains("=== SYSTEM ==="));
         assert!(result.prompt.contains("=== STATE"));
         assert!(result.prompt.contains("=== RELATIONSHIPS ==="));
-        assert!(result.prompt.contains("=== WORKING CONTEXT ==="));
+        assert!(result.prompt.contains("=== WORKING MEMORY ==="));
         assert!(result.prompt.contains("=== THREAD OUTPUTS ==="));
         assert!(result.prompt.contains("=== RECENT EVENTS ==="));
         assert!(result.prompt.contains("=== EPISODIC MEMORY ==="));
@@ -1199,7 +1268,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
         let result1 = compiler.compile(&sources1).unwrap();
@@ -1222,7 +1293,11 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &notes,
-            working_context: "New focus",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "New focus".into(),
+            ),
+            conversations: &[],
             system_section_override: None,
         };
         let result2 = compiler.compile(&sources2).unwrap();
@@ -1258,7 +1333,9 @@ mod tests {
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &notes,
-            working_context: "",
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
             system_section_override: None,
         };
 
@@ -1270,6 +1347,151 @@ mod tests {
         );
         // Should not panic; should truncate cleanly
         assert!(result.prompt.contains("=== SYSTEM ==="));
+    }
+
+    // ── E1-T58: compile with active conversations → non-empty conversations section ──
+
+    #[test]
+    fn compile_with_conversations_populates_section() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::EnvelopeId;
+
+        let compiler = make_compiler(100_000);
+        let snap = make_snapshot();
+        let p1 = PrincipalId::new();
+        let now = Utc::now();
+        let mut conv = Conversation::from_first_message(
+            p1,
+            EnvelopeId::new(),
+            ArtifactId::from_content(b"msg1"),
+            now,
+        );
+        conv.topic = Some("Debugging issue #42".into());
+
+        let conversations = vec![conv];
+        let sources = ContextSources {
+            vessel_id: snap.vessel_id,
+            mission: &snap.mission,
+            snapshot: &snap,
+            relationship_snapshot: None,
+            thread_contributions: &[],
+            recent_events: &[],
+            episodic_summaries: &[],
+            long_term_notes: &[],
+            plan: snap.plan.as_ref(),
+            working_memory: &snap.working_memory,
+            conversations: &conversations,
+            system_section_override: None,
+        };
+
+        let result = compiler.compile(&sources).unwrap();
+        assert!(
+            result.prompt.contains("=== CONVERSATIONS ==="),
+            "compiled prompt should contain conversations header"
+        );
+        assert!(
+            result.prompt.contains("Debugging issue #42"),
+            "compiled prompt should contain conversation topic"
+        );
+        assert!(
+            result.prompt.contains("1 msgs"),
+            "compiled prompt should show message count"
+        );
+
+        // Verify the section appears in the breakdown
+        let conv_section = result.sections.iter().find(|s| s.name == "conversations");
+        assert!(
+            conv_section.is_some(),
+            "conversations section should exist in results"
+        );
+        assert!(
+            conv_section.unwrap().used > 0,
+            "conversations section should have non-zero tokens"
+        );
+    }
+
+    // ── E1-T59: conversations section respects 7% budget allocation ──
+
+    #[test]
+    fn compile_conversations_respects_budget() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::EnvelopeId;
+
+        let budget = 10_000u64;
+        let compiler = make_compiler(budget);
+        let snap = make_snapshot();
+        let p1 = PrincipalId::new();
+        let now = Utc::now();
+
+        // Create several conversations with enough data to potentially exceed budget
+        let mut conversations = Vec::new();
+        for i in 0..20 {
+            let mut conv = Conversation::from_first_message(
+                p1,
+                EnvelopeId::new(),
+                ArtifactId::from_content(format!("conv-{i}").as_bytes()),
+                now,
+            );
+            conv.topic = Some(format!("Topic {i}: {}", "discussion ".repeat(10)));
+            for j in 1..5 {
+                conv.add_message(
+                    PrincipalId::new(),
+                    EnvelopeId::new(),
+                    ArtifactId::from_content(format!("conv-{i}-msg-{j}").as_bytes()),
+                    now + chrono::Duration::seconds(j),
+                );
+            }
+            conversations.push(conv);
+        }
+
+        let sources = ContextSources {
+            vessel_id: snap.vessel_id,
+            mission: &snap.mission,
+            snapshot: &snap,
+            relationship_snapshot: None,
+            thread_contributions: &[],
+            recent_events: &[],
+            episodic_summaries: &[],
+            long_term_notes: &[],
+            plan: snap.plan.as_ref(),
+            working_memory: &snap.working_memory,
+            conversations: &conversations,
+            system_section_override: None,
+        };
+
+        let result = compiler.compile(&sources).unwrap();
+        assert!(result.total_tokens <= budget);
+
+        let conv_section = result
+            .sections
+            .iter()
+            .find(|s| s.name == "conversations")
+            .expect("conversations section must exist");
+
+        // Used must not exceed allocated.
+        assert!(
+            conv_section.used <= conv_section.allocated,
+            "conversations used ({}) must not exceed allocated ({})",
+            conv_section.used,
+            conv_section.allocated,
+        );
+        // Base allocation is 7% of budget = 700 tokens. Surplus from empty
+        // sections gets redistributed, so allocated may exceed 700, but the
+        // initial target should be at least 7% of budget.
+        let base_alloc = (budget as f64 * 0.07) as u64;
+        assert!(
+            conv_section.allocated >= base_alloc,
+            "conversations allocated ({}) should be at least 7% of budget ({})",
+            conv_section.allocated,
+            base_alloc,
+        );
+        // Allocated must still fit within total budget
+        assert!(
+            conv_section.allocated <= budget,
+            "conversations allocated ({}) must not exceed total budget ({})",
+            conv_section.allocated,
+            budget,
+        );
     }
 
     // ── E3-T17: CompiledContext JSON roundtrip ──

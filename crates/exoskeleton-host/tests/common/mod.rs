@@ -60,7 +60,7 @@ pub fn make_snapshot(vessel_id: VesselId, tick_number: u64) -> StateSnapshot {
         mission: "test mission".into(),
         plan: None,
         status: VesselStatus::Idle,
-        working_context: String::new(),
+        working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
         thread_summaries: Vec::new(),
         relationship_snapshot_ref: None,
         budget_status: BudgetStatus::unlimited(),

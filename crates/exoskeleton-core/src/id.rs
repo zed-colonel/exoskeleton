@@ -86,6 +86,8 @@ define_id!(ThreadId, "Identity of a cognitive thread.");
 define_id!(PrincipalId, "Identity of a human or agent principal.");
 define_id!(EnvelopeId, "Identity of a message envelope.");
 define_id!(LedgerEntryId, "Identity of a Relationship Ledger entry.");
+define_id!(PlanTaskId, "Identity of a task within a structured plan.");
+define_id!(ConversationId, "Identity of a conversation grouping.");
 
 /// Content-addressed artifact identity (SHA-256 hex string).
 ///

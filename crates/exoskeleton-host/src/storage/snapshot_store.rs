@@ -174,7 +174,7 @@ mod tests {
             mission: "test mission".into(),
             plan: None,
             status: VesselStatus::Idle,
-            working_context: String::new(),
+            working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
@@ -290,9 +290,13 @@ mod tests {
             vessel_id: vid,
             tick_number: 42,
             mission: "Complex mission".into(),
-            plan: Some("Execute plan B".into()),
+            plan: Some(exoskeleton_core::Plan::from_legacy_string(
+                "Execute plan B".into(),
+            )),
             status: VesselStatus::Thinking,
-            working_context: "Evaluating threats".into(),
+            working_memory: exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "Evaluating threats".into(),
+            ),
             thread_summaries: vec![ThreadSummary {
                 thread_id: exoskeleton_core::ThreadId::new(),
                 name: "Threat Monitor".into(),

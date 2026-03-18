@@ -9,13 +9,14 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use exoskeleton_core::budget::ThrashLevel;
+use exoskeleton_core::conversation::{Conversation, ConversationStore};
 use exoskeleton_core::relationship::{RelationshipRecord, RelationshipSnapshot};
 use exoskeleton_core::tick::TickRecord;
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactKind, ArtifactStore, BudgetStatus, EpisodicSummary, EventEntry,
-    EventLedger, EventType, ExoError, LedgerEntryId, LongTermNote, PrincipalId, SnapshotStore,
-    StateSnapshot, ThreadPriority, ThreadSchedule, ThreadStatus, TickId, TickStore, VesselId,
-    VesselStatus,
+    Artifact, ArtifactId, ArtifactKind, ArtifactStore, BudgetStatus, ConversationId,
+    EpisodicSummary, EventEntry, EventLedger, EventType, ExoError, LedgerEntryId, LongTermNote,
+    PrincipalId, SnapshotStore, StateSnapshot, ThreadPriority, ThreadSchedule, ThreadStatus,
+    TickId, TickStore, VesselId, VesselStatus,
 };
 use exoskeleton_memory::MemoryStore;
 use exoskeleton_relationship::{compile_relationship_snapshot, RelationshipLedger};
@@ -431,6 +432,20 @@ impl VesselInspector {
         }
     }
 
+    // ── E1-S2: Conversation inspection ──
+
+    /// Get active conversations.
+    pub fn conversations(&self, limit: usize) -> Result<Vec<Conversation>, ExoError> {
+        self.storage
+            .conversation_store()
+            .active_conversations(limit)
+    }
+
+    /// Get a single conversation by ID.
+    pub fn conversation(&self, id: ConversationId) -> Result<Option<Conversation>, ExoError> {
+        self.storage.conversation_store().get(id)
+    }
+
     // ── Epoch 0: Charter hot-reload ──
 
     /// Reload thread charters from prompt files on disk.
@@ -508,7 +523,7 @@ impl VesselInspector {
                 .to_string(),
             plan: source_snapshot.plan.clone(),
             status: VesselStatus::Idle,
-            working_context: source_snapshot.working_context.clone(),
+            working_memory: source_snapshot.working_memory.clone(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
@@ -767,9 +782,13 @@ mod tests {
             vessel_id: VesselId::new(),
             tick_number: 5,
             mission: "source mission".into(),
-            plan: Some("the plan".into()),
+            plan: Some(exoskeleton_core::Plan::from_legacy_string(
+                "the plan".into(),
+            )),
             status: VesselStatus::Idle,
-            working_context: "working on something".into(),
+            working_memory: exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "working on something".into(),
+            ),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
@@ -820,9 +839,13 @@ mod tests {
             vessel_id: VesselId::new(),
             tick_number: 3,
             mission: "original mission".into(),
-            plan: Some("execute plan B".into()),
+            plan: Some(exoskeleton_core::Plan::from_legacy_string(
+                "execute plan B".into(),
+            )),
             status: VesselStatus::Acting,
-            working_context: "analyzing data".into(),
+            working_memory: exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
+                "analyzing data".into(),
+            ),
             thread_summaries: vec![exoskeleton_core::snapshot::ThreadSummary {
                 thread_id: exoskeleton_core::ThreadId::new(),
                 name: "Threat Monitor".into(),
@@ -853,8 +876,8 @@ mod tests {
         assert_eq!(forked.vessel_id, result.vessel_id);
         assert_ne!(forked.vessel_id, source_snap.vessel_id);
         assert_eq!(forked.mission, "original mission");
-        assert_eq!(forked.plan, Some("execute plan B".into()));
-        assert_eq!(forked.working_context, "analyzing data");
+        assert_eq!(forked.plan.as_ref().unwrap().objective, "execute plan B");
+        assert_eq!(forked.working_memory.entries[0].value, "analyzing data");
         assert_eq!(forked.status, VesselStatus::Idle);
         assert!(forked.thread_summaries.is_empty());
         assert!(forked.relationship_snapshot_ref.is_none());
@@ -912,6 +935,38 @@ mod tests {
 
         // E3-T29
         assert!(matches!(result, Err(ExoError::Config(msg)) if msg.contains("already exists")));
+    }
+
+    // ── E1-T60: VesselInspector.conversations() ──
+
+    #[test]
+    fn conversations_returns_active() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::{EnvelopeId, PrincipalId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        // Save a conversation directly to the store
+        let conv = Conversation::from_first_message(
+            PrincipalId::new(),
+            EnvelopeId::new(),
+            ArtifactId::from_content(b"inspector-test"),
+            Utc::now(),
+        );
+        inspector.storage.conversation_store().save(&conv).unwrap();
+
+        let convs = inspector.conversations(10).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].id, conv.id);
+
+        // Get by ID
+        let found = inspector.conversation(conv.id).unwrap();
+        assert!(found.is_some());
+        assert!(inspector
+            .conversation(exoskeleton_core::ConversationId::new())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

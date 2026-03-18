@@ -10,8 +10,10 @@ use exoskeleton_core::artifact::{Artifact, ArtifactKind, ArtifactRef};
 use exoskeleton_core::budget::{
     CognitiveBudgetConfig, EscalationPolicy, ThrashLevel, ToolBudgetConfig,
 };
+use exoskeleton_core::conversation::{Conversation, ConversationMessage, ConversationState};
 use exoskeleton_core::event::{EventEntry, EventType, LiveEvent};
 use exoskeleton_core::memory::{EpisodicSummary, LongTermNote};
+use exoskeleton_core::plan::{Plan, PlanTask, PlanTaskStatus};
 use exoskeleton_core::relationship::{
     PrincipalSummary, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
 };
@@ -20,8 +22,10 @@ use exoskeleton_core::thread::{ThreadPriority, ThreadSchedule, ThreadStatus};
 use exoskeleton_core::tick::{
     ActionOutcome, ActionRecord, LlmCallRecord, ThreadContribution, TickPhase, TickRecord,
 };
+use exoskeleton_core::working_memory::{WorkingMemory, WorkingMemoryEntry};
 use exoskeleton_core::{
-    ArtifactId, EnvelopeId, LedgerEntryId, PrincipalId, ThreadId, TickId, VesselId,
+    ArtifactId, ConversationId, EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId,
+    TickId, VesselId,
 };
 // ── exoskeleton-daemon types ──
 use exoskeleton_daemon::handlers::{
@@ -62,6 +66,8 @@ fn export_typescript_types() {
     emit!(output, &cfg, EnvelopeId);
     emit!(output, &cfg, LedgerEntryId);
     emit!(output, &cfg, ArtifactId);
+    emit!(output, &cfg, PlanTaskId);
+    emit!(output, &cfg, ConversationId);
 
     // ── Simple enums ──
     emit!(output, &cfg, VesselStatus);
@@ -74,6 +80,14 @@ fn export_typescript_types() {
     emit!(output, &cfg, ThreadSchedule);
     emit!(output, &cfg, ThreadStatus);
     emit!(output, &cfg, ThrashLevel);
+    emit!(output, &cfg, PlanTaskStatus);
+    emit!(output, &cfg, ConversationState);
+
+    // ── Plan & Working Memory types (E1-S1) ──
+    emit!(output, &cfg, Plan);
+    emit!(output, &cfg, PlanTask);
+    emit!(output, &cfg, WorkingMemory);
+    emit!(output, &cfg, WorkingMemoryEntry);
 
     // ── Core structs ──
     emit!(output, &cfg, BudgetStatus);
@@ -95,6 +109,10 @@ fn export_typescript_types() {
     emit!(output, &cfg, CognitiveBudgetConfig);
     emit!(output, &cfg, ToolBudgetConfig);
     emit!(output, &cfg, EscalationPolicy);
+
+    // ── Conversation types (E1-S2) ──
+    emit!(output, &cfg, ConversationMessage);
+    emit!(output, &cfg, Conversation);
 
     // ── Memory compiler types (W-24) ──
     emit!(output, &cfg, SectionResult);
@@ -143,6 +161,14 @@ fn export_typescript_types() {
     assert!(
         content.contains("ForkResponse"),
         "Missing ForkResponse type"
+    );
+    assert!(
+        content.contains("Conversation"),
+        "Missing Conversation type"
+    );
+    assert!(
+        content.contains("ConversationState"),
+        "Missing ConversationState type"
     );
 }
 

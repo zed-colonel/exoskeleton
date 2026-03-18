@@ -534,7 +534,7 @@ mod proptest_tests {
                 mission: "proptest mission".into(),
                 plan: None,
                 status,
-                working_context: String::new(),
+                working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
                 thread_summaries: Vec::new(),
                 relationship_snapshot_ref: None,
                 budget_status: BudgetStatus::unlimited(),

@@ -3,10 +3,13 @@
 //! Each PODAARA step produces a typed result that flows to the next step.
 //! These types are internal to the kernel — they are not part of the public API.
 
+use exoskeleton_core::conversation::Conversation;
+use exoskeleton_core::plan::{Plan, PlanTaskStatus, PlanUpdate};
 use exoskeleton_core::tick::{ActionRecord, LlmCallRecord, ThreadContribution};
+use exoskeleton_core::working_memory::WorkingMemoryOp;
 use exoskeleton_core::{
-    ArtifactId, EventEntry, MessageEnvelope, RelationshipRecord, RelationshipSnapshot, ThreadId,
-    TickId, VesselId,
+    ArtifactId, EventEntry, MessageEnvelope, PlanTaskId, RelationshipRecord, RelationshipSnapshot,
+    ThreadId, TickId, VesselId,
 };
 use exoskeleton_memory::CompiledContext;
 use serde::{Deserialize, Serialize};
@@ -28,6 +31,8 @@ pub struct ThreadPayload {
 #[derive(Debug, Clone)]
 pub struct PerceptionResult {
     pub new_messages: Vec<MessageEnvelope>,
+    /// Active conversations after envelope grouping (E1-S2).
+    pub active_conversations: Vec<Conversation>,
     pub thread_outputs: Vec<ThreadContribution>,
     pub pending_action_results: Vec<EventEntry>,
 }
@@ -43,9 +48,12 @@ pub struct OrientationResult {
 pub struct DecisionProtocol {
     pub reasoning: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_update: Option<String>,
+    #[serde(deserialize_with = "deserialize_plan_update_compat")]
+    pub plan_update: Option<PlanUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_context_update: Option<String>,
+    #[serde(alias = "working_context_update")]
+    #[serde(deserialize_with = "deserialize_working_memory_ops_compat")]
+    pub working_memory_ops: Option<Vec<WorkingMemoryOp>>,
     #[serde(default)]
     pub actions: Vec<PlannedAction>,
     #[serde(default)]
@@ -58,6 +66,9 @@ pub struct PlannedAction {
     pub tool_name: String,
     pub params: serde_json::Value,
     pub rationale: String,
+    /// Optional reference to the plan task this action implements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_task_id: Option<PlanTaskId>,
 }
 
 /// Output of the Decide step.
@@ -72,12 +83,10 @@ pub struct DecisionResult {
 }
 
 /// Proposed changes to the StateSnapshot from the Decide step.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct SnapshotDelta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_update: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_context_update: Option<String>,
+    pub plan_update: Option<PlanUpdate>,
+    pub working_memory_ops: Option<Vec<WorkingMemoryOp>>,
 }
 
 /// Output of the Align step.
@@ -111,6 +120,98 @@ pub struct ReflectionResult {
     pub action_success_rate: f64,
     pub observations: Vec<String>,
     pub concerns: Vec<String>,
+    /// Task status updates from Reflect LLM call.
+    pub task_updates: Vec<TaskStatusUpdate>,
+    /// Working memory operations from Reflect LLM call.
+    pub working_memory_ops: Vec<WorkingMemoryOp>,
+    /// Whether the Reflect step recommends replanning next tick.
+    pub should_replan: bool,
+    /// LLM call record (None if heuristic-only fallback).
+    pub llm_call_record: Option<LlmCallRecord>,
+}
+
+/// The reflect protocol: structured JSON format for LLM Reflect responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReflectProtocol {
+    pub outcome_assessment: String,
+    #[serde(default)]
+    pub task_updates: Vec<TaskStatusUpdate>,
+    #[serde(default)]
+    pub working_memory_ops: Vec<WorkingMemoryOp>,
+    #[serde(default)]
+    pub observations: Vec<String>,
+    #[serde(default)]
+    pub concerns: Vec<String>,
+    #[serde(default)]
+    pub should_replan: bool,
+}
+
+/// A task status update from the Reflect step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskStatusUpdate {
+    pub task_id: PlanTaskId,
+    pub new_status: PlanTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Custom deserializer: handles legacy string and new PlanUpdate.
+fn deserialize_plan_update_compat<'de, D>(deserializer: D) -> Result<Option<PlanUpdate>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(PlanUpdate::Replace {
+                    plan: Plan::from_legacy_string(s),
+                }))
+            }
+        }
+        Some(v @ serde_json::Value::Object(_)) => {
+            let update: PlanUpdate = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            Ok(Some(update))
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string, object, or null for plan_update, got: {other}"
+        ))),
+    }
+}
+
+/// Custom deserializer: handles legacy string and new Vec<WorkingMemoryOp>.
+fn deserialize_working_memory_ops_compat<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<WorkingMemoryOp>>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(vec![WorkingMemoryOp::Set {
+                    key: "context".into(),
+                    value: s,
+                    ttl_ticks: None,
+                }]))
+            }
+        }
+        Some(serde_json::Value::Array(_)) => {
+            let ops: Vec<WorkingMemoryOp> =
+                serde_json::from_value(value.unwrap()).map_err(serde::de::Error::custom)?;
+            Ok(Some(ops))
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string, array, or null for working_memory_ops, got: {other}"
+        ))),
+    }
 }
 
 /// Extract JSON content from a markdown code fence.
@@ -146,43 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn decision_protocol_roundtrip_full() {
-        let proto = DecisionProtocol {
-            reasoning: "I need to write a file".into(),
-            plan_update: Some("Updated plan: write output".into()),
-            working_context_update: Some("Writing output file".into()),
-            actions: vec![
-                PlannedAction {
-                    tool_name: "fs.write".into(),
-                    params: serde_json::json!({"path": "/tmp/out.txt", "content": "hello"}),
-                    rationale: "Write the output".into(),
-                },
-                PlannedAction {
-                    tool_name: "delay".into(),
-                    params: serde_json::json!({"duration_ms": 100}),
-                    rationale: "Wait for IO".into(),
-                },
-            ],
-            memory_notes: vec![
-                "Learned that fs.write works".into(),
-                "Output path is /tmp/out.txt".into(),
-            ],
-        };
-        let json = serde_json::to_string(&proto).unwrap();
-        let parsed: DecisionProtocol = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.reasoning, proto.reasoning);
-        assert_eq!(parsed.plan_update, proto.plan_update);
-        assert_eq!(parsed.working_context_update, proto.working_context_update);
-        assert_eq!(parsed.actions.len(), 2);
-        assert_eq!(parsed.memory_notes.len(), 2);
-    }
-
-    #[test]
     fn decision_protocol_roundtrip_minimal() {
         let proto = DecisionProtocol {
             reasoning: "Nothing to do".into(),
             plan_update: None,
-            working_context_update: None,
+            working_memory_ops: None,
             actions: vec![],
             memory_notes: vec![],
         };
@@ -190,7 +259,7 @@ mod tests {
         let parsed: DecisionProtocol = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.reasoning, "Nothing to do");
         assert!(parsed.plan_update.is_none());
-        assert!(parsed.working_context_update.is_none());
+        assert!(parsed.working_memory_ops.is_none());
         assert!(parsed.actions.is_empty());
         assert!(parsed.memory_notes.is_empty());
     }
@@ -200,14 +269,38 @@ mod tests {
         let proto = DecisionProtocol {
             reasoning: "Test".into(),
             plan_update: None,
-            working_context_update: None,
+            working_memory_ops: None,
             actions: vec![],
             memory_notes: vec![],
         };
         let value: serde_json::Value = serde_json::to_value(&proto).unwrap();
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("plan_update"));
-        assert!(!obj.contains_key("working_context_update"));
+        assert!(!obj.contains_key("working_memory_ops"));
+    }
+
+    // ── E1-T17: PlannedAction with plan_task_id roundtrip ──
+    #[test]
+    fn planned_action_with_task_id_roundtrip() {
+        let task_id = exoskeleton_core::PlanTaskId::new();
+        let action = PlannedAction {
+            tool_name: "fs.write".into(),
+            params: serde_json::json!({"path": "/tmp/out.txt"}),
+            rationale: "Write output".into(),
+            plan_task_id: Some(task_id),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.plan_task_id, Some(task_id));
+    }
+
+    // ── E1-T18: PlannedAction without plan_task_id backward compat ──
+    #[test]
+    fn planned_action_without_task_id_compat() {
+        let json = r#"{"tool_name":"fs.write","params":{},"rationale":"test"}"#;
+        let parsed: PlannedAction = serde_json::from_str(json).unwrap();
+        assert!(parsed.plan_task_id.is_none());
+        assert_eq!(parsed.tool_name, "fs.write");
     }
 
     #[test]
@@ -220,6 +313,7 @@ mod tests {
                 "body": {"key": "value", "nested": [1, 2, 3]}
             }),
             rationale: "Fetch data from API".into(),
+            plan_task_id: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
@@ -230,33 +324,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_delta_roundtrip() {
-        // With updates
-        let delta = SnapshotDelta {
-            plan_update: Some("New plan".into()),
-            working_context_update: Some("New context".into()),
-        };
-        let json = serde_json::to_string(&delta).unwrap();
-        let parsed: SnapshotDelta = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.plan_update, Some("New plan".into()));
-        assert_eq!(parsed.working_context_update, Some("New context".into()));
-
-        // Without updates
-        let delta_empty = SnapshotDelta {
-            plan_update: None,
-            working_context_update: None,
-        };
-        let json_empty = serde_json::to_string(&delta_empty).unwrap();
-        let parsed_empty: SnapshotDelta = serde_json::from_str(&json_empty).unwrap();
-        assert!(parsed_empty.plan_update.is_none());
-        assert!(parsed_empty.working_context_update.is_none());
-    }
-
-    #[test]
     fn snapshot_delta_default_is_no_change() {
         let delta = SnapshotDelta::default();
         assert!(delta.plan_update.is_none());
-        assert!(delta.working_context_update.is_none());
+        assert!(delta.working_memory_ops.is_none());
     }
 
     #[test]
@@ -266,6 +337,120 @@ mod tests {
         assert_eq!(parsed.reasoning, "idle");
         assert!(parsed.actions.is_empty());
         assert!(parsed.memory_notes.is_empty());
+    }
+
+    // ── E1-T14: Deserialize legacy "plan_update": "text" in DecisionProtocol ──
+    #[test]
+    fn decision_protocol_legacy_plan_update() {
+        let json = r#"{"reasoning": "test", "plan_update": "Execute plan A", "actions": []}"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        match parsed.plan_update.unwrap() {
+            exoskeleton_core::PlanUpdate::Replace { plan } => {
+                assert_eq!(plan.objective, "Execute plan A");
+            }
+            other => panic!("expected Replace, got: {other:?}"),
+        }
+    }
+
+    // ── E1-T15: Deserialize new "plan_update": {"type":"replace",...} ──
+    #[test]
+    fn decision_protocol_new_plan_update() {
+        let json = r#"{
+            "reasoning": "test",
+            "plan_update": {"type": "replace", "plan": {"objective": "X", "tasks": [], "updated_at": "2026-01-01T00:00:00Z"}},
+            "actions": []
+        }"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        match parsed.plan_update.unwrap() {
+            exoskeleton_core::PlanUpdate::Replace { plan } => {
+                assert_eq!(plan.objective, "X");
+            }
+            other => panic!("expected Replace, got: {other:?}"),
+        }
+    }
+
+    // ── E1-T16: Deserialize absent plan_update as None ──
+    #[test]
+    fn decision_protocol_absent_plan_update() {
+        let json = r#"{"reasoning": "test", "actions": []}"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        assert!(parsed.plan_update.is_none());
+    }
+
+    // ── E1-T35: Deserialize legacy "working_context_update": "text" as ops ──
+    #[test]
+    fn decision_protocol_legacy_working_context_update() {
+        let json = r#"{"reasoning": "test", "working_context_update": "New focus", "actions": []}"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        let ops = parsed.working_memory_ops.unwrap();
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            exoskeleton_core::WorkingMemoryOp::Set { key, value, .. } => {
+                assert_eq!(key, "context");
+                assert_eq!(value, "New focus");
+            }
+            other => panic!("expected Set, got: {other:?}"),
+        }
+    }
+
+    // ── E1-T36: Deserialize new "working_memory_ops": [...] as ops ──
+    #[test]
+    fn decision_protocol_new_working_memory_ops() {
+        let json = r#"{
+            "reasoning": "test",
+            "working_memory_ops": [{"op": "set", "key": "k", "value": "v"}, {"op": "remove", "key": "old"}],
+            "actions": []
+        }"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        let ops = parsed.working_memory_ops.unwrap();
+        assert_eq!(ops.len(), 2);
+    }
+
+    // ── E1-T37: Deserialize absent working_memory_ops as None ──
+    #[test]
+    fn decision_protocol_absent_working_memory_ops() {
+        let json = r#"{"reasoning": "test", "actions": []}"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        assert!(parsed.working_memory_ops.is_none());
+    }
+
+    // ── E1-T50: ReflectProtocol JSON roundtrip ──
+    #[test]
+    fn reflect_protocol_roundtrip() {
+        let proto = ReflectProtocol {
+            outcome_assessment: "Action succeeded".into(),
+            task_updates: vec![TaskStatusUpdate {
+                task_id: exoskeleton_core::PlanTaskId::new(),
+                new_status: exoskeleton_core::PlanTaskStatus::Completed,
+                reason: Some("Action succeeded".into()),
+            }],
+            working_memory_ops: vec![exoskeleton_core::WorkingMemoryOp::Set {
+                key: "obs".into(),
+                value: "learned something".into(),
+                ttl_ticks: Some(10),
+            }],
+            observations: vec!["All good".into()],
+            concerns: vec![],
+            should_replan: false,
+        };
+        let json = serde_json::to_string(&proto).unwrap();
+        let parsed: ReflectProtocol = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.outcome_assessment, proto.outcome_assessment);
+        assert_eq!(parsed.task_updates.len(), 1);
+        assert_eq!(parsed.working_memory_ops.len(), 1);
+    }
+
+    // ── E1-T51: TaskStatusUpdate JSON roundtrip ──
+    #[test]
+    fn task_status_update_roundtrip() {
+        let update = TaskStatusUpdate {
+            task_id: exoskeleton_core::PlanTaskId::new(),
+            new_status: exoskeleton_core::PlanTaskStatus::Failed,
+            reason: Some("Timeout".into()),
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        let parsed: TaskStatusUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(update, parsed);
     }
 
     #[test]
@@ -287,6 +472,7 @@ That's my plan."#;
         assert_eq!(parsed.reasoning, "I should write a file");
         assert_eq!(parsed.actions.len(), 1);
         assert_eq!(parsed.actions[0].tool_name, "fs.write");
+        assert!(parsed.actions[0].plan_task_id.is_none());
 
         // No code fence
         assert!(extract_json_from_code_fence("no code fence here").is_none());

@@ -65,6 +65,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/inbox/history", get(handlers::get_inbox_history))
         .route("/api/v1/config", get(handlers::get_config))
+        // E1-S2: Conversation endpoints
+        .route("/api/v1/conversations", get(handlers::get_conversations))
+        .route(
+            "/api/v1/conversations/{id}",
+            get(handlers::get_conversation_by_id),
+        )
         // Operational endpoints
         .route("/healthz", get(handlers::healthz))
         .route("/ready", get(handlers::readyz))
