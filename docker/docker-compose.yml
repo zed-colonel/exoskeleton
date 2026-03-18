@@ -1,26 +1,26 @@
 # Exoskeleton Docker Compose
 #
-# Profiles:
-#   docker compose --profile single up        Single vessel + Observatory
-#   docker compose --profile multi up          Multiple vessels + Observatory
+# Quick start:
+#   1. docker compose build
+#   2. docker compose run -it vessel bootstrap    # interactive first-run wizard
+#   3. docker compose up -d                       # start vessel + Observatory
+#   4. Open http://localhost:7600                  # embedded Observatory
 #
-# Usage:
-#   1. Run `exo bootstrap` locally to generate vessel.toml + data
-#   2. Set required env vars (API keys, EXO_DATA_DIR, etc.)
-#   3. docker compose --profile single up
+# After bootstrap, use `docker compose up/down` to start and stop.
+# The vessel data persists in the mounted volume between runs.
 #
-# Observatory connects to vessels via host-mapped ports.
-# The browser (not the container) makes requests to vessel APIs,
-# so vessels must be accessible from the host network.
+# Multi-vessel (advanced):
+#   docker compose --profile multi up
 #
-# Volume permissions:
-#   The data directory is created by `exo bootstrap` under the host user's
-#   UID. The container must run as the same UID to write to SQLite databases.
-#   Set EXO_USER_ID to your UID (run `id -u` to find it), or the container
-#   will default to the built-in `exo` user which may lack write access.
+# Environment variables:
+#   EXO_USER_ID / EXO_GROUP_ID  — host UID/GID for file ownership (default: 1000)
+#   EXO_PORT                    — host port for vessel API (default: 7600)
+#   EXO_DATA_DIR                — host path for persistent data (default: ./data/vessel)
+#   ANTHROPIC_API_KEY           — Anthropic API key (if using Anthropic backend)
+#   OPENAI_API_KEY              — OpenAI API key (if using OpenAI backend)
 
 services:
-  # ── Single Vessel ──────────────────────────────────────────────
+  # ── Vessel (with embedded Observatory) ─────────────────────────
   vessel:
     build:
       context: ..
@@ -28,16 +28,15 @@ services:
       additional_contexts:
         actionqueue: ../../actionqueue
         worldinterface: ../../worldinterface
-    profiles: ["single"]
-    user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
     ports:
       - "${EXO_PORT:-7600}:7600"
     volumes:
       - ${EXO_DATA_DIR:-./data/vessel}:/data
     environment:
+      - EXO_USER_ID=${EXO_USER_ID:-1000}
+      - EXO_GROUP_ID=${EXO_GROUP_ID:-1000}
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
-      - EXO_CORS_ORIGINS=http://localhost:${OBSERVATORY_PORT:-3000}
       - RUST_LOG=${RUST_LOG:-info}
       # LLM API keys — pass through from host
       - ANTHROPIC_API_KEY
@@ -53,15 +52,15 @@ services:
         actionqueue: ../../actionqueue
         worldinterface: ../../worldinterface
     profiles: ["multi"]
-    user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
     ports:
       - "7600:7600"
     volumes:
       - ${EXO_DATA_DIR_A:-./data/vessel-a}:/data
     environment:
+      - EXO_USER_ID=${EXO_USER_ID:-1000}
+      - EXO_GROUP_ID=${EXO_GROUP_ID:-1000}
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
-      - EXO_CORS_ORIGINS=http://localhost:${OBSERVATORY_PORT:-3000}
       - RUST_LOG=${RUST_LOG:-info}
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
@@ -76,28 +75,28 @@ services:
         actionqueue: ../../actionqueue
         worldinterface: ../../worldinterface
     profiles: ["multi"]
-    user: "${EXO_USER_ID:-1000}:${EXO_GROUP_ID:-1000}"
     ports:
       - "7601:7600"
     volumes:
       - ${EXO_DATA_DIR_B:-./data/vessel-b}:/data
     environment:
+      - EXO_USER_ID=${EXO_USER_ID:-1000}
+      - EXO_GROUP_ID=${EXO_GROUP_ID:-1000}
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
-      - EXO_CORS_ORIGINS=http://localhost:${OBSERVATORY_PORT:-3000}
       - RUST_LOG=${RUST_LOG:-info}
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
     restart: unless-stopped
 
-  # ── Observatory ────────────────────────────────────────────────
+  # ── Standalone Observatory (multi-vessel only) ─────────────────
   observatory:
     build:
       context: ..
       dockerfile: docker/Dockerfile.observatory
-    profiles: ["single", "multi"]
+    profiles: ["multi"]
     ports:
       - "${OBSERVATORY_PORT:-3000}:80"
     environment:
-      - OBSERVATORY_VESSEL_URLS=${OBSERVATORY_VESSEL_URLS:-http://localhost:${EXO_PORT:-7600}}
+      - OBSERVATORY_VESSEL_URLS=${OBSERVATORY_VESSEL_URLS:-http://localhost:7600,http://localhost:7601}
     restart: unless-stopped

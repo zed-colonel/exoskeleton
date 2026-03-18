@@ -69,17 +69,16 @@ RUN cargo build --release --bin exo
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates gosu && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r exo && useradd -r -g exo -d /data -s /sbin/nologin exo
-
-# Copy binary
+# Copy binary and entrypoint
 COPY --from=builder /build/target/release/exo /usr/local/bin/exo
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Data volume
-RUN mkdir -p /data && chown exo:exo /data
+RUN mkdir -p /data
 VOLUME /data
 
 # Default environment
@@ -88,17 +87,13 @@ ENV EXO_DAEMON_LISTEN=0.0.0.0:7600
 ENV RUST_LOG=info
 
 EXPOSE 7600
-
-# Default to the non-root exo user. When mounting a host directory created
-# by `exo bootstrap` (owned by the host user), override with:
-#   docker run --user "$(id -u):$(id -g)" ...
-# or set user_id in docker-compose.yml. Without this, SQLite will fail
-# with "attempt to write a readonly database" on the mounted volume.
-USER exo
 WORKDIR /data
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD ["/usr/local/bin/exo", "--addr", "http://127.0.0.1:7600", "engines"]
 
-ENTRYPOINT ["/usr/local/bin/exo"]
-CMD ["start", "--config", "/data/vessel.toml"]
+# Entrypoint runs as root to fix /data permissions, then drops to
+# the target user via gosu. EXO_USER_ID/EXO_GROUP_ID control the
+# runtime user (default: 1000:1000).
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["start"]

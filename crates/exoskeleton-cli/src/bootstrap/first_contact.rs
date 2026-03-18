@@ -38,6 +38,12 @@ pub async fn run_first_contact(
 
     let stdin = io::stdin();
 
+    // Seed with a user message — Anthropic requires at least one message.
+    messages.push(LlmMessage {
+        role: LlmRole::User,
+        content: "Hello.".into(),
+    });
+
     // Get the vessel's opening message
     let opening = call_llm(llm_config, &messages, &system_prompt).await?;
     total_tokens_in += opening.tokens_in;

@@ -22,6 +22,7 @@ Thumbs.db
 docker/
 !docker/nginx.conf
 !docker/observatory-entrypoint.sh
+!docker/entrypoint.sh
 # Observatory build artifacts (D3)
 observatory/node_modules/
 observatory/dist/
