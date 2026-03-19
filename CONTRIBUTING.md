@@ -93,4 +93,4 @@ See the project documentation for the full invariant specification.
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
-MIT License that covers this project.
+GNU Affero General Public License v3.0 that covers this project.
