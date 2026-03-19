@@ -13,10 +13,6 @@ categories = ["command-line-utilities"]
 name = "exo"
 path = "src/main.rs"
 
-[features]
-default = ["embedded-observatory"]
-embedded-observatory = ["exoskeleton-daemon/embedded-observatory"]
-
 [dependencies]
 exoskeleton-core = { workspace = true }
 exoskeleton-host = { workspace = true }

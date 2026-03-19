@@ -8,8 +8,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 
-#[cfg(feature = "embedded-observatory")]
-use crate::embedded;
 use crate::handlers;
 use crate::state::AppState;
 
@@ -77,12 +75,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ready", get(handlers::readyz))
         .route("/metrics", get(handlers::metrics))
         .with_state(state);
-
-    // Embedded Observatory: serve SPA from compiled-in assets.
-    #[cfg(feature = "embedded-observatory")]
-    let router = router
-        .route("/config.js", get(embedded::serve_config_js))
-        .fallback(embedded::serve_embedded_safe);
 
     router.layer(cors)
 }

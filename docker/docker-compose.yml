@@ -3,8 +3,8 @@
 # Quick start:
 #   1. docker compose build
 #   2. docker compose run -it vessel bootstrap    # interactive first-run wizard
-#   3. docker compose up -d                       # start vessel + Observatory
-#   4. Open http://localhost:7600                  # embedded Observatory
+#   3. docker compose up -d                       # start vessel daemon
+#   4. Connect Observatory (see ~/src/observatory) or use the CLI
 #
 # After bootstrap, use `docker compose up/down` to start and stop.
 # The vessel data persists in the mounted volume between runs.
@@ -20,7 +20,7 @@
 #   OPENAI_API_KEY              — OpenAI API key (if using OpenAI backend)
 
 services:
-  # ── Vessel (with embedded Observatory) ─────────────────────────
+  # ── Vessel ───────────────────────────────────────────────────────
   vessel:
     build:
       context: ..
@@ -87,16 +87,4 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
-    restart: unless-stopped
-
-  # ── Standalone Observatory (multi-vessel only) ─────────────────
-  observatory:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.observatory
-    profiles: ["multi"]
-    ports:
-      - "${OBSERVATORY_PORT:-3000}:80"
-    environment:
-      - OBSERVATORY_VESSEL_URLS=${OBSERVATORY_VESSEL_URLS:-http://localhost:7600,http://localhost:7601}
     restart: unless-stopped

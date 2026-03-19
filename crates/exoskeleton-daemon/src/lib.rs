@@ -6,8 +6,6 @@
 //!
 //! Operational endpoints: `/healthz`, `/ready`, `/metrics` (Prometheus).
 
-#[cfg(feature = "embedded-observatory")]
-pub mod embedded;
 pub mod handlers;
 pub mod routes;
 pub mod state;
@@ -98,12 +96,6 @@ impl ExoDaemon {
             listen_addr = %self.listen_addr,
             vessel_id = %vessel_id,
             "daemon listening"
-        );
-
-        #[cfg(feature = "embedded-observatory")]
-        tracing::info!(
-            url = %format!("http://{}", self.listen_addr),
-            "Observatory UI available (embedded mode)"
         );
 
         axum::serve(listener, router)

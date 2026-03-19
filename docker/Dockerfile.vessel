@@ -1,18 +1,3 @@
-# ── Stage 0: Observatory build ───────────────────────────────────
-FROM node:22-alpine AS observatory
-
-WORKDIR /build
-
-# Copy package manifests first for dependency caching
-COPY observatory/package.json observatory/package-lock.json ./
-
-# Install dependencies (cached unless package.json/lock changes)
-RUN npm ci
-
-# Copy source and build production bundle
-COPY observatory/ .
-RUN npm run build
-
 # ── Stage 1: Rust builder ───────────────────────────────────────
 FROM rust:1.89-bookworm AS builder
 
@@ -56,9 +41,6 @@ COPY prompts/ prompts/
 COPY tests/ tests/
 COPY examples/ examples/
 COPY clippy.toml rustfmt.toml ./
-
-# Copy Observatory dist from Stage 0 (required for embedded-observatory feature)
-COPY --from=observatory /build/dist observatory/dist/
 
 # Touch source files to invalidate the stub build cache
 RUN find crates/ tests/ examples/ -name "*.rs" -exec touch {} +

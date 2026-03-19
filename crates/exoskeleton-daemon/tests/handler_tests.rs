@@ -1129,55 +1129,6 @@ async fn get_tick_context_returns_error_for_invalid_id() {
     );
 }
 
-// ── E3: Embedded Observatory integration tests ──
-
-#[cfg(feature = "embedded-observatory")]
-#[tokio::test]
-async fn embedded_api_routes_return_json_not_index_html() {
-    // E3-T3: API routes take precedence over SPA fallback
-    let dir = tempfile::tempdir().unwrap();
-    let state = test_app_state(dir.path());
-    let app = build_router(state);
-
-    let resp = app
-        .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    // Should be 204 (no snapshot stored), NOT 200 with text/html
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    let ct = resp.headers().get("content-type");
-    // 204 may not have content-type, but if present it must not be text/html
-    if let Some(ct) = ct {
-        assert!(
-            !ct.to_str().unwrap().contains("text/html"),
-            "API should not return text/html"
-        );
-    }
-}
-
-#[cfg(feature = "embedded-observatory")]
-#[tokio::test]
-async fn embedded_healthz_still_returns_200() {
-    // E3-T6: Operational routes unaffected by embedded fallback
-    let dir = tempfile::tempdir().unwrap();
-    let state = test_app_state(dir.path());
-    let app = build_router(state);
-
-    let resp = app
-        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp.into_body()).await;
-    // Should be the healthz text, not index.html
-    assert!(
-        !body.contains("<!DOCTYPE html>"),
-        "healthz should not return HTML page"
-    );
-}
-
 #[tokio::test]
 async fn router_includes_all_d2_routes() {
     let dir = tempfile::tempdir().unwrap();

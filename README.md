@@ -64,7 +64,8 @@ Exoskeleton operates **two physically separate ActionQueue engines** (invariant 
 
 - **HTTP daemon** -- axum-based REST API with 24 endpoints + WebSocket
 - **CLI** -- `exo` binary with `bootstrap`, `start`, `inspect`, `thread`, `relationship`, `budget`, `events`, `engines`, `send`, `artifact`, `memory`, `snapshots`, `inbox-history`, `config`, `reload-charters`, `fork` commands
-- **Docker** -- multi-stage build, 151MB image, compose profiles for single and multi-vessel
+- **Docker** -- multi-stage build, compose profiles for single and multi-vessel
+- **Observatory** -- fleet management UI and vessel orchestration ([separate project](https://github.com/zed-colonel/observatory))
 - **Prometheus metrics** -- `exo_ticks_total`, `exo_tick_duration_seconds`, `exo_current_tick_number`
 - **8 SQLite stores** -- independently queryable, WAL-mode, backup-friendly
 
@@ -220,7 +221,7 @@ exo engines                        # Dual engine health
 
 ```bash
 cargo build --workspace                               # Build all crates
-cargo test --workspace                                # Run all tests (~1,149)
+cargo test --workspace                                # Run all tests (~997)
 cargo clippy --all --all-targets -- -D warnings       # Lint (strict)
 cargo fmt --all -- --check                            # Format check
 cargo doc --workspace --no-deps                       # Build docs
@@ -248,7 +249,7 @@ Nine governing principles enforced across all crates:
 
 ## Testing
 
-~1,149 tests (886 Rust + 263 TypeScript) across unit, integration, and acceptance levels:
+~997 Rust tests across unit, integration, and acceptance levels:
 
 - **Unit tests** -- in-crate `#[cfg(test)] mod tests` blocks
 - **Integration tests** -- multi-crate interaction tests in `exoskeleton-host`
