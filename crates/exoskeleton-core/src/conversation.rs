@@ -54,6 +54,26 @@ pub struct ConversationMessage {
     pub timestamp: DateTime<Utc>,
 }
 
+/// A conversation message with its content resolved from the artifact store.
+///
+/// Used by the conversation messages API endpoint — resolves payload_ref to
+/// actual text content on the server side, avoiding N+1 artifact fetches from
+/// the client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ConversationMessageWithContent {
+    /// The original envelope ID.
+    pub envelope_id: EnvelopeId,
+    /// Who sent this message.
+    pub source: PrincipalId,
+    /// The resolved message text content.
+    pub content: String,
+    /// When this message was sent.
+    pub timestamp: DateTime<Utc>,
+    /// True if this message is from the vessel (reply), false if from a user
+    /// or external principal.
+    pub is_vessel_reply: bool,
+}
+
 /// State of a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -470,6 +490,54 @@ mod tests {
         let limited = store.active_conversations(1).unwrap();
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].id, conv2.id);
+    }
+
+    // ── OA-T21: ConversationMessageWithContent JSON roundtrip ──
+
+    #[test]
+    fn conversation_message_with_content_json_roundtrip() {
+        let msg = ConversationMessageWithContent {
+            envelope_id: EnvelopeId::new(),
+            source: PrincipalId::new(),
+            content: "Hello from the operator".into(),
+            timestamp: Utc::now(),
+            is_vessel_reply: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ConversationMessageWithContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert!(!parsed.is_vessel_reply);
+
+        // Also test vessel reply
+        let reply = ConversationMessageWithContent {
+            envelope_id: EnvelopeId::new(),
+            source: PrincipalId::new(),
+            content: "I'll help with that.".into(),
+            timestamp: Utc::now(),
+            is_vessel_reply: true,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        let parsed: ConversationMessageWithContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(reply, parsed);
+        assert!(parsed.is_vessel_reply);
+    }
+
+    // ── OA-T22: ConversationMessageWithContent ts-rs generates valid TypeScript ──
+
+    #[test]
+    fn conversation_message_with_content_ts_generates() {
+        use ts_rs::TS;
+        let cfg = ts_rs::Config::default();
+        let decl = ConversationMessageWithContent::decl(&cfg);
+        assert!(
+            decl.contains("ConversationMessageWithContent"),
+            "decl: {decl}"
+        );
+        assert!(decl.contains("envelope_id"), "decl: {decl}");
+        assert!(decl.contains("content"), "decl: {decl}");
+        assert!(decl.contains("is_vessel_reply"), "decl: {decl}");
+        assert!(decl.contains("source"), "decl: {decl}");
+        assert!(decl.contains("timestamp"), "decl: {decl}");
     }
 
     // ── E1-T39: ts-rs generates valid TypeScript ──

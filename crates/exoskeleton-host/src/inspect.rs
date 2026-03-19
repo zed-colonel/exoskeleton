@@ -153,6 +153,11 @@ impl VesselInspector {
         }
     }
 
+    /// Access the underlying StorageManager (for daemon write operations like inbox artifact storage).
+    pub fn storage(&self) -> &StorageManager {
+        &self.storage
+    }
+
     /// Current state snapshot (latest from store).
     pub fn snapshot(&self) -> Result<Option<StateSnapshot>, ExoError> {
         self.storage.snapshot_store().latest()
@@ -370,9 +375,17 @@ impl VesselInspector {
                                 exoskeleton_core::MessageEnvelope,
                             >(&artifact.content)
                             {
+                                // Follow payload_ref to retrieve the actual message content.
+                                let content = self
+                                    .storage
+                                    .artifact_store()
+                                    .get(&envelope.payload_ref)
+                                    .ok()
+                                    .flatten()
+                                    .map(|a| String::from_utf8_lossy(&a.content).into_owned());
                                 (
                                     Some(envelope.source),
-                                    None,
+                                    content,
                                     Some(envelope.id),
                                     envelope.in_reply_to,
                                 )
@@ -444,6 +457,53 @@ impl VesselInspector {
     /// Get a single conversation by ID.
     pub fn conversation(&self, id: ConversationId) -> Result<Option<Conversation>, ExoError> {
         self.storage.conversation_store().get(id)
+    }
+
+    /// Load a conversation's messages with content resolved from the artifact store.
+    ///
+    /// For each ConversationMessage in the conversation, follows payload_ref to the
+    /// artifact store to retrieve the actual text. Messages with missing artifacts
+    /// are included with content "(content unavailable)".
+    ///
+    /// The vessel_id is used to determine which messages are vessel replies
+    /// (source == vessel_id as PrincipalId).
+    pub fn conversation_messages(
+        &self,
+        id: ConversationId,
+        limit: usize,
+    ) -> Result<Option<Vec<exoskeleton_core::ConversationMessageWithContent>>, ExoError> {
+        let conversation = match self.storage.conversation_store().get(id)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let vessel_principal = PrincipalId::from(*self.config.vessel_id.as_ref());
+
+        let messages: Vec<exoskeleton_core::ConversationMessageWithContent> = conversation
+            .message_refs
+            .iter()
+            .take(limit)
+            .map(|msg| {
+                let content = self
+                    .storage
+                    .artifact_store()
+                    .get(&msg.payload_ref)
+                    .ok()
+                    .flatten()
+                    .map(|a| String::from_utf8_lossy(&a.content).into_owned())
+                    .unwrap_or_else(|| "(content unavailable)".into());
+
+                exoskeleton_core::ConversationMessageWithContent {
+                    envelope_id: msg.envelope_id,
+                    source: msg.source,
+                    content,
+                    timestamp: msg.timestamp,
+                    is_vessel_reply: msg.source == vessel_principal,
+                }
+            })
+            .collect();
+
+        Ok(Some(messages))
     }
 
     // ── Epoch 0: Charter hot-reload ──
@@ -967,6 +1027,292 @@ mod tests {
             .conversation(exoskeleton_core::ConversationId::new())
             .unwrap()
             .is_none());
+    }
+
+    // ── OA-T23: conversation_messages resolves content from artifact store ──
+
+    #[test]
+    fn conversation_messages_resolves_content() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::{ArtifactKind, EnvelopeId, PrincipalId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        let user = PrincipalId::new();
+        let vessel = PrincipalId::from(*inspector.config.vessel_id.as_ref());
+
+        // Store user message artifact
+        let user_artifact = exoskeleton_core::Artifact::new(
+            ArtifactKind::Envelope,
+            b"Hello vessel".to_vec(),
+            "text/plain".into(),
+        );
+        let user_payload_id = inspector
+            .storage
+            .artifact_store()
+            .put(&user_artifact)
+            .unwrap();
+
+        // Store vessel reply artifact
+        let vessel_artifact = exoskeleton_core::Artifact::new(
+            ArtifactKind::Envelope,
+            b"Hello human".to_vec(),
+            "text/plain".into(),
+        );
+        let vessel_payload_id = inspector
+            .storage
+            .artifact_store()
+            .put(&vessel_artifact)
+            .unwrap();
+
+        // Create conversation with both messages
+        let mut conv =
+            Conversation::from_first_message(user, EnvelopeId::new(), user_payload_id, Utc::now());
+        conv.add_message(
+            vessel,
+            EnvelopeId::new(),
+            vessel_payload_id,
+            Utc::now() + chrono::Duration::seconds(1),
+        );
+        inspector.storage.conversation_store().save(&conv).unwrap();
+
+        let messages = inspector
+            .conversation_messages(conv.id, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "Hello vessel");
+        assert!(!messages[0].is_vessel_reply);
+        assert_eq!(messages[1].content, "Hello human");
+        assert!(messages[1].is_vessel_reply);
+    }
+
+    // ── OA-T24: conversation_messages returns None for unknown conversation ID ──
+
+    #[test]
+    fn conversation_messages_returns_none_for_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        let result = inspector
+            .conversation_messages(exoskeleton_core::ConversationId::new(), 100)
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── OA-T25: conversation_messages marks vessel replies correctly ──
+
+    #[test]
+    fn conversation_messages_marks_vessel_replies() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::{ArtifactKind, EnvelopeId, PrincipalId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        let user = PrincipalId::new();
+        let vessel = PrincipalId::from(*inspector.config.vessel_id.as_ref());
+
+        let artifact = exoskeleton_core::Artifact::new(
+            ArtifactKind::Envelope,
+            b"test".to_vec(),
+            "text/plain".into(),
+        );
+        let payload_id = inspector.storage.artifact_store().put(&artifact).unwrap();
+
+        let mut conv = Conversation::from_first_message(
+            user,
+            EnvelopeId::new(),
+            payload_id.clone(),
+            Utc::now(),
+        );
+        conv.add_message(vessel, EnvelopeId::new(), payload_id, Utc::now());
+        inspector.storage.conversation_store().save(&conv).unwrap();
+
+        let messages = inspector
+            .conversation_messages(conv.id, 100)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !messages[0].is_vessel_reply,
+            "user message should not be vessel reply"
+        );
+        assert!(
+            messages[1].is_vessel_reply,
+            "vessel message should be vessel reply"
+        );
+    }
+
+    // ── OA-T26: conversation_messages with missing artifact shows fallback text ──
+
+    #[test]
+    fn conversation_messages_fallback_on_missing_artifact() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::{EnvelopeId, PrincipalId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        let user = PrincipalId::new();
+        let orphan_id = ArtifactId::from_content(b"this-artifact-does-not-exist");
+
+        let conv = Conversation::from_first_message(user, EnvelopeId::new(), orphan_id, Utc::now());
+        inspector.storage.conversation_store().save(&conv).unwrap();
+
+        let messages = inspector
+            .conversation_messages(conv.id, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "(content unavailable)");
+    }
+
+    // ── OA-T27: conversation_messages respects limit parameter ──
+
+    #[test]
+    fn conversation_messages_respects_limit() {
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::{ArtifactKind, EnvelopeId, PrincipalId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        let user = PrincipalId::new();
+        let artifact = exoskeleton_core::Artifact::new(
+            ArtifactKind::Envelope,
+            b"msg".to_vec(),
+            "text/plain".into(),
+        );
+        let payload_id = inspector.storage.artifact_store().put(&artifact).unwrap();
+
+        let mut conv = Conversation::from_first_message(
+            user,
+            EnvelopeId::new(),
+            payload_id.clone(),
+            Utc::now(),
+        );
+        for _ in 0..4 {
+            conv.add_message(user, EnvelopeId::new(), payload_id.clone(), Utc::now());
+        }
+        inspector.storage.conversation_store().save(&conv).unwrap();
+
+        let messages = inspector
+            .conversation_messages(conv.id, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages.len(), 3);
+    }
+
+    // ── OA-T3: inbox_history returns actual message content when payload artifact exists ──
+
+    #[test]
+    fn inbox_history_returns_content_from_payload_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        // 1. Store the message content as a payload artifact
+        let content_artifact = exoskeleton_core::Artifact::new(
+            exoskeleton_core::ArtifactKind::Envelope,
+            b"Hello from the user!".to_vec(),
+            "text/plain".into(),
+        );
+        let content_id = inspector
+            .storage
+            .artifact_store()
+            .put(&content_artifact)
+            .unwrap();
+
+        // 2. Store a MessageEnvelope artifact that references the content
+        let principal = exoskeleton_core::PrincipalId::new();
+        let envelope = exoskeleton_core::MessageEnvelope {
+            id: exoskeleton_core::EnvelopeId::new(),
+            source: principal,
+            target: None,
+            kind: exoskeleton_core::EnvelopeKind::HumanMessage,
+            payload_ref: content_id,
+            timestamp: Utc::now(),
+            in_reply_to: None,
+        };
+        let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+        let envelope_artifact = exoskeleton_core::Artifact::new(
+            exoskeleton_core::ArtifactKind::Envelope,
+            envelope_bytes,
+            "application/json".into(),
+        );
+        let envelope_artifact_id = inspector
+            .storage
+            .artifact_store()
+            .put(&envelope_artifact)
+            .unwrap();
+
+        // 3. Log a MessageReceived event referencing the envelope artifact
+        let event = EventEntry {
+            id: LedgerEntryId::new(),
+            tick_id: None,
+            event_type: EventType::MessageReceived,
+            payload_ref: Some(envelope_artifact_id),
+            summary: format!("Message received from {principal}"),
+            timestamp: Utc::now(),
+        };
+        inspector.storage.event_ledger().append(&event).unwrap();
+
+        // 4. Query inbox_history and verify actual content is returned
+        let history = inspector.inbox_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "Hello from the user!");
+        assert_eq!(history[0].source, Some(principal));
+    }
+
+    // ── OA-T4: inbox_history with missing payload artifact gracefully falls back to summary ──
+
+    #[test]
+    fn inbox_history_falls_back_to_summary_when_payload_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let inspector = test_inspector(dir.path());
+
+        // Store a MessageEnvelope artifact whose payload_ref points to a nonexistent artifact
+        let principal = exoskeleton_core::PrincipalId::new();
+        let envelope = exoskeleton_core::MessageEnvelope {
+            id: exoskeleton_core::EnvelopeId::new(),
+            source: principal,
+            target: None,
+            kind: exoskeleton_core::EnvelopeKind::HumanMessage,
+            payload_ref: ArtifactId::from_content(b"this-artifact-does-not-exist"),
+            timestamp: Utc::now(),
+            in_reply_to: None,
+        };
+        let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+        let envelope_artifact = exoskeleton_core::Artifact::new(
+            exoskeleton_core::ArtifactKind::Envelope,
+            envelope_bytes,
+            "application/json".into(),
+        );
+        let envelope_artifact_id = inspector
+            .storage
+            .artifact_store()
+            .put(&envelope_artifact)
+            .unwrap();
+
+        let event = EventEntry {
+            id: LedgerEntryId::new(),
+            tick_id: None,
+            event_type: EventType::MessageReceived,
+            payload_ref: Some(envelope_artifact_id),
+            summary: format!("Message received from {principal}"),
+            timestamp: Utc::now(),
+        };
+        inspector.storage.event_ledger().append(&event).unwrap();
+
+        // Should fall back to event summary when payload artifact is missing
+        let history = inspector.inbox_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        // content should be None from payload lookup, so falls back to event.summary
+        assert!(
+            history[0].content.contains("Message received from"),
+            "should fall back to summary: {}",
+            history[0].content,
+        );
     }
 
     #[test]

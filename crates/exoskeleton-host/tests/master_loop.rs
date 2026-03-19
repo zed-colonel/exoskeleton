@@ -1016,6 +1016,7 @@ mod proptest_tests {
             }]);
             let proto = DecisionProtocol {
                 reasoning,
+                reply: None,
                 plan_update,
                 working_memory_ops,
                 actions,

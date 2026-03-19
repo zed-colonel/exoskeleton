@@ -15,8 +15,9 @@ use actionqueue_executor_local::HandlerOutput;
 use chrono::{DateTime, Utc};
 use exoskeleton_core::tick::{TickPhase, TickRecord};
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactKind, EpisodicSummary, EventEntry, EventType, ExoError,
-    LedgerEntryId, LiveEvent, LongTermNote, ThreadSchedule, TickId, VesselStatus,
+    Artifact, ArtifactId, ArtifactKind, EnvelopeId, EpisodicSummary, EventEntry, EventType,
+    ExoError, LedgerEntryId, LiveEvent, LongTermNote, PrincipalId, ThreadSchedule, TickId,
+    VesselStatus,
 };
 use exoskeleton_memory::approximate_token_count;
 use exoskeleton_threads::builtin::memory_consolidation;
@@ -158,6 +159,60 @@ pub fn amend(
 
     // Stale conversation detection (E1-S2)
     mark_stale_conversations(kernel);
+
+    // ── OA-S1: Process vessel reply ──────────────────────────────────
+    if let Some(ref reply_text) = decision.reply {
+        // Store reply content as artifact (I3: replayable).
+        let reply_artifact = Artifact::new(
+            ArtifactKind::Envelope,
+            reply_text.as_bytes().to_vec(),
+            "text/plain".into(),
+        );
+        match kernel.artifact_store.put(&reply_artifact) {
+            Ok(artifact_id) => {
+                // Append vessel ConversationMessage to the most recently active conversation.
+                let vessel_principal = PrincipalId::from(*new_snapshot.vessel_id.as_ref());
+                if let Some(conv) = perception.active_conversations.first() {
+                    let mut updated_conv = conv.clone();
+                    updated_conv.add_message(
+                        vessel_principal,
+                        EnvelopeId::new(),
+                        artifact_id.clone(),
+                        Utc::now(),
+                    );
+                    let _ = kernel.conversation_store.save(&updated_conv);
+                }
+
+                // Emit VesselResponseSent event.
+                let reply_summary = if reply_text.len() > 80 {
+                    format!("Vessel reply: {}...", &reply_text[..80])
+                } else {
+                    format!("Vessel reply: {reply_text}")
+                };
+                let reply_event = EventEntry {
+                    id: LedgerEntryId::new(),
+                    tick_id: Some(tick_id),
+                    event_type: EventType::VesselResponseSent,
+                    payload_ref: Some(artifact_id),
+                    summary: reply_summary,
+                    timestamp: Utc::now(),
+                };
+                let _ = kernel.event_ledger.append(&reply_event);
+
+                // Broadcast LiveEvent for real-time observers.
+                let _ = kernel.event_tx.send(LiveEvent {
+                    event_type: EventType::VesselResponseSent,
+                    tick_number: Some(tick_number),
+                    summary: reply_event.summary.clone(),
+                    timestamp: reply_event.timestamp,
+                    snapshot: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to store vessel reply artifact");
+            }
+        }
+    }
 
     // Store RelationshipSnapshot as artifact and update ref (Sprint 8)
     if let Some(rel_snapshot) = &alignment.relationship_snapshot {
@@ -583,6 +638,7 @@ mod tests {
     ) {
         let decision = DecisionResult {
             reasoning: "test reasoning".into(),
+            reply: None,
             actions: vec![],
             snapshot_delta: SnapshotDelta::default(),
             memory_notes: vec![],
@@ -1493,6 +1549,226 @@ mod tests {
                 .iter()
                 .any(|e| e.event_type == EventType::EpisodicEvicted),
             "no eviction events when capacity is None"
+        );
+    }
+
+    // ── OA-T10: Amend stores reply artifact when decision.reply is Some ──
+    #[test]
+    fn amend_stores_reply_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, _inbox) = test_kernel(dir.path());
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (mut decision, perception, alignment, act_result, reflection) = test_params();
+        decision.reply = Some("Hello, I'm your vessel!".into());
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // The reply content should be retrievable as an artifact
+        let reply_artifact_id = ArtifactId::from_content(b"Hello, I'm your vessel!");
+        let artifact = kernel.artifact_store.get(&reply_artifact_id).unwrap();
+        assert!(artifact.is_some(), "reply artifact should exist");
+        let artifact = artifact.unwrap();
+        assert_eq!(artifact.kind, ArtifactKind::Envelope);
+        assert_eq!(
+            String::from_utf8_lossy(&artifact.content),
+            "Hello, I'm your vessel!"
+        );
+    }
+
+    // ── OA-T11: Amend appends vessel ConversationMessage to active conversation ──
+    #[test]
+    fn amend_appends_vessel_reply_to_conversation() {
+        use exoskeleton_core::conversation::Conversation;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, _inbox) = test_kernel(dir.path());
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (mut decision, mut perception, alignment, act_result, reflection) = test_params();
+        decision.reply = Some("I see your message.".into());
+
+        // Create an active conversation
+        let user_principal = PrincipalId::new();
+        let conv = Conversation::from_first_message(
+            user_principal,
+            EnvelopeId::new(),
+            ArtifactId::from_content(b"user-msg"),
+            Utc::now(),
+        );
+        kernel.conversation_store.save(&conv).unwrap();
+        perception.active_conversations = vec![conv.clone()];
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // Conversation should now have 2 messages (user + vessel)
+        let updated = kernel.conversation_store.get(conv.id).unwrap().unwrap();
+        assert_eq!(updated.message_refs.len(), 2);
+        let vessel_principal = PrincipalId::from(*kernel.vessel_id.as_ref());
+        assert_eq!(updated.message_refs[1].source, vessel_principal);
+    }
+
+    // ── OA-T12: Amend emits VesselResponseSent event and LiveEvent ──
+    #[test]
+    fn amend_emits_vessel_response_sent_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, _inbox) = test_kernel(dir.path());
+        let mut rx = kernel.event_tx.subscribe();
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (mut decision, perception, alignment, act_result, reflection) = test_params();
+        decision.reply = Some("My response".into());
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // Event ledger should have VesselResponseSent
+        let events = kernel.event_ledger.for_tick(tick_id).unwrap();
+        let response_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == EventType::VesselResponseSent)
+            .collect();
+        assert_eq!(response_events.len(), 1);
+        assert!(response_events[0].summary.contains("Vessel reply"));
+        assert!(response_events[0].payload_ref.is_some());
+
+        // Broadcast channel should contain VesselResponseSent
+        let mut found_response = false;
+        while let Ok(event) = rx.try_recv() {
+            if event.event_type == EventType::VesselResponseSent {
+                found_response = true;
+                assert!(event.summary.contains("Vessel reply"));
+            }
+        }
+        assert!(
+            found_response,
+            "VesselResponseSent LiveEvent should be broadcast"
+        );
+    }
+
+    // ── OA-T13: Amend no-ops when decision.reply is None ──
+    #[test]
+    fn amend_no_reply_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, _inbox) = test_kernel(dir.path());
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (decision, perception, alignment, act_result, reflection) = test_params();
+        // decision.reply is None by default
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // No VesselResponseSent events
+        let events = kernel.event_ledger.for_tick(tick_id).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.event_type == EventType::VesselResponseSent),
+            "no reply event when decision.reply is None"
+        );
+    }
+
+    // ── OA-T14: Amend tolerates empty active_conversations when reply present ──
+    #[test]
+    fn amend_reply_with_no_active_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kernel, _inbox) = test_kernel(dir.path());
+        let tick_id = TickId::new();
+        let snapshot_before = test_snapshot(kernel.vessel_id);
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (mut decision, perception, alignment, act_result, reflection) = test_params();
+        decision.reply = Some("Reply without conversation".into());
+        // perception.active_conversations is empty by default
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        // Reply artifact and event should still exist even without a conversation
+        let reply_artifact_id = ArtifactId::from_content(b"Reply without conversation");
+        let artifact = kernel.artifact_store.get(&reply_artifact_id).unwrap();
+        assert!(
+            artifact.is_some(),
+            "reply artifact stored even without conversation"
+        );
+
+        let events = kernel.event_ledger.for_tick(tick_id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event_type == EventType::VesselResponseSent),
+            "reply event emitted even without active conversation"
         );
     }
 }

@@ -143,6 +143,7 @@ pub fn decide(
     // 11. Build DecisionResult
     Ok(DecisionResult {
         reasoning: raw_reasoning,
+        reply: protocol.reply,
         actions: protocol.actions,
         snapshot_delta: SnapshotDelta {
             plan_update: protocol.plan_update,
@@ -342,6 +343,7 @@ fn parse_decision(response_text: &str) -> (DecisionProtocol, String) {
     tracing::warn!("LLM returned unparseable response, treating as no-action tick");
     let protocol = DecisionProtocol {
         reasoning: response_text.to_string(),
+        reply: None,
         plan_update: None,
         working_memory_ops: None,
         actions: vec![],

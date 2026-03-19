@@ -47,6 +47,11 @@ pub struct OrientationResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionProtocol {
     pub reasoning: String,
+    /// Explicit reply to the user. When the vessel wants to respond to a
+    /// message, it populates this field. None for idle ticks or internal-only
+    /// decisions. Backward-compatible: old JSON without this field → None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_plan_update_compat")]
     pub plan_update: Option<PlanUpdate>,
@@ -75,6 +80,7 @@ pub struct PlannedAction {
 #[derive(Debug, Clone)]
 pub struct DecisionResult {
     pub reasoning: String,
+    pub reply: Option<String>,
     pub actions: Vec<PlannedAction>,
     pub snapshot_delta: SnapshotDelta,
     pub memory_notes: Vec<String>,
@@ -250,6 +256,7 @@ mod tests {
     fn decision_protocol_roundtrip_minimal() {
         let proto = DecisionProtocol {
             reasoning: "Nothing to do".into(),
+            reply: None,
             plan_update: None,
             working_memory_ops: None,
             actions: vec![],
@@ -268,6 +275,7 @@ mod tests {
     fn decision_protocol_optional_fields_omitted() {
         let proto = DecisionProtocol {
             reasoning: "Test".into(),
+            reply: None,
             plan_update: None,
             working_memory_ops: None,
             actions: vec![],
@@ -481,6 +489,40 @@ That's my plan."#;
         let empty = "```json\n```";
         let content = extract_json_from_code_fence(empty);
         assert_eq!(content, Some(""));
+    }
+
+    // ── OA-T5: DecisionProtocol with reply roundtrip ──
+    #[test]
+    fn decision_protocol_with_reply_roundtrip() {
+        let json = r#"{
+            "reasoning": "User asked a question",
+            "reply": "Here is my answer",
+            "actions": [],
+            "memory_notes": []
+        }"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.reply, Some("Here is my answer".into()));
+
+        // Re-serialize and verify
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        let reparsed: DecisionProtocol = serde_json::from_str(&reserialized).unwrap();
+        assert_eq!(reparsed.reply, Some("Here is my answer".into()));
+    }
+
+    // ── OA-T6: DecisionProtocol without reply backward compat ──
+    #[test]
+    fn decision_protocol_without_reply_backward_compat() {
+        let json = r#"{"reasoning": "idle tick", "actions": []}"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        assert!(parsed.reply.is_none());
+    }
+
+    // ── OA-T7: DecisionProtocol with null reply ──
+    #[test]
+    fn decision_protocol_null_reply() {
+        let json = r#"{"reasoning": "test", "reply": null, "actions": []}"#;
+        let parsed: DecisionProtocol = serde_json::from_str(json).unwrap();
+        assert!(parsed.reply.is_none());
     }
 
     #[test]

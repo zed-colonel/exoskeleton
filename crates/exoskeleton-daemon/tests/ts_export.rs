@@ -10,7 +10,9 @@ use exoskeleton_core::artifact::{Artifact, ArtifactKind, ArtifactRef};
 use exoskeleton_core::budget::{
     CognitiveBudgetConfig, EscalationPolicy, ThrashLevel, ToolBudgetConfig,
 };
-use exoskeleton_core::conversation::{Conversation, ConversationMessage, ConversationState};
+use exoskeleton_core::conversation::{
+    Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
+};
 use exoskeleton_core::event::{EventEntry, EventType, LiveEvent};
 use exoskeleton_core::memory::{EpisodicSummary, LongTermNote};
 use exoskeleton_core::plan::{Plan, PlanTask, PlanTaskStatus};
@@ -113,8 +115,9 @@ fn export_typescript_types() {
     // ── Config types (E1-S3) ──
     emit!(output, &cfg, exoskeleton_core::TrustDecayConfig);
 
-    // ── Conversation types (E1-S2) ──
+    // ── Conversation types (E1-S2, OA-S2) ──
     emit!(output, &cfg, ConversationMessage);
+    emit!(output, &cfg, ConversationMessageWithContent);
     emit!(output, &cfg, Conversation);
 
     // ── Memory compiler types (W-24) ──
@@ -176,6 +179,15 @@ fn export_typescript_types() {
     assert!(
         content.contains("ConversationState"),
         "Missing ConversationState type"
+    );
+    assert!(
+        content.contains("vessel_response_sent"),
+        "Missing VesselResponseSent variant in EventType"
+    );
+    // OA-T48: ConversationMessageWithContent must be in generated types
+    assert!(
+        content.contains("ConversationMessageWithContent"),
+        "Missing ConversationMessageWithContent type"
     );
 }
 

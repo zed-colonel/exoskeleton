@@ -147,6 +147,7 @@ mod tests {
     fn test_decision(actions: Vec<PlannedAction>) -> DecisionResult {
         DecisionResult {
             reasoning: "test reasoning".into(),
+            reply: None,
             actions,
             snapshot_delta: SnapshotDelta::default(),
             memory_notes: vec![],

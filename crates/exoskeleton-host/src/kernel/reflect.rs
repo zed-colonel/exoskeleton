@@ -518,6 +518,7 @@ mod tests {
     fn test_decision() -> DecisionResult {
         DecisionResult {
             reasoning: "Test reasoning".into(),
+            reply: None,
             actions: vec![PlannedAction {
                 tool_name: "fs.write".into(),
                 params: serde_json::json!({}),

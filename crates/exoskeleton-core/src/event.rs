@@ -76,6 +76,8 @@ pub enum EventType {
     VesselForked,
     /// Episodic memory entries were evicted to maintain capacity (E1-S3).
     EpisodicEvicted,
+    /// The vessel produced a reply to a user message (OA-S1).
+    VesselResponseSent,
     /// An error occurred.
     Error,
 }
@@ -149,6 +151,7 @@ mod tests {
             EventType::MessageReceived,
             EventType::VesselForked,
             EventType::EpisodicEvicted,
+            EventType::VesselResponseSent,
             EventType::Error,
         ];
         for event_type in &variants {
@@ -172,6 +175,16 @@ mod tests {
             serde_json::to_string(&EventType::RelationshipUpdated).unwrap(),
             "\"relationship_updated\""
         );
+    }
+
+    // ── OA-T8: VesselResponseSent serde roundtrip ──
+
+    #[test]
+    fn event_type_vessel_response_sent_roundtrip() {
+        let json = serde_json::to_string(&EventType::VesselResponseSent).unwrap();
+        assert_eq!(json, "\"vessel_response_sent\"");
+        let parsed: EventType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, EventType::VesselResponseSent);
     }
 
     #[test]

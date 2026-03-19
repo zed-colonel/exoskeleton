@@ -13,8 +13,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use exoskeleton_core::{
-    ArtifactId, ConversationId, EnvelopeId, EnvelopeKind, ExoError, LlmBackend, MessageEnvelope,
-    PrincipalId, TickId,
+    Artifact, ArtifactId, ArtifactKind, ArtifactStore, ConversationId, EnvelopeId, EnvelopeKind,
+    ExoError, LlmBackend, MessageEnvelope, PrincipalId, TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,25 @@ pub async fn post_inbox(
     Json(req): Json<InboxSubmitRequest>,
 ) -> impl IntoResponse {
     let envelope_id = EnvelopeId::new();
-    let payload_ref = ArtifactId::from_content(req.content.as_bytes());
+
+    // Store the message content as an artifact (I3: replayable).
+    // Content-addressed: duplicate messages share a single artifact.
+    let content_artifact = Artifact::new(
+        ArtifactKind::Envelope,
+        req.content.as_bytes().to_vec(),
+        "text/plain".into(),
+    );
+    let payload_ref = match state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&content_artifact)
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
 
     let envelope = MessageEnvelope {
         id: envelope_id,
@@ -297,9 +315,13 @@ pub async fn get_artifact(
                 use base64::Engine;
                 base64::engine::general_purpose::STANDARD.encode(&artifact.content)
             };
+            let kind_str = serde_json::to_value(artifact.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{:?}", artifact.kind));
             let resp = ArtifactResponse {
                 id: artifact.id.to_string(),
-                kind: format!("{:?}", artifact.kind),
+                kind: kind_str,
                 content_type: artifact.content_type.clone(),
                 content,
                 created_at: artifact.created_at,
@@ -434,6 +456,25 @@ pub async fn get_conversation_by_id(
     };
     match state.inspector.conversation(conv_id) {
         Ok(Some(conv)) => Json(conv).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/v1/conversations/:id/messages -> `Vec<ConversationMessageWithContent>` or 404.
+pub async fn get_conversation_messages(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<LimitQuery>,
+) -> impl IntoResponse {
+    let conv_id: ConversationId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let limit = params.limit.unwrap_or(200).min(1000);
+
+    match state.inspector.conversation_messages(conv_id, limit) {
+        Ok(Some(messages)) => Json(messages).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

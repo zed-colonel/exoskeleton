@@ -9,8 +9,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
-    ArtifactStore, EventEntry, EventLedger, EventType, LedgerEntryId, SnapshotStore, StateSnapshot,
-    TickStore, VesselId,
+    ArtifactId, ArtifactStore, ConversationStore, EventEntry, EventLedger, EventType,
+    LedgerEntryId, SnapshotStore, StateSnapshot, TickStore, VesselId,
 };
 use exoskeleton_daemon::routes::build_router;
 use exoskeleton_daemon::state::AppState;
@@ -170,11 +170,14 @@ async fn get_status_returns_snapshot_when_present() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_app_state(dir.path());
 
-    // Save a snapshot
+    // Use shared storage so handler reads from the same SQLite connection.
     let snap = StateSnapshot::initial(VesselId::new(), "test mission".into());
-    // Access storage through a fresh StorageManager (since inspector holds its own)
-    let storage = StorageManager::open(dir.path()).unwrap();
-    storage.snapshot_store().save(&snap).unwrap();
+    state
+        .inspector
+        .storage()
+        .snapshot_store()
+        .save(&snap)
+        .unwrap();
 
     let app = build_router(state);
     let resp = app
@@ -297,8 +300,7 @@ async fn get_events_returns_events() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_app_state(dir.path());
 
-    // Append an event directly to the store
-    let storage = StorageManager::open(dir.path()).unwrap();
+    // Use shared storage so handler reads from the same SQLite connection.
     let event = EventEntry {
         id: LedgerEntryId::new(),
         tick_id: None,
@@ -307,7 +309,12 @@ async fn get_events_returns_events() {
         summary: "test event".into(),
         timestamp: chrono::Utc::now(),
     };
-    storage.event_ledger().append(&event).unwrap();
+    state
+        .inspector
+        .storage()
+        .event_ledger()
+        .append(&event)
+        .unwrap();
 
     let app = build_router(state);
     let resp = app
@@ -456,17 +463,25 @@ async fn get_snapshots_returns_empty_initially() {
 #[tokio::test]
 async fn get_snapshots_returns_stored_snapshots() {
     let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
 
-    // Save snapshots BEFORE creating AppState
-    let storage = StorageManager::open(dir.path()).unwrap();
+    // Use shared storage so handler reads from the same SQLite connection.
     let mut snap = StateSnapshot::initial(VesselId::new(), "test".into());
     snap.tick_number = 1;
-    storage.snapshot_store().save(&snap).unwrap();
+    state
+        .inspector
+        .storage()
+        .snapshot_store()
+        .save(&snap)
+        .unwrap();
     snap.tick_number = 2;
-    storage.snapshot_store().save(&snap).unwrap();
-    drop(storage);
+    state
+        .inspector
+        .storage()
+        .snapshot_store()
+        .save(&snap)
+        .unwrap();
 
-    let state = test_app_state(dir.path());
     let app = build_router(state);
     let resp = app
         .oneshot(
@@ -504,15 +519,18 @@ async fn get_snapshot_at_tick_returns_404_for_missing() {
 #[tokio::test]
 async fn get_snapshot_at_tick_returns_200_for_existing() {
     let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
 
-    // Save snapshot BEFORE creating AppState so the inspector's store sees it
-    let storage = StorageManager::open(dir.path()).unwrap();
+    // Use shared storage so handler reads from the same SQLite connection.
     let mut snap = StateSnapshot::initial(VesselId::new(), "snapshot-at test".into());
     snap.tick_number = 42;
-    storage.snapshot_store().save(&snap).unwrap();
-    drop(storage);
+    state
+        .inspector
+        .storage()
+        .snapshot_store()
+        .save(&snap)
+        .unwrap();
 
-    let state = test_app_state(dir.path());
     let app = build_router(state);
     let resp = app
         .oneshot(
@@ -523,20 +541,10 @@ async fn get_snapshot_at_tick_returns_200_for_existing() {
         .await
         .unwrap();
 
-    // Two separate StorageManager instances open separate SQLite connections.
-    // In WAL mode, the second connection should see writes from the first,
-    // but in some test environments this may not be immediate.
-    // Accept either 200 (data visible) or 404 (data not visible yet).
-    assert!(
-        resp.status() == StatusCode::OK || resp.status() == StatusCode::NOT_FOUND,
-        "expected 200 or 404, got {}",
-        resp.status()
-    );
-    if resp.status() == StatusCode::OK {
-        let body = body_string(resp.into_body()).await;
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["tick_number"], 42);
-    }
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["tick_number"], 42);
 }
 
 #[tokio::test]
@@ -605,18 +613,21 @@ async fn get_config_does_not_leak_api_key_values() {
 #[tokio::test]
 async fn get_artifact_returns_200_for_existing() {
     let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
 
-    // Store an artifact BEFORE creating AppState
-    let storage = StorageManager::open(dir.path()).unwrap();
+    // Use shared storage so handler reads from the same SQLite connection.
     let artifact = exoskeleton_core::Artifact::new(
         exoskeleton_core::ArtifactKind::Receipt,
         b"hello world".to_vec(),
         "text/plain".to_string(),
     );
-    let artifact_id = storage.artifact_store().put(&artifact).unwrap();
-    drop(storage);
+    let artifact_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .unwrap();
 
-    let state = test_app_state(dir.path());
     let app = build_router(state);
     let url = format!("/api/v1/artifacts/{artifact_id}");
     let resp = app
@@ -624,13 +635,11 @@ async fn get_artifact_returns_200_for_existing() {
         .await
         .unwrap();
 
-    // Accept 200 (data visible across connections) or 404 (WAL visibility)
-    if resp.status() == StatusCode::OK {
-        let body = body_string(resp.into_body()).await;
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["content_type"], "text/plain");
-        assert_eq!(json["content"], "hello world");
-    }
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["content_type"], "text/plain");
+    assert_eq!(json["content"], "hello world");
 }
 
 // ── T-17: ArtifactResponse encodes JSON content as UTF-8 ──
@@ -638,18 +647,22 @@ async fn get_artifact_returns_200_for_existing() {
 #[tokio::test]
 async fn get_artifact_encodes_json_as_utf8() {
     let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
 
-    let storage = StorageManager::open(dir.path()).unwrap();
+    // Use shared storage so handler reads from the same SQLite connection.
     let json_content = r#"{"key":"value"}"#;
     let artifact = exoskeleton_core::Artifact::new(
         exoskeleton_core::ArtifactKind::Receipt,
         json_content.as_bytes().to_vec(),
         "application/json".to_string(),
     );
-    let artifact_id = storage.artifact_store().put(&artifact).unwrap();
-    drop(storage);
+    let artifact_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .unwrap();
 
-    let state = test_app_state(dir.path());
     let app = build_router(state);
     let url = format!("/api/v1/artifacts/{artifact_id}");
     let resp = app
@@ -657,13 +670,11 @@ async fn get_artifact_encodes_json_as_utf8() {
         .await
         .unwrap();
 
-    if resp.status() == StatusCode::OK {
-        let body = body_string(resp.into_body()).await;
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        // JSON content should be returned as UTF-8, not base64
-        assert_eq!(json["content"], json_content);
-        assert_eq!(json["content_type"], "application/json");
-    }
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["content"], json_content);
+    assert_eq!(json["content_type"], "application/json");
 }
 
 // ── T-18: ArtifactResponse encodes binary content as Base64 ──
@@ -671,18 +682,22 @@ async fn get_artifact_encodes_json_as_utf8() {
 #[tokio::test]
 async fn get_artifact_encodes_binary_as_base64() {
     let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
 
-    let storage = StorageManager::open(dir.path()).unwrap();
+    // Use shared storage so handler reads from the same SQLite connection.
     let binary_content: Vec<u8> = vec![0x00, 0x01, 0xFF, 0xFE, 0x89, 0x50, 0x4E, 0x47];
     let artifact = exoskeleton_core::Artifact::new(
         exoskeleton_core::ArtifactKind::Receipt,
         binary_content.clone(),
         "application/octet-stream".to_string(),
     );
-    let artifact_id = storage.artifact_store().put(&artifact).unwrap();
-    drop(storage);
+    let artifact_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .unwrap();
 
-    let state = test_app_state(dir.path());
     let app = build_router(state);
     let url = format!("/api/v1/artifacts/{artifact_id}");
     let resp = app
@@ -690,17 +705,210 @@ async fn get_artifact_encodes_binary_as_base64() {
         .await
         .unwrap();
 
-    if resp.status() == StatusCode::OK {
-        let body = body_string(resp.into_body()).await;
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        // Binary content should be base64-encoded
-        let content_str = json["content"].as_str().unwrap();
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(content_str)
-            .expect("content should be valid base64");
-        assert_eq!(decoded, binary_content);
-    }
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let content_str = json["content"].as_str().unwrap();
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(content_str)
+        .expect("content should be valid base64");
+    assert_eq!(decoded, binary_content);
+}
+
+// ── OA-T1: POST /api/v1/inbox stores content artifact retrievable by payload_ref ──
+
+#[tokio::test]
+async fn post_inbox_stores_content_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state.clone());
+
+    let body = serde_json::json!({
+        "source": "550e8400-e29b-41d4-a716-446655440000",
+        "content": "Hello from artifact test"
+    });
+
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/inbox")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let expected_id = ArtifactId::from_content(b"Hello from artifact test");
+    let artifact = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .get(&expected_id)
+        .unwrap();
+    assert!(artifact.is_some(), "content artifact should be stored");
+    let artifact = artifact.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&artifact.content),
+        "Hello from artifact test"
+    );
+}
+
+// ── OA-T2: POST /api/v1/inbox with duplicate content reuses artifact ──
+
+#[tokio::test]
+async fn post_inbox_duplicate_content_reuses_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    let body = serde_json::json!({
+        "source": "550e8400-e29b-41d4-a716-446655440000",
+        "content": "Duplicate message"
+    });
+    let json_str = serde_json::to_string(&body).unwrap();
+
+    let app1 = build_router(state.clone());
+    let resp1 = app1
+        .oneshot(
+            Request::post("/api/v1/inbox")
+                .header("content-type", "application/json")
+                .body(Body::from(json_str.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::CREATED);
+
+    let app2 = build_router(state.clone());
+    let resp2 = app2
+        .oneshot(
+            Request::post("/api/v1/inbox")
+                .header("content-type", "application/json")
+                .body(Body::from(json_str))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::CREATED);
+
+    let body1: serde_json::Value =
+        serde_json::from_str(&body_string(resp1.into_body()).await).unwrap();
+    let body2: serde_json::Value =
+        serde_json::from_str(&body_string(resp2.into_body()).await).unwrap();
+    assert_ne!(body1["envelope_id"], body2["envelope_id"]);
+
+    let artifact_id = ArtifactId::from_content(b"Duplicate message");
+    let artifact = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .get(&artifact_id)
+        .unwrap();
+    assert!(artifact.is_some(), "single artifact should exist for both");
+}
+
+// ── OA-T16: Artifact response kind field is snake_case ──
+
+#[tokio::test]
+async fn get_artifact_kind_is_snake_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Use shared storage so handler reads from the same SQLite connection.
+    let artifact = exoskeleton_core::Artifact::new(
+        exoskeleton_core::ArtifactKind::ThreadOutput,
+        b"thread output data".to_vec(),
+        "text/plain".to_string(),
+    );
+    let artifact_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .unwrap();
+
+    let app = build_router(state);
+    let url = format!("/api/v1/artifacts/{artifact_id}");
+    let resp = app
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["kind"], "thread_output",
+        "kind should be snake_case, got: {}",
+        json["kind"]
+    );
+}
+
+// ── OA-T28: GET /api/v1/conversations/:id/messages returns resolved messages ──
+
+#[tokio::test]
+async fn get_conversation_messages_returns_resolved() {
+    use exoskeleton_core::conversation::Conversation;
+    use exoskeleton_core::{Artifact, ArtifactKind, EnvelopeId, PrincipalId};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    let user = PrincipalId::new();
+    let content = Artifact::new(
+        ArtifactKind::Envelope,
+        b"Hi there".to_vec(),
+        "text/plain".into(),
+    );
+    let payload_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&content)
+        .unwrap();
+    let conv =
+        Conversation::from_first_message(user, EnvelopeId::new(), payload_id, chrono::Utc::now());
+    state
+        .inspector
+        .storage()
+        .conversation_store()
+        .save(&conv)
+        .unwrap();
+
+    let app = build_router(state);
+    let url = format!("/api/v1/conversations/{}/messages", conv.id);
+    let resp = app
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let msgs: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["content"], "Hi there");
+}
+
+// ── OA-T29: GET /api/v1/conversations/:id/messages with unknown ID returns 404 ──
+
+#[tokio::test]
+async fn get_conversation_messages_returns_404_for_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/conversations/550e8400-e29b-41d4-a716-446655440000/messages")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ── U1: CORS tests ──
@@ -810,10 +1018,9 @@ async fn cors_includes_max_age_header() {
 #[tokio::test]
 async fn get_tick_context_returns_breakdown() {
     let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
 
-    // Store a ContextBreakdown artifact and a TickRecord that references it
-    let storage = StorageManager::open(dir.path()).unwrap();
-
+    // Use shared storage so handler reads from the same SQLite connection.
     let compiled_context = exoskeleton_memory::compiler::CompiledContext {
         prompt: "test prompt".into(),
         total_tokens: 1847,
@@ -840,6 +1047,7 @@ async fn get_tick_context_returns_breakdown() {
         &compiled_context,
     )
     .unwrap();
+    let storage = state.inspector.storage();
     let artifact_id = storage.artifact_store().put(&artifact).unwrap();
 
     let tick_record = exoskeleton_core::TickRecord {
@@ -858,28 +1066,23 @@ async fn get_tick_context_returns_breakdown() {
     };
     let tick_id = tick_record.tick_id;
     storage.tick_store().save(&tick_record).unwrap();
-    drop(storage);
 
-    let state = test_app_state(dir.path());
     let app = build_router(state);
-
     let url = format!("/api/v1/ticks/{tick_id}/context");
     let resp = app
         .oneshot(Request::get(&url).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
-    // Accept 200 (data visible) or 404 (WAL visibility across connections)
-    if resp.status() == StatusCode::OK {
-        let body = body_string(resp.into_body()).await;
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["total_tokens"], 1847);
-        assert_eq!(json["budget"], 4000);
-        assert!(json["sections"].is_array());
-        assert_eq!(json["sections"].as_array().unwrap().len(), 2);
-        assert_eq!(json["sections"][0]["name"], "system");
-        assert_eq!(json["truncated_sections"][0], "episodic_memory");
-    }
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["total_tokens"], 1847);
+    assert_eq!(json["budget"], 4000);
+    assert!(json["sections"].is_array());
+    assert_eq!(json["sections"].as_array().unwrap().len(), 2);
+    assert_eq!(json["sections"][0]["name"], "system");
+    assert_eq!(json["truncated_sections"][0], "episodic_memory");
 }
 
 /// E3-T20b: GET /api/v1/ticks/{id}/context returns 404 for nonexistent tick.
@@ -917,11 +1120,11 @@ async fn get_tick_context_returns_error_for_invalid_id() {
         .await
         .unwrap();
 
-    // Handler returns 400 (BAD_REQUEST) for invalid UUIDs, but axum may
-    // return 404 if the path segment doesn't match the route pattern.
-    assert!(
-        resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
-        "expected 400 or 404 for invalid UUID, got {}",
+    // axum returns 400 when the Path extractor fails to parse the UUID.
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "invalid UUID should produce 400, got {}",
         resp.status()
     );
 }
@@ -998,6 +1201,60 @@ async fn router_includes_all_d2_routes() {
             resp.status(),
             StatusCode::NOT_FOUND,
             "route {route} should exist"
+        );
+    }
+}
+
+/// Verify all parameterized routes accept dynamic path segments and reach
+/// handlers (not the SPA fallback or axum's default 404). Uses a
+/// well-formed but nonexistent UUID so handlers produce 404 from their
+/// own lookup logic — distinguishable from route-miss only if positive
+/// tests (above) also pass.
+#[tokio::test]
+async fn parameterized_routes_reach_handlers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // A valid UUID that doesn't exist in any store.
+    let fake_uuid = "00000000-0000-0000-0000-000000000099";
+    // A valid-looking artifact hash that doesn't exist.
+    let fake_hash = "0000000000000000000000000000000000000000000000000000000000000099";
+
+    let ticks = format!("/api/v1/ticks/{fake_uuid}");
+    let ticks_ctx = format!("/api/v1/ticks/{fake_uuid}/context");
+    let rels = format!("/api/v1/relationships/{fake_uuid}");
+    let artifacts = format!("/api/v1/artifacts/{fake_hash}");
+    let convos = format!("/api/v1/conversations/{fake_uuid}");
+    let convo_msgs = format!("/api/v1/conversations/{fake_uuid}/messages");
+
+    let parameterized_routes: Vec<(&str, &str)> = vec![
+        ("GET /api/v1/ticks/:id", &ticks),
+        ("GET /api/v1/ticks/:id/context", &ticks_ctx),
+        ("GET /api/v1/relationships/:principal_id", &rels),
+        ("GET /api/v1/artifacts/:id", &artifacts),
+        (
+            "GET /api/v1/snapshots/at/:tick",
+            "/api/v1/snapshots/at/99999",
+        ),
+        ("GET /api/v1/conversations/:id", &convos),
+        ("GET /api/v1/conversations/:id/messages", &convo_msgs),
+    ];
+
+    for (name, url) in &parameterized_routes {
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(Request::get(*url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        // Handlers return 200 (empty result), 400, or 404 for missing data.
+        // A route-miss also produces 404 — but the positive companion tests
+        // above catch that case. This test verifies the route pattern accepts
+        // dynamic segments without crashing.
+        assert!(
+            !resp.status().is_server_error(),
+            "route {name} at {url} should not produce server error (got {})",
+            resp.status()
         );
     }
 }

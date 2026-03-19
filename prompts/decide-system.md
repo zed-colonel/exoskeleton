@@ -9,6 +9,7 @@ Available tools:
 Respond with JSON in this exact format:
 {
   "reasoning": "Your analysis and chain of thought",
+  "reply": "Your response to the user (omit if no user message to respond to)",
   "plan_update": {
     "type": "replace",
     "plan": {
@@ -45,6 +46,15 @@ For incremental plan changes, use a patch instead of replace:
     ]
   }
 }
+
+## Reply
+
+When user messages appear in your context, craft a direct reply in the `reply` field.
+This is your conversational response — it will be shown to the user in the chat interface.
+Keep your reply conversational and appropriate to the user's message.
+If there are no user messages to respond to (idle tick), omit the `reply` field entirely.
+The `reasoning` field is for your internal chain-of-thought (not shown to the user).
+The `reply` field is your user-facing response (shown in chat).
 
 If no actions are needed, return an empty actions array.
 If the plan doesn't need changing, omit plan_update entirely.

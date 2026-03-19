@@ -29,8 +29,8 @@ pub use budget::{
     PersistedBudgetState, ThrashAssessment, ThrashLevel, ToolBudgetConfig,
 };
 pub use conversation::{
-    Conversation, ConversationMessage, ConversationState, ConversationStore,
-    InMemoryConversationStore,
+    Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
+    ConversationStore, InMemoryConversationStore,
 };
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
