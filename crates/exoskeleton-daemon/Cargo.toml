@@ -12,6 +12,7 @@ categories = ["web-programming::http-server"]
 [dependencies]
 exoskeleton-core = { workspace = true }
 exoskeleton-host = { workspace = true }
+exoskeleton-memory = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }
@@ -26,7 +27,6 @@ ts-rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-exoskeleton-memory = { workspace = true }
 exoskeleton-relationship = { workspace = true }
 exoskeleton-threads = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
