@@ -60,7 +60,7 @@ fn generate() -> String {
     let mut output = String::new();
     output.push_str(
         "// Auto-generated from Rust types via ts-rs. Do not edit manually.\n\
-         // Regenerate with: cargo test -p exoskeleton-daemon --no-default-features export_typescript_types\n\n",
+         // Regenerate with: cargo run -p exoskeleton-daemon --bin export-types -- <output-path>\n\n",
     );
 
     // ── ID newtypes (leaf types) ──

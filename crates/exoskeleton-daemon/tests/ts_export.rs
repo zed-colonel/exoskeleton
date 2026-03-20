@@ -64,7 +64,7 @@ fn export_types_binary_is_complete() {
             let pos = line.find(keyword)?;
             let rest = &line[pos + keyword.len()..];
             let name = rest.split_whitespace().next()?;
-            let name = name.split(|c| c == '{' || c == '<' || c == '(').next()?;
+            let name = name.split(['{', '<', '(']).next()?;
             if name.is_empty() {
                 None
             } else {
