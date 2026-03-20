@@ -4,11 +4,11 @@
 //! Rust types annotated with `#[derive(ts_rs::TS)]` across exoskeleton crates.                                                                                                                                                                                                                                                                                                             
 //!                                                                                                                                                                                                                                                                                                                                                                                         
 //! Usage:                                                                                                                                                                                                                                                                                                                                                                                  
-//!   cargo run -p exoskeleton-daemon --bin export-types -- <output-path>                                                                                                                                                                                                                                                                                                                   
+//!   cargo run -p exoskeleton-daemon --bin export-types -- `<output-path>`                                                                                                                                                                                                                                                                                                                   
 //!   cargo run -p exoskeleton-daemon --bin export-types          # writes to stdout                                                                                                                                                                                                                                                                                                        
-                                                                                                                                                                                                                                                                                                                                                                                            
-use std::io::Write;                                                                                                                                                                                                                                                                                                                                                                         
-use ts_rs::TS;                                                                                                                                                                                                                                                                                                                                                                              
+
+use std::io::Write;
+
 // ── exoskeleton-core types ──
 use exoskeleton_core::artifact::{Artifact, ArtifactKind, ArtifactRef};
 use exoskeleton_core::budget::{
@@ -44,6 +44,7 @@ use exoskeleton_host::inspect::{
 };
 // ── exoskeleton-memory types ──
 use exoskeleton_memory::compiler::{CompiledContext, SectionResult};
+use ts_rs::TS;
 
 /// Collect a TS type declaration, appending it to the output buffer with `export`.
 macro_rules! emit {
@@ -52,11 +53,11 @@ macro_rules! emit {
         $out.push_str(&<$ty>::decl($cfg));
         $out.push_str("\n\n");
     };
-}                                                                                                                                                                                                                                                                                                                                                       
-                                                            
-fn generate() -> String {                                                                                                                                                                                                                                                                                                                                                                   
+}
+
+fn generate() -> String {
     let cfg = ts_rs::Config::new().with_large_int("number");
-    let mut output = String::new();                                                                                                                                                                                                                                                                                                                                                         
+    let mut output = String::new();
     output.push_str(
         "// Auto-generated from Rust types via ts-rs. Do not edit manually.\n\
          // Regenerate with: cargo test -p exoskeleton-daemon --no-default-features export_typescript_types\n\n",
@@ -141,26 +142,24 @@ fn generate() -> String {
     emit!(output, &cfg, SanitizedFrontierConfig);
     emit!(output, &cfg, SanitizedConfig);
     emit!(output, &cfg, MemoryResponse);
-    emit!(output, &cfg, ForkResponse);                                                       
-    output                                                                                                                                                                                                                                                                                                                                                                                  
-}                                                         
+    emit!(output, &cfg, ForkResponse);
+    output
+}
 
 fn main() {
     let output = generate();
 
-    match std::env::args().nth(1) {                                                                                                                                                                                                                                                                                                                                                         
+    match std::env::args().nth(1) {
         Some(path) => {
-            let path = std::path::Path::new(&path);                                                                                                                                                                                                                                                                                                                                         
-            if let Some(parent) = path.parent() {                                                                                                                                                                                                                                                                                                                                           
-                std::fs::create_dir_all(parent)                                                                                                                                                                                                                                                                                                                                             
-                    .expect("failed to create output directory");                                                                                                                                                                                                                                                                                                                           
-            }                                                                                                                                                                                                                                                                                                                                                                               
-            std::fs::write(path, &output)                                                                                                                                                                                                                                                                                                                                                   
-                .expect("failed to write output file");                                                                                                                                                                                                                                                                                                                                     
+            let path = std::path::Path::new(&path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("failed to create output directory");
+            }
+            std::fs::write(path, &output).expect("failed to write output file");
             eprintln!("Wrote {} bytes to {}", output.len(), path.display());
-        }                                                                                                                                                                                                                                                                                                                                                                                   
-        None => {                                         
-            std::io::stdout().write_all(output.as_bytes()).unwrap();                                                                                                                                                                                                                                                                                                                        
-        }                                                                                                                                                                                                                                                                                                                                                                                   
+        }
+        None => {
+            std::io::stdout().write_all(output.as_bytes()).unwrap();
+        }
     }
 }
