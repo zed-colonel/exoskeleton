@@ -6,6 +6,9 @@
 //!
 //! Operational endpoints: `/healthz`, `/ready`, `/metrics` (Prometheus).
 
+pub mod bootstrap_api;
+pub mod bootstrap_server;
+pub mod bootstrap_state;
 pub mod handlers;
 pub mod routes;
 pub mod state;

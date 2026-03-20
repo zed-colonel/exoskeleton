@@ -16,6 +16,7 @@ pub mod memory;
 pub mod relationship;
 pub mod reload_charters;
 pub mod send;
+pub mod serve_bootstrap;
 pub mod snapshot;
 pub mod start;
 pub mod thread;

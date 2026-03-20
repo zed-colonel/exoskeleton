@@ -26,6 +26,15 @@ case "${1:-start}" in
       /usr/local/bin/exo bootstrap --data-dir /data "$@"
     ;;
 
+  serve-bootstrap)
+    shift
+    exec gosu "$TARGET_UID:$TARGET_GID" \
+      /usr/local/bin/exo serve-bootstrap \
+      --data-dir /data \
+      --listen "${EXO_DAEMON_LISTEN:-0.0.0.0:7600}" \
+      "$@"
+    ;;
+
   start)
     shift
     if [ ! -f /data/vessel.toml ]; then
@@ -34,6 +43,8 @@ case "${1:-start}" in
       echo ""
       echo "  Run the bootstrap wizard first:"
       echo "    docker compose run -it vessel bootstrap"
+      echo "  Or use serve-bootstrap for programmatic bootstrap:"
+      echo "    docker compose run vessel serve-bootstrap"
       echo ""
       exit 1
     fi

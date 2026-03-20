@@ -43,6 +43,24 @@ enum Commands {
         log_level: String,
     },
 
+    /// Start the daemon in pre-bootstrap mode.
+    /// Serves bootstrap API endpoints without starting cognitive engines.
+    /// After bootstrap completes, transitions to full daemon mode.
+    #[command(name = "serve-bootstrap")]
+    ServeBootstrap {
+        /// Data directory for vessel state.
+        #[arg(long, default_value = "/data")]
+        data_dir: String,
+
+        /// Listen address.
+        #[arg(long, default_value = "0.0.0.0:7600")]
+        listen: String,
+
+        /// Log level (trace, debug, info, warn, error).
+        #[arg(long, default_value = "info")]
+        log_level: String,
+    },
+
     /// Start the Vessel and HTTP daemon (foreground).
     Start {
         /// Path to vessel.toml configuration file.
@@ -220,6 +238,12 @@ async fn main() {
             log_level,
         } => bootstrap::run_bootstrap(data_dir, log_level).await,
 
+        Commands::ServeBootstrap {
+            data_dir,
+            listen,
+            log_level,
+        } => commands::serve_bootstrap::run_serve_bootstrap(data_dir, listen, log_level).await,
+
         Commands::Start {
             config,
             data_dir,
@@ -333,6 +357,9 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
         } => commands::fork::run_fork(client, *tick, data_dir, mission.as_deref(), cli.json).await,
 
         Commands::Bootstrap { .. } => unreachable!("bootstrap is handled in main()"),
+        Commands::ServeBootstrap { .. } => {
+            unreachable!("serve-bootstrap is handled in main()")
+        }
         Commands::Start { .. } => unreachable!("start is handled in main()"),
     }
 }
