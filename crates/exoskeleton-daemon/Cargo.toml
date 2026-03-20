@@ -9,6 +9,10 @@ readme = "../../README.md"
 keywords = ["http-daemon", "inspection", "prometheus"]
 categories = ["web-programming::http-server"]
 
+[[bin]]
+name = "export-types"
+path = "src/bin/export_types.rs"
+
 [dependencies]
 exoskeleton-core = { workspace = true }
 exoskeleton-host = { workspace = true }
