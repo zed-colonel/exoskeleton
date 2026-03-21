@@ -22,6 +22,7 @@ use crate::DaemonConfig;
 pub struct BootstrapState {
     pub data_dir: PathBuf,
     pub listen_addr: SocketAddr,
+    registration_token: Option<String>,
     inner: Mutex<BootstrapInner>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -50,6 +51,7 @@ pub enum BootstrapError {
     NoTranscript,
     NotFinalized,
     AlreadyFinalized,
+    Unauthorized,
     Llm(String),
     Config(String),
     Io(String),
@@ -72,6 +74,9 @@ impl fmt::Display for BootstrapError {
                 )
             }
             Self::AlreadyFinalized => write!(f, "bootstrap already finalized"),
+            Self::Unauthorized => {
+                write!(f, "unauthorized — invalid or missing registration token")
+            }
             Self::Llm(msg) => write!(f, "LLM error: {msg}"),
             Self::Config(msg) => write!(f, "config error: {msg}"),
             Self::Io(msg) => write!(f, "I/O error: {msg}"),
@@ -86,6 +91,7 @@ impl BootstrapState {
         data_dir: PathBuf,
         listen_addr: SocketAddr,
         shutdown_tx: oneshot::Sender<()>,
+        registration_token: Option<String>,
     ) -> Self {
         // Load prompt registry — tier 2 (project-level) + tier 3 (compiled-in).
         // Tier 1 (per-vessel) is unavailable since the vessel doesn't exist yet.
@@ -99,6 +105,7 @@ impl BootstrapState {
         Self {
             data_dir,
             listen_addr,
+            registration_token,
             inner: Mutex::new(BootstrapInner {
                 llm_config: None,
                 transcript: Vec::new(),
@@ -108,6 +115,23 @@ impl BootstrapState {
                 finalized: false,
             }),
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
+        }
+    }
+
+    /// Validate a registration token against the configured token.
+    ///
+    /// If no token is configured, all requests are accepted.
+    /// If a token is configured, the request must provide a matching token.
+    pub fn validate_registration_token(
+        &self,
+        request_token: Option<&str>,
+    ) -> Result<(), BootstrapError> {
+        match &self.registration_token {
+            None => Ok(()), // No token configured — accept all requests
+            Some(expected) => match request_token {
+                Some(token) if token == expected => Ok(()),
+                _ => Err(BootstrapError::Unauthorized),
+            },
         }
     }
 
@@ -197,7 +221,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let addr: SocketAddr = "127.0.0.1:7600".parse().unwrap();
         let (tx, _rx) = oneshot::channel();
-        let state = BootstrapState::new(dir.path().to_path_buf(), addr, tx);
+        let state = BootstrapState::new(dir.path().to_path_buf(), addr, tx, None);
         (dir, state)
     }
 

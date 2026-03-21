@@ -26,7 +26,16 @@ pub async fn run_bootstrap_server(
     listen_addr: SocketAddr,
 ) -> Result<Option<DaemonConfig>, ExoError> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let state = Arc::new(BootstrapState::new(data_dir, listen_addr, shutdown_tx));
+    let registration_token = std::env::var("EXO_REGISTRATION_TOKEN").ok();
+    if registration_token.is_some() {
+        tracing::info!("Registration token configured — bootstrap requests require authorization");
+    }
+    let state = Arc::new(BootstrapState::new(
+        data_dir,
+        listen_addr,
+        shutdown_tx,
+        registration_token,
+    ));
 
     let router = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))

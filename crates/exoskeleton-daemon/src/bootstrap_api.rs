@@ -34,10 +34,34 @@ fn bootstrap_err(e: BootstrapError) -> (StatusCode, Json<serde_json::Value>) {
         | BootstrapError::NoTranscript
         | BootstrapError::NotFinalized
         | BootstrapError::AlreadyFinalized => StatusCode::BAD_REQUEST,
+        BootstrapError::Unauthorized => StatusCode::UNAUTHORIZED,
         BootstrapError::Config(_) => StatusCode::BAD_REQUEST,
         BootstrapError::Llm(_) | BootstrapError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     err_response(status, &e.to_string())
+}
+
+fn extract_registration_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+fn validate_token(
+    state: &BootstrapState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let token = extract_registration_token(headers);
+    state
+        .validate_registration_token(token.as_deref())
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid or missing registration token" })),
+            )
+        })
 }
 
 // ── GET /ready ──
@@ -74,8 +98,11 @@ pub struct LocalConfigRequest {
 
 pub async fn configure(
     State(state): State<Arc<BootstrapState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ConfigureRequest>,
 ) -> BootstrapResult<StatusCode> {
+    validate_token(&state, &headers)?;
+
     // Validate: at least one backend configured
     if req.frontier.is_none() && req.local.is_none() {
         return Err(err_response(
@@ -146,7 +173,10 @@ pub struct VerifyResponse {
 
 pub async fn verify(
     State(state): State<Arc<BootstrapState>>,
+    headers: axum::http::HeaderMap,
 ) -> BootstrapResult<Json<VerifyResponse>> {
+    validate_token(&state, &headers)?;
+
     let llm_config = state.llm_config().map_err(bootstrap_err)?;
 
     let request = LlmRequest {
@@ -179,9 +209,11 @@ pub async fn verify(
 
 pub async fn conversation_ws(
     State(state): State<Arc<BootstrapState>>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_conversation(state, socket))
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    validate_token(&state, &headers)?;
+    Ok(ws.on_upgrade(move |socket| handle_conversation(state, socket)))
 }
 
 async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) {
@@ -348,7 +380,10 @@ pub struct FinalizeResponse {
 
 pub async fn finalize(
     State(state): State<Arc<BootstrapState>>,
+    headers: axum::http::HeaderMap,
 ) -> BootstrapResult<Json<FinalizeResponse>> {
+    validate_token(&state, &headers)?;
+
     if state.is_finalized() {
         return Err(bootstrap_err(BootstrapError::AlreadyFinalized));
     }
@@ -457,7 +492,10 @@ pub struct StartVesselResponse {
 
 pub async fn start_vessel(
     State(state): State<Arc<BootstrapState>>,
+    headers: axum::http::HeaderMap,
 ) -> BootstrapResult<Json<StartVesselResponse>> {
+    validate_token(&state, &headers)?;
+
     if !state.is_finalized() {
         return Err(bootstrap_err(BootstrapError::NotFinalized));
     }

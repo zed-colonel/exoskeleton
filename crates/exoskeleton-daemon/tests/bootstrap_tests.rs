@@ -42,7 +42,7 @@ fn bootstrap_router(state: Arc<BootstrapState>) -> axum::Router {
 fn test_bootstrap_state(dir: &std::path::Path) -> (Arc<BootstrapState>, oneshot::Receiver<()>) {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let (tx, rx) = oneshot::channel();
-    let state = Arc::new(BootstrapState::new(dir.to_path_buf(), addr, tx));
+    let state = Arc::new(BootstrapState::new(dir.to_path_buf(), addr, tx, None));
     (state, rx)
 }
 
@@ -303,6 +303,91 @@ fn bootstrap_state_constructable_with_ephemeral_addr() {
     let dir = tempfile::tempdir().unwrap();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let (tx, _rx) = oneshot::channel();
-    let state = BootstrapState::new(dir.path().to_path_buf(), addr, tx);
+    let state = BootstrapState::new(dir.path().to_path_buf(), addr, tx, None);
     assert_eq!(state.listen_addr.port(), 0);
+}
+
+// ── EO4-T41: Bootstrap request with valid registration token → accepted ──
+
+#[tokio::test]
+async fn configure_with_valid_registration_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let (tx, _rx) = oneshot::channel();
+    let state = Arc::new(BootstrapState::new(
+        dir.path().to_path_buf(),
+        addr,
+        tx,
+        Some("test-secret-token".into()),
+    ));
+    let app = bootstrap_router(state);
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/bootstrap/configure")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-secret-token")
+                .body(Body::from(
+                    serde_json::to_string(&valid_configure_json()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ── EO4-T42: Bootstrap request without token when token configured → 401 ──
+
+#[tokio::test]
+async fn configure_without_token_when_required_returns_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let (tx, _rx) = oneshot::channel();
+    let state = Arc::new(BootstrapState::new(
+        dir.path().to_path_buf(),
+        addr,
+        tx,
+        Some("test-secret-token".into()),
+    ));
+    let app = bootstrap_router(state);
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/bootstrap/configure")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&valid_configure_json()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ── EO4-T43: Bootstrap request without token when no token configured → accepted ──
+
+#[tokio::test]
+async fn configure_without_token_when_not_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let (tx, _rx) = oneshot::channel();
+    let state = Arc::new(BootstrapState::new(
+        dir.path().to_path_buf(),
+        addr,
+        tx,
+        None,
+    ));
+    let app = bootstrap_router(state);
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/bootstrap/configure")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&valid_configure_json()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
