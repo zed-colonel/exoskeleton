@@ -29,7 +29,11 @@ impl Default for AlignConfig {
         Self {
             min_trust_for_action: 0.3,
             min_trust_for_destructive: 0.6,
-            destructive_tools: vec!["fs.write".into(), "http.request".into()],
+            destructive_tools: vec![
+                "fs.write".into(),
+                "http.request".into(),
+                "shell.exec".into(),
+            ],
             block_on_broken_commitments: false,
         }
     }
@@ -337,6 +341,46 @@ mod tests {
         let snapshot = snapshot_with_trust(0.5); // Neutral
         let config = AlignConfig::default();
         let actions = vec![test_action("delay")];
+        let tick_id = TickId::new();
+
+        let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
+        assert_eq!(approved, vec![0]);
+        assert!(blocked.is_empty());
+    }
+
+    // ── E2S1-T49: AlignConfig default includes shell.exec ──
+
+    #[test]
+    fn align_config_default_includes_shell_exec() {
+        let config = AlignConfig::default();
+        assert!(
+            config.destructive_tools.contains(&"shell.exec".to_string()),
+            "shell.exec should be in destructive_tools"
+        );
+    }
+
+    // ── E2S1-T50: Align blocks shell.exec below trust threshold ──
+
+    #[test]
+    fn align_blocks_shell_exec_below_trust() {
+        let snapshot = snapshot_with_trust(0.4); // Below destructive threshold (0.6)
+        let config = AlignConfig::default();
+        let actions = vec![test_action("shell.exec")];
+        let tick_id = TickId::new();
+
+        let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
+        assert!(approved.is_empty());
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].1.contains("destructive"));
+    }
+
+    // ── E2S1-T51: Align allows shell.exec at trust threshold ──
+
+    #[test]
+    fn align_allows_shell_exec_at_trust() {
+        let snapshot = snapshot_with_trust(0.8); // Above destructive threshold (0.6)
+        let config = AlignConfig::default();
+        let actions = vec![test_action("shell.exec")];
         let tick_id = TickId::new();
 
         let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
