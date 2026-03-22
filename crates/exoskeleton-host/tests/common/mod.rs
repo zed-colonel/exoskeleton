@@ -44,6 +44,8 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         episodic_memory_capacity: Some(200),
         bootstrap_grace_period_ticks: 0,
         threads: None,
+        source_repos: Vec::new(),
+        sandbox: exoskeleton_host::config::SandboxConfig::default(),
     }
 }
 

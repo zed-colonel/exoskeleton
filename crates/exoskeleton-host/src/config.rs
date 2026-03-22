@@ -216,6 +216,14 @@ pub struct VesselConfig {
     /// Operator overrides for built-in thread schedule and budget.
     /// `None` uses compiled-in defaults.
     pub threads: Option<ThreadsSection>,
+
+    // ── Source access settings (E2-S2) ──
+    /// Source repositories to mount in the vessel container. Empty means no source access.
+    pub source_repos: Vec<SourceRepoConfig>,
+
+    // ── Sandbox settings (E2-S2) ──
+    /// Sandbox configuration. Default: enabled, 256MB tmpfs.
+    pub sandbox: SandboxConfig,
 }
 
 impl Default for VesselConfig {
@@ -241,6 +249,8 @@ impl Default for VesselConfig {
             episodic_memory_capacity: Some(200),
             bootstrap_grace_period_ticks: 30,
             threads: None,
+            source_repos: Vec::new(),
+            sandbox: SandboxConfig::default(),
         }
     }
 }
@@ -303,6 +313,11 @@ impl VesselConfig {
             tb.validate()?;
         }
 
+        // Source repo validation (E2-S2)
+        for repo in &self.source_repos {
+            repo.validate()?;
+        }
+
         // Master loop config validation
         if self.master_loop_interval_secs < 1 {
             return Err(ExoError::Config(
@@ -359,6 +374,14 @@ impl VesselConfig {
             llm: self.llm_config.clone(),
             daemon: None,
             threads: None,
+            source: if self.source_repos.is_empty() {
+                None
+            } else {
+                Some(SourceSection {
+                    repos: self.source_repos.clone(),
+                })
+            },
+            sandbox: Some(self.sandbox.clone()),
         };
 
         let toml_str = toml::to_string_pretty(&config_file)
@@ -457,6 +480,12 @@ impl VesselConfig {
                 self.bootstrap_grace_period_ticks = ticks;
             }
         }
+        if let Ok(val) = std::env::var("EXO_SANDBOX_ENABLED") {
+            match val.to_lowercase().as_str() {
+                "false" | "0" | "no" => self.sandbox.enabled = false,
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -536,6 +565,12 @@ pub struct VesselConfigFile {
     /// `[threads]` section. Uses defaults if omitted.
     #[serde(default)]
     pub threads: Option<ThreadsSection>,
+    /// `[source]` section — source code repository mounts.
+    #[serde(default)]
+    pub source: Option<SourceSection>,
+    /// `[sandbox]` section — sandbox execution config.
+    #[serde(default)]
+    pub sandbox: Option<SandboxConfig>,
 }
 
 /// The `[daemon]` section of the TOML config file.
@@ -657,6 +692,91 @@ pub struct ThreadsSection {
     pub memory_consolidation_token_budget: Option<u64>,
 }
 
+/// Configuration for a source code repository to mount in the vessel container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceRepoConfig {
+    /// Display name for the repo (used as the mount point suffix: /workspace/{name}).
+    pub name: String,
+    /// Absolute path to the repository on the host filesystem.
+    pub host_path: PathBuf,
+    /// Mount point inside the vessel container.
+    /// Default: /workspace/{name}
+    #[serde(default)]
+    pub mount_point: Option<String>,
+}
+
+impl SourceRepoConfig {
+    /// Returns the effective mount point inside the container.
+    pub fn effective_mount_point(&self) -> String {
+        self.mount_point
+            .clone()
+            .unwrap_or_else(|| format!("/workspace/{}", self.name))
+    }
+
+    /// Validate the config. Returns error if host_path is not absolute.
+    pub fn validate(&self) -> Result<(), ExoError> {
+        if self.name.is_empty() {
+            return Err(ExoError::Config(
+                "source repo name must not be empty".into(),
+            ));
+        }
+        if !self.host_path.is_absolute() {
+            return Err(ExoError::Config(format!(
+                "source repo '{}' host_path must be absolute, got '{}'",
+                self.name,
+                self.host_path.display()
+            )));
+        }
+        // Mount point must start with /workspace/ if specified
+        if let Some(ref mp) = self.mount_point {
+            if !mp.starts_with("/workspace/") {
+                return Err(ExoError::Config(format!(
+                    "source repo '{}' mount_point must start with /workspace/, got '{}'",
+                    self.name, mp
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `[source]` section of the TOML config file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceSection {
+    /// Source repositories to mount read-only in the vessel container.
+    #[serde(default)]
+    pub repos: Vec<SourceRepoConfig>,
+}
+
+/// Configuration for the sandbox execution environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Whether sandbox.exec is available. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Tmpfs size for /sandbox mount (in bytes). Default: 256MB.
+    /// Only used by Observatory when creating the vessel container.
+    #[serde(default = "default_sandbox_tmpfs_size")]
+    pub tmpfs_size_bytes: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_sandbox_tmpfs_size() -> u64 {
+    268_435_456 // 256MB
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tmpfs_size_bytes: default_sandbox_tmpfs_size(),
+        }
+    }
+}
+
 /// Parse a thread schedule string into a `ThreadSchedule`.
 ///
 /// Accepts: "every_tick", "on_demand", "every_N" (e.g., "every_5").
@@ -732,6 +852,8 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             },
             bootstrap_grace_period_ticks: file.vessel.bootstrap_grace_period_ticks,
             threads: file.threads,
+            source_repos: file.source.map(|s| s.repos).unwrap_or_default(),
+            sandbox: file.sandbox.unwrap_or_default(),
         })
     }
 }
@@ -1577,5 +1699,169 @@ data_dir = "/tmp/exo"
         let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
         let config = VesselConfig::try_from(file).unwrap();
         assert!(config.threads.is_none());
+    }
+
+    // ── E2S2-T21: Source repo config parses from TOML ──
+
+    #[test]
+    fn source_repo_config_parses_from_toml() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[source]
+repos = [
+    { name = "exoskeleton", host_path = "/home/keiths/src/exoskeleton" },
+    { name = "worldinterface", host_path = "/home/keiths/src/worldinterface" },
+]
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let source = file.source.unwrap();
+        assert_eq!(source.repos.len(), 2);
+        assert_eq!(source.repos[0].name, "exoskeleton");
+        assert_eq!(
+            source.repos[0].host_path,
+            PathBuf::from("/home/keiths/src/exoskeleton")
+        );
+        assert_eq!(source.repos[1].name, "worldinterface");
+    }
+
+    // ── E2S2-T22: Source repo validates absolute path ──
+
+    #[test]
+    fn source_repo_config_validates_absolute_path() {
+        let repo = SourceRepoConfig {
+            name: "myrepo".into(),
+            host_path: PathBuf::from("relative/path"),
+            mount_point: None,
+        };
+        assert!(repo.validate().is_err());
+    }
+
+    // ── E2S2-T23: Source repo validates mount prefix ──
+
+    #[test]
+    fn source_repo_config_validates_mount_prefix() {
+        let repo = SourceRepoConfig {
+            name: "myrepo".into(),
+            host_path: PathBuf::from("/home/user/src/myrepo"),
+            mount_point: Some("/data/myrepo".into()),
+        };
+        assert!(repo.validate().is_err());
+    }
+
+    // ── E2S2-T24: Source repo default mount point ──
+
+    #[test]
+    fn source_repo_config_default_mount_point() {
+        let repo = SourceRepoConfig {
+            name: "myrepo".into(),
+            host_path: PathBuf::from("/home/user/src/myrepo"),
+            mount_point: None,
+        };
+        assert_eq!(repo.effective_mount_point(), "/workspace/myrepo");
+    }
+
+    // ── E2S2-T25: Source repo empty name rejected ──
+
+    #[test]
+    fn source_repo_config_empty_name_rejected() {
+        let repo = SourceRepoConfig {
+            name: String::new(),
+            host_path: PathBuf::from("/home/user/src/repo"),
+            mount_point: None,
+        };
+        assert!(repo.validate().is_err());
+    }
+
+    // ── E2S2-T26: Sandbox config parses from TOML ──
+
+    #[test]
+    fn sandbox_config_parses_from_toml() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[sandbox]
+enabled = false
+tmpfs_size_bytes = 134217728
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let sandbox = file.sandbox.unwrap();
+        assert!(!sandbox.enabled);
+        assert_eq!(sandbox.tmpfs_size_bytes, 134_217_728);
+    }
+
+    // ── E2S2-T27: Sandbox config defaults ──
+
+    #[test]
+    fn sandbox_config_defaults() {
+        let config = SandboxConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.tmpfs_size_bytes, 268_435_456);
+    }
+
+    // ── E2S2-T28: Full vessel config with source and sandbox ──
+
+    #[test]
+    fn vessel_config_with_source_and_sandbox() {
+        let toml_str = r#"
+[vessel]
+mission = "Monitor and improve the codebase"
+data_dir = "/data"
+
+[source]
+repos = [
+    { name = "exoskeleton", host_path = "/home/keiths/src/exoskeleton" },
+]
+
+[sandbox]
+enabled = true
+tmpfs_size_bytes = 268435456
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.source_repos.len(), 1);
+        assert_eq!(config.source_repos[0].name, "exoskeleton");
+        assert!(config.sandbox.enabled);
+        assert_eq!(config.sandbox.tmpfs_size_bytes, 268_435_456);
+    }
+
+    // ── E2S2-T29: Missing [source] section defaults to empty ──
+
+    #[test]
+    fn vessel_config_without_source_section() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert!(config.source_repos.is_empty());
+        // sandbox defaults
+        assert!(config.sandbox.enabled);
+        assert_eq!(config.sandbox.tmpfs_size_bytes, 268_435_456);
+    }
+
+    // ── E2S2-T30: Source repo validation runs on vessel validate ──
+
+    #[test]
+    fn source_repo_validation_runs_on_vessel_validate() {
+        let config = VesselConfig {
+            mission: "test".into(),
+            source_repos: vec![SourceRepoConfig {
+                name: "bad".into(),
+                host_path: PathBuf::from("relative/path"),
+                mount_point: None,
+            }],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("absolute"));
     }
 }
