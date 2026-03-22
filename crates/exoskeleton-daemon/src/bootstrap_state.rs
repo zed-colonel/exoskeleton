@@ -214,8 +214,9 @@ impl BootstrapState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exoskeleton_core::llm::LlmRole;
+
+    use super::*;
 
     fn test_state() -> (tempfile::TempDir, BootstrapState) {
         let dir = tempfile::tempdir().unwrap();

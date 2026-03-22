@@ -10,13 +10,12 @@ pub mod self_critique;
 pub mod threat_monitor;
 
 use exoskeleton_core::prompt::PromptRegistry;
+use exoskeleton_core::ThreadSchedule;
 use exoskeleton_core::{ExoError, ThreadId};
 pub use memory_consolidation::{MemoryConsolidation, MemoryNote};
 pub use self_critique::SelfCritique;
 pub use threat_monitor::{Threat, ThreatAssessment, ThreatSeverity};
 use uuid::Uuid;
-
-use exoskeleton_core::ThreadSchedule;
 
 use crate::registry::ThreadRegistry;
 

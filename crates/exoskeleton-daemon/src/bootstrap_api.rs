@@ -11,13 +11,12 @@ use axum::extract::{State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
-
 use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_host::config::{
     FrontierModelConfig, FrontierProvider, LlmConfig, LocalApiFormat, LocalModelConfig,
 };
 use exoskeleton_host::direct_llm_call;
+use serde::{Deserialize, Serialize};
 
 use crate::bootstrap_state::{BootstrapError, BootstrapState, VesselIdentity};
 use crate::DaemonConfig;

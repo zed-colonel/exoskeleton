@@ -9,12 +9,11 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
+use exoskeleton_daemon::bootstrap_api;
+use exoskeleton_daemon::bootstrap_state::BootstrapState;
 use http_body_util::BodyExt;
 use tokio::sync::oneshot;
 use tower::ServiceExt;
-
-use exoskeleton_daemon::bootstrap_api;
-use exoskeleton_daemon::bootstrap_state::BootstrapState;
 
 /// Build the bootstrap router (same route table as `bootstrap_server.rs`).
 fn bootstrap_router(state: Arc<BootstrapState>) -> axum::Router {
