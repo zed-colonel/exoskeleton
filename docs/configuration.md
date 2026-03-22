@@ -25,6 +25,20 @@ master_loop_interval_secs = 60
 # Directory for the file-based inbox. Default: {data_dir}/inbox/
 # inbox_dir = "/var/lib/exoskeleton/inbox"
 
+# Trust decay rate per day of inactivity. Omit to disable. Default: none.
+# trust_decay_rate = 0.05
+
+# Minimum inactive days before trust decay begins. Default: 7.
+# trust_decay_min_inactivity_days = 7
+
+# Episodic memory capacity (max summaries). 0 disables eviction. Default: 200.
+episodic_memory_capacity = 200
+
+# Bootstrap grace period in ticks. During this window, Threat Monitor and
+# Self-Critique receive additional context treating early activity as normal.
+# 0 disables the grace period. Default: 30.
+bootstrap_grace_period_ticks = 30
+
 
 [cognitive]
 # Cognitive AQ dispatch tick interval in milliseconds. Default: 100.
@@ -131,6 +145,30 @@ api_key_env = "ANTHROPIC_API_KEY"
 # HTTP listen address. Default: 127.0.0.1:7600.
 # Set to "0.0.0.0:7600" for Docker/container deployment.
 listen = "127.0.0.1:7600"
+
+
+[threads]
+# Override built-in thread schedules and budgets.
+# All fields optional — omitted values use compiled-in defaults.
+
+# Threat Monitor schedule: "every_tick", "every_N" (e.g., "every_3"), "on_demand".
+# Default: "every_tick".
+# threat_monitor_schedule = "every_tick"
+
+# Threat Monitor token budget. Default: 4096.
+# threat_monitor_token_budget = 4096
+
+# Self-Critique schedule. Default: "every_tick".
+# self_critique_schedule = "every_tick"
+
+# Self-Critique token budget. Default: 4096.
+# self_critique_token_budget = 4096
+
+# Memory Consolidation schedule. Default: "every_5".
+# memory_consolidation_schedule = "every_5"
+
+# Memory Consolidation token budget. Default: 6144.
+# memory_consolidation_token_budget = 6144
 ```
 
 ---
@@ -146,6 +184,10 @@ listen = "127.0.0.1:7600"
 | `data_dir` | Path | **Yes** | -- | Root data directory for all engine subdirectories |
 | `master_loop_interval_secs` | u64 | No | `60` | PODAARA tick interval in seconds (must be >= 1 and < `lease_timeout_secs`) |
 | `inbox_dir` | Path | No | `{data_dir}/inbox/` | Directory for the file-based inbox |
+| `trust_decay_rate` | f64 | No | `None` | Trust decay rate per day of inactivity. Omit to disable. |
+| `trust_decay_min_inactivity_days` | u64 | No | `7` | Minimum inactive days before trust decay begins |
+| `episodic_memory_capacity` | u64 | No | `200` | Max episodic summaries. 0 disables eviction. |
+| `bootstrap_grace_period_ticks` | u64 | No | `30` | Ticks during which Threat Monitor and Self-Critique receive bootstrap preamble context. 0 disables. |
 
 **Forked vessels:** When a vessel is created via snapshot forking, the `vessel.toml` is auto-generated with a new `vessel_id`, the fork target's `data_dir`, and the source vessel's LLM/budget/engine settings. The `[daemon]` section is intentionally omitted to prevent port conflicts -- the operator adds it if needed.
 
@@ -231,6 +273,22 @@ Optional. Omit to use the default listen address.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `listen` | `"host:port"` string | No | `127.0.0.1:7600` | HTTP daemon listen address |
+| `cors_allowed_origins` | String[] | No | `[]` | Allowed origins for CORS requests |
+
+### `[threads]`
+
+Optional. Omit the entire section to use compiled-in defaults for all built-in threads.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `threat_monitor_schedule` | String | No | `"every_tick"` | Schedule: `"every_tick"`, `"every_N"`, `"on_demand"` |
+| `threat_monitor_token_budget` | u64 | No | `4096` | Token budget for Threat Monitor |
+| `self_critique_schedule` | String | No | `"every_tick"` | Schedule for Self-Critique thread |
+| `self_critique_token_budget` | u64 | No | `4096` | Token budget for Self-Critique |
+| `memory_consolidation_schedule` | String | No | `"every_5"` | Schedule for Memory Consolidation |
+| `memory_consolidation_token_budget` | u64 | No | `6144` | Token budget for Memory Consolidation |
+
+**Schedule values:** `"every_tick"` (runs every tick), `"every_N"` where N is a number (e.g., `"every_3"` runs every 3 ticks), `"on_demand"` (manual trigger only).
 
 ---
 
@@ -248,6 +306,8 @@ All environment variables are optional and override their TOML counterparts:
 | `EXO_TOOL_TICK_INTERVAL_MS` | `tool.tick_interval_ms` | `25` |
 | `EXO_TOOL_DISPATCH_CONCURRENCY` | `tool.dispatch_concurrency` | `2` |
 | `EXO_DAEMON_LISTEN` | `daemon.listen` | `0.0.0.0:7600` |
+| `EXO_CORS_ORIGINS` | `daemon.cors_allowed_origins` | `http://localhost:3000,https://obs.example.com` |
+| `EXO_BOOTSTRAP_GRACE_PERIOD` | `vessel.bootstrap_grace_period_ticks` | `30` |
 
 API keys are always read from environment variables (never stored in TOML):
 
@@ -315,6 +375,7 @@ prompts/                  # Project defaults (shipped with source)
 | `charter-self-critique.md` | Self-Critique charter | `{{thread_id}}`, `{{thread_name}}`, `{{tick_number}}` |
 | `charter-memory-consolidation.md` | Memory Consolidation charter | `{{thread_id}}`, `{{thread_name}}`, `{{tick_number}}` |
 | `bootstrap-extract-identity.md` | Identity extraction | *(none)* |
+| `bootstrap-preamble.md` | Bootstrap grace period preamble | `{{tick_number}}`, `{{grace_period}}` |
 | `bootstrap-verify.md` | Config verification | `{{config_summary}}` |
 
 ### Loading Priority

@@ -196,6 +196,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         prompt_registry: kernel.prompt_registry.clone(),
         trust_decay_config: kernel.trust_decay_config.clone(),
         episodic_memory_capacity: kernel.episodic_memory_capacity,
+        bootstrap_grace_period_ticks: kernel.bootstrap_grace_period_ticks,
     }
 }
 
@@ -242,7 +243,7 @@ async fn setup_builtin_threads(
 
     let thread_store = Arc::new(InMemoryThreadStore::new());
     let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
-    register_builtin_threads(&thread_registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&thread_registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let kernel = KernelContext {
         snapshot_store: storage.snapshot_store().clone(),
@@ -267,6 +268,7 @@ async fn setup_builtin_threads(
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         trust_decay_config: None,
         episodic_memory_capacity: None,
+        bootstrap_grace_period_ticks: 0,
     };
 
     (kernel, handler, mock)
@@ -305,7 +307,7 @@ async fn setup_builtin_threads_custom(
 
     let thread_store = Arc::new(InMemoryThreadStore::new());
     let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
-    register_builtin_threads(&thread_registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&thread_registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let kernel = KernelContext {
         snapshot_store: storage.snapshot_store().clone(),
@@ -330,6 +332,7 @@ async fn setup_builtin_threads_custom(
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         trust_decay_config: None,
         episodic_memory_capacity: None,
+        bootstrap_grace_period_ticks: 0,
     };
 
     (kernel, handler)
@@ -343,7 +346,7 @@ async fn setup_builtin_threads_custom(
 fn builtin_threads_registered_on_setup() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let all = registry.list().unwrap();
     assert_eq!(all.len(), 3);
@@ -370,9 +373,9 @@ fn builtin_threads_registered_on_setup() {
 fn builtin_registration_idempotent() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
     assert_eq!(registry.list().unwrap().len(), 3);
 }
 
@@ -380,7 +383,7 @@ fn builtin_registration_idempotent() {
 fn builtin_registration_preserves_suspended() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     // Operator suspends Threat Monitor
     registry
@@ -388,7 +391,7 @@ fn builtin_registration_preserves_suspended() {
         .unwrap();
 
     // Re-register (simulate restart)
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let (_, status) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();
     assert_eq!(
@@ -878,7 +881,7 @@ async fn replay_tick_record_references_correct_artifacts() {
 fn builtin_threads_due_in_priority_order() {
     let store = Arc::new(InMemoryThreadStore::new());
     let registry = ThreadRegistry::new(store);
-    register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+    register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let due = registry.due_threads(1).unwrap();
     assert_eq!(due.len(), 3);

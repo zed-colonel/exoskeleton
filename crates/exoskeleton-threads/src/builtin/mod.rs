@@ -16,7 +16,29 @@ pub use self_critique::SelfCritique;
 pub use threat_monitor::{Threat, ThreatAssessment, ThreatSeverity};
 use uuid::Uuid;
 
+use exoskeleton_core::ThreadSchedule;
+
 use crate::registry::ThreadRegistry;
+
+/// Operator overrides for built-in thread configuration.
+///
+/// Applied after charter overrides, before registration. Allows operators
+/// to tune built-in thread behavior via `vessel.toml` `[threads]` section.
+#[derive(Debug, Default)]
+pub struct ThreadConfigOverrides {
+    /// Threat Monitor schedule override.
+    pub threat_monitor_schedule: Option<ThreadSchedule>,
+    /// Threat Monitor token budget override.
+    pub threat_monitor_token_budget: Option<u64>,
+    /// Self-Critique schedule override.
+    pub self_critique_schedule: Option<ThreadSchedule>,
+    /// Self-Critique token budget override.
+    pub self_critique_token_budget: Option<u64>,
+    /// Memory Consolidation schedule override.
+    pub memory_consolidation_schedule: Option<ThreadSchedule>,
+    /// Memory Consolidation token budget override.
+    pub memory_consolidation_token_budget: Option<u64>,
+}
 
 /// Deterministic UUID for the Threat Monitor thread.
 ///
@@ -47,6 +69,7 @@ pub const MEMORY_CONSOLIDATION_ID: ThreadId = ThreadId::from_uuid(Uuid::from_byt
 pub fn register_builtin_threads(
     registry: &ThreadRegistry,
     prompts: &PromptRegistry,
+    overrides: Option<&ThreadConfigOverrides>,
 ) -> Result<(), ExoError> {
     let mut builtin_specs = [
         threat_monitor::spec(),
@@ -63,6 +86,31 @@ pub fn register_builtin_threads(
     for (spec, key) in builtin_specs.iter_mut().zip(charter_keys.iter()) {
         if let Some(charter) = prompts.get(key) {
             spec.charter = charter.to_string();
+        }
+    }
+
+    // Apply operator overrides for schedule and token budget
+    if let Some(o) = overrides {
+        // Threat Monitor (index 0)
+        if let Some(schedule) = o.threat_monitor_schedule {
+            builtin_specs[0].schedule = schedule;
+        }
+        if let Some(budget) = o.threat_monitor_token_budget {
+            builtin_specs[0].token_budget = budget;
+        }
+        // Self-Critique (index 1)
+        if let Some(schedule) = o.self_critique_schedule {
+            builtin_specs[1].schedule = schedule;
+        }
+        if let Some(budget) = o.self_critique_token_budget {
+            builtin_specs[1].token_budget = budget;
+        }
+        // Memory Consolidation (index 2)
+        if let Some(schedule) = o.memory_consolidation_schedule {
+            builtin_specs[2].schedule = schedule;
+        }
+        if let Some(budget) = o.memory_consolidation_token_budget {
+            builtin_specs[2].token_budget = budget;
         }
     }
 
@@ -121,7 +169,7 @@ mod tests {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
-        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
         let all = registry.list().unwrap();
         assert_eq!(all.len(), 3);
@@ -136,8 +184,8 @@ mod tests {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
-        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
-        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
         let all = registry.list().unwrap();
         assert_eq!(
@@ -152,7 +200,7 @@ mod tests {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
-        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
         // Operator suspends the Threat Monitor.
         registry
@@ -160,7 +208,7 @@ mod tests {
             .unwrap();
 
         // Re-register (e.g., vessel restart).
-        register_builtin_threads(&registry, &PromptRegistry::with_defaults()).unwrap();
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
         // Threat Monitor should still be Suspended.
         let (_, status) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();
@@ -168,5 +216,85 @@ mod tests {
 
         // Total count unchanged.
         assert_eq!(registry.list().unwrap().len(), 3);
+    }
+
+    // ── DC-T11..DC-T13: Decoherence Fix — Thread Config Overrides ──
+
+    #[test]
+    fn dc_t11_thread_config_overrides_applied() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let registry = ThreadRegistry::new(store);
+        let overrides = ThreadConfigOverrides {
+            threat_monitor_schedule: Some(ThreadSchedule::EveryNTicks(3)),
+            threat_monitor_token_budget: Some(2048),
+            self_critique_schedule: Some(ThreadSchedule::OnDemand),
+            self_critique_token_budget: Some(3000),
+            memory_consolidation_schedule: Some(ThreadSchedule::EveryNTicks(10)),
+            memory_consolidation_token_budget: Some(8000),
+        };
+
+        register_builtin_threads(
+            &registry,
+            &PromptRegistry::with_defaults(),
+            Some(&overrides),
+        )
+        .unwrap();
+
+        let (tm, _) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();
+        assert_eq!(tm.schedule, ThreadSchedule::EveryNTicks(3));
+        assert_eq!(tm.token_budget, 2048);
+
+        let (sc, _) = registry.get(SELF_CRITIQUE_ID).unwrap().unwrap();
+        assert_eq!(sc.schedule, ThreadSchedule::OnDemand);
+        assert_eq!(sc.token_budget, 3000);
+
+        let (mc, _) = registry.get(MEMORY_CONSOLIDATION_ID).unwrap().unwrap();
+        assert_eq!(mc.schedule, ThreadSchedule::EveryNTicks(10));
+        assert_eq!(mc.token_budget, 8000);
+    }
+
+    #[test]
+    fn dc_t12_thread_config_overrides_none_preserves_defaults() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let registry = ThreadRegistry::new(store);
+
+        register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
+
+        let (tm, _) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();
+        assert_eq!(tm.schedule, ThreadSchedule::EveryTick);
+        assert_eq!(tm.token_budget, 4096);
+
+        let (sc, _) = registry.get(SELF_CRITIQUE_ID).unwrap().unwrap();
+        assert_eq!(sc.schedule, ThreadSchedule::EveryTick);
+        assert_eq!(sc.token_budget, 4096);
+    }
+
+    #[test]
+    fn dc_t13_register_with_overrides_idempotent() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let registry = ThreadRegistry::new(store);
+        let overrides = ThreadConfigOverrides {
+            threat_monitor_schedule: Some(ThreadSchedule::EveryNTicks(5)),
+            ..Default::default()
+        };
+
+        register_builtin_threads(
+            &registry,
+            &PromptRegistry::with_defaults(),
+            Some(&overrides),
+        )
+        .unwrap();
+        register_builtin_threads(
+            &registry,
+            &PromptRegistry::with_defaults(),
+            Some(&overrides),
+        )
+        .unwrap();
+
+        assert_eq!(
+            registry.list().unwrap().len(),
+            3,
+            "should not duplicate threads on re-registration with overrides"
+        );
     }
 }

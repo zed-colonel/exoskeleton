@@ -126,6 +126,7 @@ mod tests {
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
             trust_decay_config: None,
             episodic_memory_capacity: None,
+            bootstrap_grace_period_ticks: 0,
         }
     }
 

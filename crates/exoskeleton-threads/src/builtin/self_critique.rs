@@ -29,6 +29,12 @@ thread recommendations appropriately?
 
 You produce recommendations only — you NEVER invoke tools or take direct action.
 
+IMPORTANT — Bootstrap Sensitivity Calibration:
+During the first phase of a vessel's life, plan formation and self-orientation are the primary \
+useful activities. A vessel that spends its early ticks establishing goals, building initial \
+plans, and orienting to its mission is performing WELL, not thrashing. Only flag thrashing when \
+the same approach is failing repeatedly with no variation in strategy.
+
 Respond with JSON:
 {
   \"summary\": \"One-sentence assessment of recent performance\",
@@ -135,5 +141,19 @@ mod tests {
         assert!((result.progress_rating - 0.5).abs() < f64::EPSILON);
         assert!(result.concerns.is_empty());
         assert!((result.thrash_indicator).abs() < f64::EPSILON);
+    }
+
+    // ── DC-T18: Decoherence Fix — Charter Calibration ──
+
+    #[test]
+    fn dc_t18_self_critique_charter_contains_calibration() {
+        assert!(
+            SELF_CRITIQUE_CHARTER.contains("Bootstrap Sensitivity Calibration"),
+            "Self-Critique charter must include bootstrap calibration section"
+        );
+        assert!(
+            SELF_CRITIQUE_CHARTER.contains("plan formation and self-orientation"),
+            "Calibration should mention plan formation"
+        );
     }
 }

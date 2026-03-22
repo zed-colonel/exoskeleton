@@ -761,6 +761,7 @@ mod tests {
         exoskeleton_threads::register_builtin_threads(
             &inspector.thread_registry,
             &PromptRegistry::with_defaults(),
+            None,
         )
         .unwrap();
 

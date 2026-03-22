@@ -118,9 +118,14 @@ async fn inspector_memory_episodic_returns_stored_summaries() {
     let vessel = Vessel::start_with_registry(config, registry).await.unwrap();
     let inspector = vessel.inspector();
 
-    // Initially empty
+    // First boot seeds one episodic entry (Decoherence Fix)
     let episodic = inspector.memory_episodic(10).unwrap();
-    assert!(episodic.is_empty());
+    assert_eq!(
+        episodic.len(),
+        1,
+        "first boot should seed exactly one episodic entry"
+    );
+    assert!(episodic[0].summary.contains("Vessel initialized"));
 
     vessel.shutdown().await.unwrap();
 }

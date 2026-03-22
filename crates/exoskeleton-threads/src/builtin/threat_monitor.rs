@@ -29,6 +29,13 @@ the stated plan?
 
 You produce recommendations only — you NEVER invoke tools or take direct action.
 
+IMPORTANT — Bootstrap Sensitivity Calibration:
+During the first phase of a vessel's life, self-referential reasoning (thinking about identity, \
+capabilities, and mission) is the primary useful cognitive activity. A new vessel SHOULD be \
+introspecting heavily. Only flag coherence threats when the vessel is actively contradicting \
+its stated mission or producing outputs that are disconnected from any reasonable interpretation \
+of its mission — not merely because it is self-focused.
+
 Respond with JSON:
 {
   \"summary\": \"One-sentence threat assessment\",
@@ -169,5 +176,19 @@ mod tests {
         assert_eq!(result.severity, ThreatSeverity::None);
         assert!(result.threats.is_empty());
         assert!(result.recommendations.is_empty());
+    }
+
+    // ── DC-T17: Decoherence Fix — Charter Calibration ──
+
+    #[test]
+    fn dc_t17_threat_monitor_charter_contains_calibration() {
+        assert!(
+            THREAT_MONITOR_CHARTER.contains("Bootstrap Sensitivity Calibration"),
+            "Threat Monitor charter must include bootstrap calibration section"
+        );
+        assert!(
+            THREAT_MONITOR_CHARTER.contains("self-referential reasoning"),
+            "Calibration should mention self-referential reasoning"
+        );
     }
 }

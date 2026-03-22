@@ -38,6 +38,7 @@ pub fn execute_thread(
     snapshot: &StateSnapshot,
     tick_id: TickId,
     cancellation: &CancellationToken,
+    bootstrap_preamble: Option<&str>,
 ) -> Result<ThreadOutput, ExoError> {
     // 1. Fetch recent outputs for continuity
     let recent_outputs = kernel.thread_registry.recent_outputs(thread.thread_id, 5)?;
@@ -64,6 +65,7 @@ pub fn execute_thread(
         &recent_outputs,
         tick_id,
         charter_template.as_deref(),
+        bootstrap_preamble,
     )?;
 
     // 3. Check cancellation before LLM call
@@ -148,6 +150,15 @@ pub fn execute_thread(
     Ok(output)
 }
 
+/// Returns `true` if this thread should receive bootstrap preamble during grace period.
+///
+/// Only Threat Monitor and Self-Critique are bootstrap-sensitive.
+/// Memory Consolidation is unaffected (more consolidation during bootstrap is helpful).
+fn is_bootstrap_sensitive_thread(thread_id: exoskeleton_core::ThreadId) -> bool {
+    thread_id == exoskeleton_threads::THREAT_MONITOR_ID
+        || thread_id == exoskeleton_threads::SELF_CRITIQUE_ID
+}
+
 /// Execute all threads that are due this tick (E1-S3: parallel via `std::thread::scope`).
 ///
 /// Called between Perceive and Orient in the PODAARA cycle.
@@ -191,6 +202,28 @@ pub fn execute_due_threads(
         return Ok(Vec::new());
     }
 
+    // Resolve bootstrap preamble if in grace period (Decoherence Fix)
+    let tick_number = snapshot.tick_number + 1;
+    let in_grace_period = kernel.bootstrap_grace_period_ticks > 0
+        && tick_number < kernel.bootstrap_grace_period_ticks;
+    let bootstrap_preamble_text = if in_grace_period {
+        kernel
+            .prompt_registry
+            .resolve(
+                "bootstrap-preamble",
+                &[
+                    ("tick_number", &tick_number.to_string()),
+                    (
+                        "grace_period",
+                        &kernel.bootstrap_grace_period_ticks.to_string(),
+                    ),
+                ],
+            )
+            .ok()
+    } else {
+        None
+    };
+
     // Capture tokio Handle for spawned threads (H-1 pattern: reqwest needs runtime context)
     let handle = tokio::runtime::Handle::current();
 
@@ -202,6 +235,12 @@ pub fn execute_due_threads(
                 .enumerate()
                 .map(|(idx, thread)| {
                     let handle = &handle;
+                    let preamble =
+                        if in_grace_period && is_bootstrap_sensitive_thread(thread.thread_id) {
+                            bootstrap_preamble_text.as_deref()
+                        } else {
+                            None
+                        };
                     s.spawn(move || {
                         let _guard = handle.enter();
                         if cancellation.is_cancelled() {
@@ -214,6 +253,7 @@ pub fn execute_due_threads(
                             snapshot,
                             tick_id,
                             cancellation,
+                            preamble,
                         );
                         (idx, *thread, result)
                     })
@@ -408,6 +448,7 @@ mod tests {
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
             trust_decay_config: None,
             episodic_memory_capacity: None,
+            bootstrap_grace_period_ticks: 0,
         }
     }
 
@@ -451,7 +492,7 @@ mod tests {
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
         let output =
-            execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+            execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         assert_eq!(output.summary, "ok");
         assert_eq!(output.recommendations, vec!["do x"]);
@@ -471,7 +512,7 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         // I3: LlmResponse artifact must exist in the store
         let responses = kernel
@@ -496,7 +537,7 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         // I3: ThreadOutput artifact must exist in the store
         let outputs = kernel
@@ -521,7 +562,7 @@ mod tests {
         let json = r#"{"summary":"stored ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         let recent = kernel
             .thread_registry
@@ -543,7 +584,7 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         // record_run sets the tick number to snapshot.tick_number + 1
         let (_, _) = kernel
@@ -575,7 +616,7 @@ mod tests {
         let handler = test_handler_with_mock("not json lol", kernel.artifact_store.clone());
 
         let output =
-            execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+            execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         // Fallback: summary is the raw text, recommendations empty
         assert_eq!(output.summary, "not json lol");
@@ -597,7 +638,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
 
-        let result = execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token);
+        let result = execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("cancelled"));
@@ -625,7 +666,7 @@ mod tests {
             kernel.artifact_store.clone(),
         );
 
-        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token).unwrap();
+        execute_thread(&handler, &kernel, &thread, &snapshot, tick_id, &token, None).unwrap();
 
         let captured = capturing.captured.lock().unwrap();
         let req = captured.as_ref().expect("request should be captured");

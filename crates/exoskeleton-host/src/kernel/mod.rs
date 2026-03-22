@@ -76,6 +76,10 @@ pub struct KernelContext {
     pub trust_decay_config: Option<exoskeleton_core::TrustDecayConfig>,
     /// Episodic memory capacity (E1-S3). `None` disables eviction.
     pub episodic_memory_capacity: Option<u64>,
+    /// Bootstrap grace period in ticks (Decoherence Fix). During this window,
+    /// Threat Monitor and Self-Critique receive bootstrap preamble context.
+    /// 0 disables the grace period.
+    pub bootstrap_grace_period_ticks: u64,
 }
 
 /// Run one complete PODAARA tick.

@@ -193,12 +193,42 @@ impl Vessel {
             prompt_registry: prompt_registry.clone(),
             trust_decay_config: config.trust_decay.clone(),
             episodic_memory_capacity: config.episodic_memory_capacity,
+            bootstrap_grace_period_ticks: config.bootstrap_grace_period_ticks,
         });
 
+        // 7.8 Seed episodic memory for first boot (Decoherence Fix)
+        // Prevents empty-context starvation that triggers LLM fabrication.
+        if kernel_context.snapshot_store.latest()?.is_none() {
+            let seed_summary = exoskeleton_core::EpisodicSummary::new(
+                0,
+                0,
+                format!(
+                    "Vessel initialized. Mission: \"{mission}\". \
+                     Bootstrap complete. Cognitive engines starting. \
+                     All three built-in threads registered: Threat Monitor (Critical, EveryTick), \
+                     Self-Critique (High, EveryTick), Memory Consolidation (Normal, every 5 ticks). \
+                     Bootstrap grace period active for {grace} ticks — \
+                     early self-referential activity is expected during initialization.",
+                    mission = config.mission,
+                    grace = config.bootstrap_grace_period_ticks,
+                ),
+                vec![
+                    "vessel_initialized".into(),
+                    "bootstrap_complete".into(),
+                    "cognitive_engines_starting".into(),
+                ],
+            );
+            kernel_context.memory_store.write_episodic(&seed_summary)?;
+            tracing::info!("seeded initial episodic memory for first boot");
+        }
+
         // 8. Register built-in cognitive threads (Sprint 7)
+        // Build thread config overrides from [threads] TOML section
+        let thread_overrides = config.build_thread_overrides();
         exoskeleton_threads::register_builtin_threads(
             &kernel_context.thread_registry,
             &prompt_registry,
+            thread_overrides.as_ref(),
         )?;
 
         // 9. Bootstrap Cognitive AQ engine with KernelContext

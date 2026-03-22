@@ -14,8 +14,9 @@ pub mod scheduling;
 pub mod store;
 
 pub use builtin::{
-    register_builtin_threads, MemoryConsolidation, MemoryNote, SelfCritique, Threat,
-    ThreatAssessment, ThreatSeverity, MEMORY_CONSOLIDATION_ID, SELF_CRITIQUE_ID, THREAT_MONITOR_ID,
+    register_builtin_threads, MemoryConsolidation, MemoryNote, SelfCritique, ThreadConfigOverrides,
+    Threat, ThreatAssessment, ThreatSeverity, MEMORY_CONSOLIDATION_ID, SELF_CRITIQUE_ID,
+    THREAT_MONITOR_ID,
 };
 pub use context::compile_thread_context;
 pub use registry::ThreadRegistry;

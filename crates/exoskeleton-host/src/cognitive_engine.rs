@@ -265,6 +265,7 @@ impl CognitiveHandler {
             &snapshot,
             thread_payload.tick_id,
             cancellation,
+            None, // Bootstrap preamble handled by execute_due_threads path
         ) {
             Ok(output) => match serde_json::to_vec(&output) {
                 Ok(bytes) => HandlerOutput::success_with_output(bytes),

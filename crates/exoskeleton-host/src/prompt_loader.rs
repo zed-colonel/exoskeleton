@@ -29,6 +29,7 @@ const PROMPT_FILES: &[(&str, &str)] = &[
         "bootstrap-identity-extraction",
         "bootstrap/identity-extraction.md",
     ),
+    ("bootstrap-preamble", "bootstrap-preamble.md"),
 ];
 
 /// Load prompt overrides from filesystem, overlaying on compiled-in defaults.
@@ -115,7 +116,7 @@ mod tests {
             "Custom decide prompt from data_dir"
         );
         // Other prompts should still be defaults
-        assert_eq!(registry.len(), 10);
+        assert_eq!(registry.len(), 11);
     }
 
     // ── E0-T13: project-level override takes precedence over compiled-in ──
@@ -181,7 +182,7 @@ mod tests {
         let after = registry.get("decide-system").unwrap();
         assert!(!after.is_empty());
         // All 10 prompts should still be present
-        assert_eq!(registry.len(), 10);
+        assert_eq!(registry.len(), 11);
         // If no project-level files found, should match the compiled-in
         if !Path::new("prompts/decide-system.md").exists() {
             assert_eq!(after, &before);
@@ -207,6 +208,30 @@ mod tests {
         assert_eq!(
             registry.get("charter-threat-monitor").unwrap(),
             "Custom threat charter"
+        );
+    }
+
+    // ── DC-T30..DC-T31: Decoherence Fix — Charter File/Compiled Sync ──
+
+    #[test]
+    fn dc_t30_charter_prompt_file_matches_compiled() {
+        use exoskeleton_threads::builtin::threat_monitor::THREAT_MONITOR_CHARTER;
+
+        let file_content = include_str!("../../../prompts/charters/threat-monitor.md");
+        assert_eq!(
+            file_content, THREAT_MONITOR_CHARTER,
+            "prompts/charters/threat-monitor.md must match THREAT_MONITOR_CHARTER constant"
+        );
+    }
+
+    #[test]
+    fn dc_t31_self_critique_prompt_file_matches_compiled() {
+        use exoskeleton_threads::builtin::self_critique::SELF_CRITIQUE_CHARTER;
+
+        let file_content = include_str!("../../../prompts/charters/self-critique.md");
+        assert_eq!(
+            file_content, SELF_CRITIQUE_CHARTER,
+            "prompts/charters/self-critique.md must match SELF_CRITIQUE_CHARTER constant"
         );
     }
 }

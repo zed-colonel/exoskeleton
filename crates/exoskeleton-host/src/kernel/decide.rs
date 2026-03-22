@@ -402,6 +402,7 @@ mod tests {
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
             trust_decay_config: None,
             episodic_memory_capacity: None,
+            bootstrap_grace_period_ticks: 0,
         }
     }
 
@@ -676,6 +677,7 @@ mod tests {
             prompt_registry: Arc::new(PromptRegistry::with_defaults()),
             trust_decay_config: None,
             episodic_memory_capacity: None,
+            bootstrap_grace_period_ticks: 0,
         }
     }
 
@@ -833,6 +835,7 @@ mod tests {
         exoskeleton_threads::register_builtin_threads(
             &kernel.thread_registry,
             &PromptRegistry::with_defaults(),
+            None,
         )
         .unwrap();
 
@@ -887,6 +890,7 @@ mod tests {
         exoskeleton_threads::register_builtin_threads(
             &kernel.thread_registry,
             &PromptRegistry::with_defaults(),
+            None,
         )
         .unwrap();
 
@@ -939,6 +943,7 @@ mod tests {
         exoskeleton_threads::register_builtin_threads(
             &kernel.thread_registry,
             &PromptRegistry::with_defaults(),
+            None,
         )
         .unwrap();
 
@@ -994,6 +999,7 @@ mod tests {
         exoskeleton_threads::register_builtin_threads(
             &kernel.thread_registry,
             &PromptRegistry::with_defaults(),
+            None,
         )
         .unwrap();
 

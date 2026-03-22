@@ -75,6 +75,10 @@ impl PromptRegistry {
             "bootstrap-identity-extraction",
             include_str!("../../../prompts/bootstrap/identity-extraction.md"),
         );
+        registry.insert(
+            "bootstrap-preamble",
+            include_str!("../../../prompts/bootstrap-preamble.md"),
+        );
         registry
     }
 
@@ -199,9 +203,9 @@ mod tests {
     // ── E0-T9: with_defaults has all nine prompts ──
 
     #[test]
-    fn with_defaults_has_all_ten_prompts() {
+    fn with_defaults_has_all_eleven_prompts() {
         let registry = PromptRegistry::with_defaults();
-        assert_eq!(registry.len(), 10, "should have 10 compiled-in prompts");
+        assert_eq!(registry.len(), 11, "should have 11 compiled-in prompts");
 
         let expected_keys = [
             "decide-system",
@@ -214,6 +218,7 @@ mod tests {
             "reflect-system",
             "bootstrap-first-contact",
             "bootstrap-identity-extraction",
+            "bootstrap-preamble",
         ];
         for key in &expected_keys {
             assert!(
@@ -335,5 +340,30 @@ mod tests {
 
         assert!(result.contains("User: Hello"));
         assert!(result.contains("vessel_name"));
+    }
+
+    // ── DC-T28..DC-T29: Decoherence Fix — Bootstrap Preamble Prompt ──
+
+    #[test]
+    fn dc_t28_bootstrap_preamble_prompt_loads() {
+        let registry = PromptRegistry::with_defaults();
+        assert!(
+            registry.get("bootstrap-preamble").is_some(),
+            "bootstrap-preamble key should exist in PromptRegistry"
+        );
+    }
+
+    #[test]
+    fn dc_t29_bootstrap_preamble_contains_template_vars() {
+        let registry = PromptRegistry::with_defaults();
+        let preamble = registry.get("bootstrap-preamble").unwrap();
+        assert!(
+            preamble.contains("{{tick_number}}"),
+            "Preamble should contain {{tick_number}} template variable"
+        );
+        assert!(
+            preamble.contains("{{grace_period}}"),
+            "Preamble should contain {{grace_period}} template variable"
+        );
     }
 }

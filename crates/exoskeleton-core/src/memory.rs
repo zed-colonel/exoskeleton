@@ -59,6 +59,29 @@ pub struct EpisodicSummary {
     pub created_at: DateTime<Utc>,
 }
 
+impl EpisodicSummary {
+    /// Create a new episodic summary with a content-addressed ID.
+    pub fn new(start_tick: u64, end_tick: u64, summary: String, key_events: Vec<String>) -> Self {
+        let token_count = (summary.len() / 4) as u64; // Approximate
+        let content = serde_json::to_string(&serde_json::json!({
+            "start_tick": start_tick,
+            "end_tick": end_tick,
+            "summary": &summary,
+            "key_events": &key_events,
+        }))
+        .unwrap_or_default();
+        Self {
+            id: ArtifactId::from_content(content.as_bytes()),
+            start_tick,
+            end_tick,
+            summary,
+            key_events,
+            token_count,
+            created_at: Utc::now(),
+        }
+    }
+}
+
 /// Persistent knowledge entry in long-term memory.
 ///
 /// Long-term notes capture durable insights, learned patterns, and important
@@ -202,5 +225,34 @@ mod tests {
         let json = serde_json::to_string(&note).unwrap();
         let parsed: LongTermNote = serde_json::from_str(&json).unwrap();
         assert_eq!(note, parsed);
+    }
+
+    // ── DC-T16: Decoherence Fix — EpisodicSummary Constructor ──
+
+    #[test]
+    fn dc_t16_episodic_summary_new_constructor() {
+        let summary = EpisodicSummary::new(
+            0,
+            5,
+            "Vessel initialized".into(),
+            vec!["boot".into(), "ready".into()],
+        );
+        assert_eq!(summary.start_tick, 0);
+        assert_eq!(summary.end_tick, 5);
+        assert!(summary.summary.contains("Vessel initialized"));
+        assert_eq!(summary.key_events.len(), 2);
+        // Token count is approximate (len / 4)
+        assert!(summary.token_count > 0);
+        // ID is content-addressed (deterministic for same content)
+        let summary2 = EpisodicSummary::new(
+            0,
+            5,
+            "Vessel initialized".into(),
+            vec!["boot".into(), "ready".into()],
+        );
+        assert_eq!(
+            summary.id, summary2.id,
+            "same content should produce same ID"
+        );
     }
 }

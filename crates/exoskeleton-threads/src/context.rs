@@ -20,6 +20,7 @@ pub fn compile_thread_context(
     recent_outputs: &[ThreadOutput],
     _tick_id: TickId,
     charter_template: Option<&str>,
+    bootstrap_preamble: Option<&str>,
 ) -> Result<CompiledContext, ExoError> {
     // ── 1. Render sections as text ──
 
@@ -45,6 +46,12 @@ pub fn compile_thread_context(
              }}",
             thread.name, thread.thread_id, thread.charter, thread.priority, snapshot.tick_number,
         ),
+    };
+
+    // Prepend bootstrap preamble when in grace period
+    let charter_section = match bootstrap_preamble {
+        Some(preamble) => format!("{preamble}\n\n{charter_section}"),
+        None => charter_section,
     };
 
     let plan_display = snapshot
@@ -219,7 +226,8 @@ mod tests {
         let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
 
         let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None).unwrap();
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None, None)
+                .unwrap();
 
         assert!(
             ctx.prompt.contains("Monitor for alignment threats"),
@@ -238,7 +246,8 @@ mod tests {
         let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
 
         let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None).unwrap();
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None, None)
+                .unwrap();
 
         assert!(
             ctx.prompt.contains("test mission"),
@@ -261,9 +270,16 @@ mod tests {
             make_output(thread.thread_id, "All clear"),
         ];
 
-        let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new(), None)
-                .unwrap();
+        let ctx = compile_thread_context(
+            &counter,
+            &thread,
+            &snapshot,
+            &outputs,
+            TickId::new(),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(
             ctx.prompt.contains("Detected drift pattern"),
@@ -290,9 +306,16 @@ mod tests {
             make_output(thread.thread_id, "Output two"),
         ];
 
-        let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new(), None)
-                .unwrap();
+        let ctx = compile_thread_context(
+            &counter,
+            &thread,
+            &snapshot,
+            &outputs,
+            TickId::new(),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(
             ctx.total_tokens <= thread.token_budget,
@@ -341,9 +364,16 @@ mod tests {
             make_output(thread.thread_id, &big_summary),
         ];
 
-        let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &outputs, TickId::new(), None)
-                .unwrap();
+        let ctx = compile_thread_context(
+            &counter,
+            &thread,
+            &snapshot,
+            &outputs,
+            TickId::new(),
+            None,
+            None,
+        )
+        .unwrap();
 
         // Charter must be preserved.
         assert!(
@@ -370,7 +400,8 @@ mod tests {
         let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
 
         let ctx =
-            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None).unwrap();
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None, None)
+                .unwrap();
 
         assert!(!ctx.prompt.is_empty(), "Prompt should not be empty");
         assert!(
@@ -382,6 +413,59 @@ mod tests {
             "total_tokens={} exceeds budget={}",
             ctx.total_tokens,
             thread.token_budget
+        );
+    }
+
+    // ── DC-T14, DC-T15: Decoherence Fix — Preamble Injection ──
+
+    #[test]
+    fn dc_t14_compile_thread_context_with_preamble() {
+        let counter = ApproximateTokenCounter;
+        let thread = test_thread("PreambleTest", 5000);
+        let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
+        let preamble = "BOOTSTRAP PHASE ACTIVE (tick 1 of 30 grace period)";
+
+        let ctx = compile_thread_context(
+            &counter,
+            &thread,
+            &snapshot,
+            &[],
+            TickId::new(),
+            None,
+            Some(preamble),
+        )
+        .unwrap();
+
+        assert!(
+            ctx.prompt.contains("BOOTSTRAP PHASE ACTIVE"),
+            "Preamble should be prepended to the charter"
+        );
+        assert!(
+            ctx.prompt.contains("Monitor for alignment threats"),
+            "Original charter should still be present"
+        );
+        // Preamble should come before the charter
+        let preamble_pos = ctx.prompt.find("BOOTSTRAP PHASE").unwrap();
+        let charter_pos = ctx.prompt.find("Monitor for alignment").unwrap();
+        assert!(
+            preamble_pos < charter_pos,
+            "Preamble should appear before charter text"
+        );
+    }
+
+    #[test]
+    fn dc_t15_compile_thread_context_without_preamble() {
+        let counter = ApproximateTokenCounter;
+        let thread = test_thread("NoPreamble", 5000);
+        let snapshot = StateSnapshot::initial(VesselId::new(), "test mission".into());
+
+        let ctx =
+            compile_thread_context(&counter, &thread, &snapshot, &[], TickId::new(), None, None)
+                .unwrap();
+
+        assert!(
+            !ctx.prompt.contains("BOOTSTRAP PHASE"),
+            "No preamble should be present with None"
         );
     }
 }

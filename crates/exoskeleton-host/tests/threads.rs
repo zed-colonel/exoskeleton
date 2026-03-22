@@ -175,6 +175,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         prompt_registry: kernel.prompt_registry.clone(),
         trust_decay_config: kernel.trust_decay_config.clone(),
         episodic_memory_capacity: kernel.episodic_memory_capacity,
+        bootstrap_grace_period_ticks: kernel.bootstrap_grace_period_ticks,
     }
 }
 
@@ -257,6 +258,7 @@ async fn setup_with_threads(
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         trust_decay_config: None,
         episodic_memory_capacity: None,
+        bootstrap_grace_period_ticks: 0,
     };
 
     (kernel, handler, mock)
@@ -323,6 +325,7 @@ async fn setup_with_threads_custom_backend(
         prompt_registry: Arc::new(PromptRegistry::with_defaults()),
         trust_decay_config: None,
         episodic_memory_capacity: None,
+        bootstrap_grace_period_ticks: 0,
     };
 
     (kernel, handler)
@@ -1281,6 +1284,7 @@ mod proptest_tests {
                 &snapshot,
                 &[],
                 TickId::new(),
+                None,
                 None,
             ) {
                 Ok(ctx) => {

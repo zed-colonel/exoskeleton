@@ -47,6 +47,8 @@ pub fn test_config(dir: &Path) -> VesselConfig {
         cors_allowed_origins: vec![],
         trust_decay: None,
         episodic_memory_capacity: Some(200),
+        bootstrap_grace_period_ticks: 0,
+        threads: None,
     }
 }
 

@@ -205,6 +205,17 @@ pub struct VesselConfig {
     /// Episodic memory capacity. When episodic count exceeds this, oldest entries
     /// are evicted. `None` disables eviction. Default: Some(200).
     pub episodic_memory_capacity: Option<u64>,
+
+    // ── Bootstrap settings (Decoherence Fix) ──
+    /// Number of ticks during which built-in threads receive bootstrap-phase
+    /// context (reduced sensitivity for Threat Monitor and Self-Critique).
+    /// 0 disables the grace period. Default: 30.
+    pub bootstrap_grace_period_ticks: u64,
+
+    // ── Thread settings (Decoherence Fix) ──
+    /// Operator overrides for built-in thread schedule and budget.
+    /// `None` uses compiled-in defaults.
+    pub threads: Option<ThreadsSection>,
 }
 
 impl Default for VesselConfig {
@@ -228,6 +239,8 @@ impl Default for VesselConfig {
             cors_allowed_origins: Vec::new(),
             trust_decay: None,
             episodic_memory_capacity: Some(200),
+            bootstrap_grace_period_ticks: 30,
+            threads: None,
         }
     }
 }
@@ -330,6 +343,7 @@ impl VesselConfig {
                     .map(|c| c.min_inactivity_days)
                     .unwrap_or(7),
                 episodic_memory_capacity: self.episodic_memory_capacity.unwrap_or(200),
+                bootstrap_grace_period_ticks: self.bootstrap_grace_period_ticks,
             },
             cognitive: CognitiveSection {
                 tick_interval_ms: self.cognitive_tick_interval.as_millis() as u64,
@@ -344,6 +358,7 @@ impl VesselConfig {
             },
             llm: self.llm_config.clone(),
             daemon: None,
+            threads: None,
         };
 
         let toml_str = toml::to_string_pretty(&config_file)
@@ -437,7 +452,36 @@ impl VesselConfig {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
+        if let Ok(val) = std::env::var("EXO_BOOTSTRAP_GRACE_PERIOD") {
+            if let Ok(ticks) = val.parse::<u64>() {
+                self.bootstrap_grace_period_ticks = ticks;
+            }
+        }
         Ok(())
+    }
+
+    /// Build `ThreadConfigOverrides` from the `[threads]` TOML section.
+    ///
+    /// Returns `None` if no threads section is configured.
+    pub fn build_thread_overrides(&self) -> Option<exoskeleton_threads::ThreadConfigOverrides> {
+        let ts = self.threads.as_ref()?;
+        Some(exoskeleton_threads::ThreadConfigOverrides {
+            threat_monitor_schedule: ts
+                .threat_monitor_schedule
+                .as_deref()
+                .and_then(parse_thread_schedule),
+            threat_monitor_token_budget: ts.threat_monitor_token_budget,
+            self_critique_schedule: ts
+                .self_critique_schedule
+                .as_deref()
+                .and_then(parse_thread_schedule),
+            self_critique_token_budget: ts.self_critique_token_budget,
+            memory_consolidation_schedule: ts
+                .memory_consolidation_schedule
+                .as_deref()
+                .and_then(parse_thread_schedule),
+            memory_consolidation_token_budget: ts.memory_consolidation_token_budget,
+        })
     }
 }
 
@@ -460,6 +504,9 @@ fn default_7() -> u64 {
 }
 fn default_200() -> u64 {
     200
+}
+fn default_30() -> u64 {
+    30
 }
 fn default_600() -> u64 {
     600
@@ -486,6 +533,9 @@ pub struct VesselConfigFile {
     /// `[daemon]` section. Uses defaults if omitted.
     #[serde(default)]
     pub daemon: Option<DaemonSection>,
+    /// `[threads]` section. Uses defaults if omitted.
+    #[serde(default)]
+    pub threads: Option<ThreadsSection>,
 }
 
 /// The `[daemon]` section of the TOML config file.
@@ -522,6 +572,11 @@ pub struct VesselSection {
     /// Episodic memory capacity (max summaries). Default: 200. Set to 0 to disable.
     #[serde(default = "default_200")]
     pub episodic_memory_capacity: u64,
+    /// Bootstrap grace period in ticks. During this window, Threat Monitor
+    /// and Self-Critique threads receive additional context indicating that
+    /// early self-referential patterns are expected. Default: 30.
+    #[serde(default = "default_30")]
+    pub bootstrap_grace_period_ticks: u64,
 }
 
 /// The `[cognitive]` section of the TOML config file.
@@ -573,6 +628,47 @@ impl Default for ToolSection {
             dispatch_concurrency: 4,
             budget: None,
         }
+    }
+}
+
+/// The `[threads]` section of the TOML config file.
+///
+/// All fields are optional — omitted values use the compiled-in defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreadsSection {
+    /// Threat Monitor schedule override. Options: "every_tick", "every_N" (e.g., "every_5"),
+    /// "on_demand". Default: "every_tick".
+    #[serde(default)]
+    pub threat_monitor_schedule: Option<String>,
+    /// Self-Critique schedule override. Default: "every_tick".
+    #[serde(default)]
+    pub self_critique_schedule: Option<String>,
+    /// Memory Consolidation schedule override. Default: "every_5".
+    #[serde(default)]
+    pub memory_consolidation_schedule: Option<String>,
+    /// Threat Monitor token budget override. Default: 4096.
+    #[serde(default)]
+    pub threat_monitor_token_budget: Option<u64>,
+    /// Self-Critique token budget override. Default: 4096.
+    #[serde(default)]
+    pub self_critique_token_budget: Option<u64>,
+    /// Memory Consolidation token budget override. Default: 6144.
+    #[serde(default)]
+    pub memory_consolidation_token_budget: Option<u64>,
+}
+
+/// Parse a thread schedule string into a `ThreadSchedule`.
+///
+/// Accepts: "every_tick", "on_demand", "every_N" (e.g., "every_5").
+pub fn parse_thread_schedule(s: &str) -> Option<exoskeleton_core::ThreadSchedule> {
+    match s.trim().to_lowercase().as_str() {
+        "every_tick" => Some(exoskeleton_core::ThreadSchedule::EveryTick),
+        "on_demand" => Some(exoskeleton_core::ThreadSchedule::OnDemand),
+        s if s.starts_with("every_") => s
+            .strip_prefix("every_")
+            .and_then(|n| n.parse::<u32>().ok())
+            .map(exoskeleton_core::ThreadSchedule::EveryNTicks),
+        _ => None,
     }
 }
 
@@ -634,6 +730,8 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             } else {
                 Some(file.vessel.episodic_memory_capacity)
             },
+            bootstrap_grace_period_ticks: file.vessel.bootstrap_grace_period_ticks,
+            threads: file.threads,
         })
     }
 }
@@ -1361,5 +1459,123 @@ listen = "not-a-socket-addr"
         assert_eq!(config.tool_tick_interval, Duration::from_millis(25));
         assert_eq!(config.tool_dispatch_concurrency.get(), 2);
         assert_eq!(config.master_loop_interval_secs, 30);
+    }
+
+    // ── DC-T1..DC-T10: Decoherence Fix — Config Tests ──
+
+    #[test]
+    fn dc_t1_bootstrap_grace_period_default() {
+        let config = VesselConfig::default();
+        assert_eq!(config.bootstrap_grace_period_ticks, 30);
+    }
+
+    #[test]
+    fn dc_t2_bootstrap_grace_period_from_toml() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+bootstrap_grace_period_ticks = 50
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.bootstrap_grace_period_ticks, 50);
+    }
+
+    #[test]
+    fn dc_t3_bootstrap_grace_period_env_override() {
+        // Use a single test to avoid env var race conditions
+        std::env::set_var("EXO_BOOTSTRAP_GRACE_PERIOD", "10");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            bootstrap_grace_period_ticks: 30,
+            ..Default::default()
+        };
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.bootstrap_grace_period_ticks, 10);
+        std::env::remove_var("EXO_BOOTSTRAP_GRACE_PERIOD");
+    }
+
+    #[test]
+    fn dc_t4_bootstrap_grace_period_zero_disables() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+bootstrap_grace_period_ticks = 0
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.bootstrap_grace_period_ticks, 0);
+    }
+
+    #[test]
+    fn dc_t5_parse_thread_schedule_every_tick() {
+        assert_eq!(
+            parse_thread_schedule("every_tick"),
+            Some(exoskeleton_core::ThreadSchedule::EveryTick)
+        );
+    }
+
+    #[test]
+    fn dc_t6_parse_thread_schedule_every_n() {
+        assert_eq!(
+            parse_thread_schedule("every_5"),
+            Some(exoskeleton_core::ThreadSchedule::EveryNTicks(5))
+        );
+    }
+
+    #[test]
+    fn dc_t7_parse_thread_schedule_on_demand() {
+        assert_eq!(
+            parse_thread_schedule("on_demand"),
+            Some(exoskeleton_core::ThreadSchedule::OnDemand)
+        );
+    }
+
+    #[test]
+    fn dc_t8_parse_thread_schedule_invalid() {
+        assert_eq!(parse_thread_schedule("garbage"), None);
+    }
+
+    #[test]
+    fn dc_t9_threads_section_from_toml() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[threads]
+threat_monitor_schedule = "every_3"
+self_critique_schedule = "every_tick"
+memory_consolidation_schedule = "every_10"
+threat_monitor_token_budget = 2048
+self_critique_token_budget = 3000
+memory_consolidation_token_budget = 8000
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        let ts = config.threads.unwrap();
+        assert_eq!(ts.threat_monitor_schedule.as_deref(), Some("every_3"));
+        assert_eq!(ts.self_critique_schedule.as_deref(), Some("every_tick"));
+        assert_eq!(
+            ts.memory_consolidation_schedule.as_deref(),
+            Some("every_10")
+        );
+        assert_eq!(ts.threat_monitor_token_budget, Some(2048));
+        assert_eq!(ts.self_critique_token_budget, Some(3000));
+        assert_eq!(ts.memory_consolidation_token_budget, Some(8000));
+    }
+
+    #[test]
+    fn dc_t10_threads_section_defaults_when_omitted() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert!(config.threads.is_none());
     }
 }
