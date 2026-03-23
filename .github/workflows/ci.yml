@@ -8,19 +8,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: endersonmenezes/free-disk-space@v3
-        with:
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
       - uses: actions/checkout@v4
         with:
           path: exoskeleton
@@ -77,6 +71,19 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
+      - name: Free up disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Show available space (for debugging)
+        run: df -h /
+
       - uses: actions/checkout@v4
         with:
           path: exoskeleton
@@ -90,20 +97,20 @@ jobs:
           repository: zed-colonel/actionqueue
           path: actionqueue
           ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89.0"
-      - uses: actions/cache@v4
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            exoskeleton/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --no-default-features --no-fail-fast -- --test-threads=1
+          workspaces: "exoskeleton"
+
+      - name: Run tests
+        run: cargo test --workspace --no-default-features --no-fail-fast -- --test-threads=1
         working-directory: exoskeleton
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
 
   doc:
     name: Documentation
