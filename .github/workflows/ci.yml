@@ -38,6 +38,17 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
+      - name: Free up disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - name: Show available space (for debugging)
+        run: df -h /
       - uses: actions/checkout@v4
         with:
           path: exoskeleton
@@ -55,15 +66,9 @@ jobs:
         with:
           toolchain: "1.89.0"
           components: clippy
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            exoskeleton/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
+          workspaces: "exoskeleton"
       - run: cargo clippy --all --all-targets --no-default-features -- -D warnings
         working-directory: exoskeleton
 
@@ -116,6 +121,17 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
+      - name: Free up disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - name: Show available space (for debugging)
+        run: df -h /
       - uses: actions/checkout@v4
         with:
           path: exoskeleton
@@ -132,15 +148,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89.0"
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            exoskeleton/target
-          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('exoskeleton/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-doc-
+          workspaces: "exoskeleton"
       - run: cargo doc --workspace --no-deps --no-default-features
         working-directory: exoskeleton
         env:
