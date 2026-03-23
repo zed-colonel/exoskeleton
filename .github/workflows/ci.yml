@@ -14,6 +14,13 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
+      - uses: endersonmenezes/free-disk-space@v3
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
       - uses: actions/checkout@v4
         with:
           path: exoskeleton
