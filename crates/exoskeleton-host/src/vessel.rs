@@ -776,13 +776,9 @@ mod tests {
 
         // Simulate the conditional registration from start_with_registry_and_backends
         let observatory_url = "http://observatory:3000".to_string();
-        registry.register(Arc::new(PeerResolveConnector::new(
-            observatory_url,
-            None,
-        )));
+        registry.register(Arc::new(PeerResolveConnector::new(observatory_url, None)));
 
         assert_eq!(registry.len(), 7);
         assert!(registry.get("peer.resolve").is_some());
     }
 }
-

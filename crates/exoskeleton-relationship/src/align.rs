@@ -475,9 +475,7 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let roundtripped: AlignConfig = serde_json::from_str(&json).unwrap();
-        assert!(
-            (roundtripped.min_trust_for_vessel_messaging - 0.7).abs() < f64::EPSILON,
-        );
+        assert!((roundtripped.min_trust_for_vessel_messaging - 0.7).abs() < f64::EPSILON,);
         assert_eq!(roundtripped.vessel_messaging_tools, vec!["peer.send"]);
         assert_eq!(roundtripped.destructive_tools, config.destructive_tools);
     }
