@@ -1,0 +1,7 @@
+# Limit resource consumption to prevent OOM when multiple workspaces
+# build/test concurrently (exoskeleton + worldinterface + observatory).
+[build]
+jobs = 8
+
+[env]
+RUST_TEST_THREADS = "4"
