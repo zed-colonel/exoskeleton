@@ -224,6 +224,17 @@ pub struct VesselConfig {
     // ── Sandbox settings (E2-S2) ──
     /// Sandbox configuration. Default: enabled, 256MB tmpfs.
     pub sandbox: SandboxConfig,
+
+    // ── Observatory connection (E4-S1) ──
+    /// Observatory base URL for fleet discovery (peer.resolve).
+    /// `None` disables vessel-to-vessel communication.
+    /// Example: "http://observatory:3000"
+    pub observatory_url: Option<String>,
+
+    /// Environment variable name holding the Observatory API token.
+    /// The variable is read at vessel startup, not stored in config.
+    /// Example: "EXO_OBSERVATORY_TOKEN"
+    pub observatory_token_env: Option<String>,
 }
 
 impl Default for VesselConfig {
@@ -251,6 +262,8 @@ impl Default for VesselConfig {
             threads: None,
             source_repos: Vec::new(),
             sandbox: SandboxConfig::default(),
+            observatory_url: None,
+            observatory_token_env: None,
         }
     }
 }
@@ -359,6 +372,8 @@ impl VesselConfig {
                     .unwrap_or(7),
                 episodic_memory_capacity: self.episodic_memory_capacity.unwrap_or(200),
                 bootstrap_grace_period_ticks: self.bootstrap_grace_period_ticks,
+                observatory_url: self.observatory_url.clone(),
+                observatory_token_env: self.observatory_token_env.clone(),
             },
             cognitive: CognitiveSection {
                 tick_interval_ms: self.cognitive_tick_interval.as_millis() as u64,
@@ -612,6 +627,12 @@ pub struct VesselSection {
     /// early self-referential patterns are expected. Default: 30.
     #[serde(default = "default_30")]
     pub bootstrap_grace_period_ticks: u64,
+    /// Observatory base URL for fleet discovery. Omit to disable peer communication.
+    #[serde(default)]
+    pub observatory_url: Option<String>,
+    /// Environment variable name holding the Observatory API bearer token.
+    #[serde(default)]
+    pub observatory_token_env: Option<String>,
 }
 
 /// The `[cognitive]` section of the TOML config file.
@@ -854,6 +875,10 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             threads: file.threads,
             source_repos: file.source.map(|s| s.repos).unwrap_or_default(),
             sandbox: file.sandbox.unwrap_or_default(),
+            observatory_url: std::env::var("EXO_OBSERVATORY_URL")
+                .ok()
+                .or(file.vessel.observatory_url),
+            observatory_token_env: file.vessel.observatory_token_env,
         })
     }
 }
@@ -1863,5 +1888,81 @@ data_dir = "/tmp/exo"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("absolute"));
+    }
+
+    // ── E4S1-T10: VesselConfig observatory_url default is None ──
+
+    #[test]
+    fn vessel_config_observatory_url_default_none() {
+        let config = VesselConfig::default();
+        assert!(config.observatory_url.is_none());
+        assert!(config.observatory_token_env.is_none());
+    }
+
+    // Mutex to serialize tests that read/write EXO_OBSERVATORY_URL env var.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ── E4S1-T11: VesselConfig parses observatory_url from TOML ──
+
+    #[test]
+    fn vessel_config_observatory_url_from_toml() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("EXO_OBSERVATORY_URL");
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+observatory_url = "http://observatory:3000"
+observatory_token_env = "EXO_OBSERVATORY_TOKEN"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(
+            config.observatory_url.as_deref(),
+            Some("http://observatory:3000")
+        );
+        assert_eq!(
+            config.observatory_token_env.as_deref(),
+            Some("EXO_OBSERVATORY_TOKEN")
+        );
+    }
+
+    // ── E4S1-T12: EXO_OBSERVATORY_URL env var overrides TOML value ──
+
+    #[test]
+    fn vessel_config_observatory_url_env_override() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("EXO_OBSERVATORY_URL", "http://env-override:9000");
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+observatory_url = "http://toml-value:3000"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(
+            config.observatory_url.as_deref(),
+            Some("http://env-override:9000")
+        );
+        std::env::remove_var("EXO_OBSERVATORY_URL");
+    }
+
+    // ── E4S1-T13: VesselConfig parses observatory_token_env from TOML ──
+
+    #[test]
+    fn vessel_config_observatory_token_env_from_toml() {
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+observatory_token_env = "MY_CUSTOM_TOKEN"
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(
+            config.observatory_token_env.as_deref(),
+            Some("MY_CUSTOM_TOKEN")
+        );
     }
 }

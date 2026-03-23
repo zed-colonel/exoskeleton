@@ -56,6 +56,8 @@ fn demo_config(dir: &Path) -> VesselConfig {
         threads: None,
         source_repos: Vec::new(),
         sandbox: exoskeleton_host::config::SandboxConfig::default(),
+        observatory_url: None,
+        observatory_token_env: None,
     }
 }
 
