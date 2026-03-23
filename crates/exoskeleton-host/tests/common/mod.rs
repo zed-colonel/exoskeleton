@@ -3,16 +3,13 @@
 #![allow(dead_code)]
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
 use exoskeleton_core::{ArtifactId, BudgetStatus, StateSnapshot, TickId, VesselId, VesselStatus};
 use exoskeleton_host::config::{LlmConfig, VesselConfig};
-use worldinterface_connector::connectors::{
-    DelayConnector, FsReadConnector, FsWriteConnector, HttpRequestConnector,
-};
+use worldinterface_connector::connectors::default_registry;
 use worldinterface_connector::registry::ConnectorRegistry;
 
 /// Build a VesselConfig suitable for testing.
@@ -51,14 +48,13 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
     }
 }
 
-/// Build a ConnectorRegistry with all built-in connectors including HTTP.
+/// Build a ConnectorRegistry with all built-in connectors.
+///
+/// Uses WorldInterface's `default_registry()` to stay in sync with upstream
+/// connector additions (delay, http.request, fs.read, fs.write, shell.exec,
+/// sandbox.exec).
 pub fn test_registry() -> ConnectorRegistry {
-    let mut registry = ConnectorRegistry::new();
-    registry.register(Arc::new(DelayConnector));
-    registry.register(Arc::new(FsReadConnector));
-    registry.register(Arc::new(FsWriteConnector));
-    registry.register(Arc::new(HttpRequestConnector::new()));
-    registry
+    default_registry()
 }
 
 pub fn make_snapshot(vessel_id: VesselId, tick_number: u64) -> StateSnapshot {

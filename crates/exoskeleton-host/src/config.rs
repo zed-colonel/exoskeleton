@@ -425,6 +425,7 @@ impl VesselConfig {
     /// - `EXO_TOOL_DISPATCH_CONCURRENCY` -> `tool_dispatch_concurrency`
     /// - `EXO_DAEMON_LISTEN` -> `daemon_listen` (host:port)
     /// - `EXO_CORS_ORIGINS` -> `cors_allowed_origins` (comma-separated origins)
+    /// - `EXO_OBSERVATORY_URL` -> `observatory_url`
     pub fn from_file(path: &Path) -> Result<Self, ExoError> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|e| ExoError::Config(format!("failed to read config file: {e}")))?;
@@ -500,6 +501,9 @@ impl VesselConfig {
                 "false" | "0" | "no" => self.sandbox.enabled = false,
                 _ => {}
             }
+        }
+        if let Ok(val) = std::env::var("EXO_OBSERVATORY_URL") {
+            self.observatory_url = Some(val);
         }
         Ok(())
     }
@@ -875,9 +879,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             threads: file.threads,
             source_repos: file.source.map(|s| s.repos).unwrap_or_default(),
             sandbox: file.sandbox.unwrap_or_default(),
-            observatory_url: std::env::var("EXO_OBSERVATORY_URL")
-                .ok()
-                .or(file.vessel.observatory_url),
+            observatory_url: file.vessel.observatory_url,
             observatory_token_env: file.vessel.observatory_token_env,
         })
     }
@@ -1940,7 +1942,8 @@ data_dir = "/tmp/exo"
 observatory_url = "http://toml-value:3000"
 "#;
         let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
-        let config = VesselConfig::try_from(file).unwrap();
+        let mut config = VesselConfig::try_from(file).unwrap();
+        config.apply_env_overrides().unwrap();
         assert_eq!(
             config.observatory_url.as_deref(),
             Some("http://env-override:9000")

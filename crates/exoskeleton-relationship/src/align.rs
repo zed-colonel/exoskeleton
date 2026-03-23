@@ -26,10 +26,14 @@ pub struct AlignConfig {
     pub block_on_broken_commitments: bool,
     /// Trust threshold for outbound vessel-to-vessel messaging.
     /// Actions matching `vessel_messaging_tools` require this trust level.
-    /// Default: 0.6.
+    /// Default: 0.6. Not yet enforced in `check_alignment()` — vessel messaging
+    /// currently uses `http.request` which is gated via `destructive_tools` at the
+    /// same threshold. Will be wired into check_alignment() when a dedicated
+    /// `peer.send` connector is added.
     pub min_trust_for_vessel_messaging: f64,
     /// Tool names classified as vessel messaging (use vessel messaging trust threshold).
     /// Default: empty (vessel messaging currently uses http.request which is in destructive_tools).
+    /// Not yet enforced — see `min_trust_for_vessel_messaging` doc.
     pub vessel_messaging_tools: Vec<String>,
 }
 

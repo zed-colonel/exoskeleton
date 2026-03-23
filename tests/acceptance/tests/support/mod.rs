@@ -14,9 +14,7 @@ use exoskeleton_host::config::{LlmConfig, VesselConfig};
 use exoskeleton_host::storage::StorageManager;
 use exoskeleton_host::vessel::Vessel;
 use exoskeleton_host::{default_mock_response, LlmHttpBackend, MockLlmBackend};
-use worldinterface_connector::connectors::{
-    DelayConnector, FsReadConnector, FsWriteConnector, HttpRequestConnector,
-};
+use worldinterface_connector::connectors::default_registry;
 use worldinterface_connector::registry::ConnectorRegistry;
 
 /// Build a VesselConfig suitable for acceptance testing.
@@ -56,14 +54,13 @@ pub fn test_config(dir: &Path) -> VesselConfig {
     }
 }
 
-/// Build a ConnectorRegistry with all built-in connectors including HTTP.
+/// Build a ConnectorRegistry with all built-in connectors.
+///
+/// Uses WorldInterface's `default_registry()` to stay in sync with upstream
+/// connector additions (delay, http.request, fs.read, fs.write, shell.exec,
+/// sandbox.exec).
 pub fn test_registry() -> ConnectorRegistry {
-    let mut registry = ConnectorRegistry::new();
-    registry.register(Arc::new(DelayConnector));
-    registry.register(Arc::new(FsReadConnector));
-    registry.register(Arc::new(FsWriteConnector));
-    registry.register(Arc::new(HttpRequestConnector::new()));
-    registry
+    default_registry()
 }
 
 /// Create the default mock LLM backend (deterministic responses).
