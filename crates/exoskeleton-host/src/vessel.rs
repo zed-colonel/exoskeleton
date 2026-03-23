@@ -24,9 +24,8 @@ use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
 use exoskeleton_threads::ThreadRegistry;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use worldinterface_connector::connectors::{
-    DelayConnector, FsReadConnector, FsWriteConnector, HttpRequestConnector,
-};
+use worldinterface_connector::connectors::default_registry;
+use worldinterface_connector::connectors::PeerResolveConnector;
 use worldinterface_connector::registry::ConnectorRegistry;
 use worldinterface_core::descriptor::Descriptor;
 use worldinterface_host::config::HostConfig;
@@ -85,8 +84,9 @@ pub struct Vessel {
 impl Vessel {
     /// Start the Vessel with the default connector registry.
     ///
-    /// Includes all built-in connectors: `delay`, `fs.read`, `fs.write`,
-    /// and `http.request`.
+    /// Includes all built-in connectors from WorldInterface's default registry
+    /// (delay, http.request, fs.read, fs.write, shell.exec, sandbox.exec).
+    /// If `observatory_url` is configured, also registers `peer.resolve`.
     ///
     /// # Errors
     /// - `ExoError::Config` — invalid configuration
@@ -110,7 +110,7 @@ impl Vessel {
     /// without requiring a real LLM endpoint.
     pub async fn start_with_registry_and_backends(
         config: VesselConfig,
-        registry: ConnectorRegistry,
+        mut registry: ConnectorRegistry,
         local_backend: Option<Arc<dyn crate::llm::http::LlmHttpBackend>>,
         frontier_backend: Option<Arc<dyn crate::llm::http::LlmHttpBackend>>,
     ) -> Result<Self, ExoError> {
@@ -252,6 +252,18 @@ impl Vessel {
             config.cognitive_tick_interval,
             shutdown_rx,
         );
+
+        // 10b. Conditionally register peer.resolve connector
+        if let Some(ref observatory_url) = config.observatory_url {
+            let token = config
+                .observatory_token_env
+                .as_ref()
+                .and_then(|env_name| std::env::var(env_name).ok());
+            registry.register(Arc::new(PeerResolveConnector::new(
+                observatory_url.clone(),
+                token,
+            )));
+        }
 
         // 11. Bootstrap WI Host (which bootstraps Tool AQ internally)
         let host_config = Self::build_host_config(&config);
@@ -737,12 +749,36 @@ async fn schedule_master_loop(
     Ok(task_id)
 }
 
-/// Build the default connector registry with all built-in connectors.
-fn default_registry() -> ConnectorRegistry {
-    let mut registry = ConnectorRegistry::new();
-    registry.register(Arc::new(DelayConnector));
-    registry.register(Arc::new(FsReadConnector));
-    registry.register(Arc::new(FsWriteConnector));
-    registry.register(Arc::new(HttpRequestConnector::new()));
-    registry
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── E4S1-T17: WI default_registry has 6 connectors ──
+
+    #[test]
+    fn default_registry_has_six_connectors() {
+        let registry = default_registry();
+        assert_eq!(registry.len(), 6, "expected 6 built-in connectors");
+        assert!(registry.get("delay").is_some());
+        assert!(registry.get("http.request").is_some());
+        assert!(registry.get("fs.read").is_some());
+        assert!(registry.get("fs.write").is_some());
+        assert!(registry.get("shell.exec").is_some());
+        assert!(registry.get("sandbox.exec").is_some());
+    }
+
+    // ── E4S1-T18: peer.resolve registered when observatory_url is set ──
+
+    #[test]
+    fn peer_resolve_registered_when_observatory_url_set() {
+        let mut registry = default_registry();
+        assert_eq!(registry.len(), 6);
+
+        // Simulate the conditional registration from start_with_registry_and_backends
+        let observatory_url = "http://observatory:3000".to_string();
+        registry.register(Arc::new(PeerResolveConnector::new(observatory_url, None)));
+
+        assert_eq!(registry.len(), 7);
+        assert!(registry.get("peer.resolve").is_some());
+    }
 }

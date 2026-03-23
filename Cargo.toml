@@ -41,9 +41,6 @@ actionqueue-executor-local = "0.1.1"
 worldinterface-core = "0.1.0"
 worldinterface-connector = "0.1.0"
 worldinterface-host = "0.1.0"
-worldinterface-contextstore = "0.1.0"
-worldinterface-coordinator = "0.1.0"
-worldinterface-flowspec = "0.1.0"
 
 # Shared dependencies
 serde = { version = ">=1.0, <1.0.224", features = ["derive"] }
@@ -76,9 +73,6 @@ tokio-test = "0.4"
 worldinterface-core = { path = "../worldinterface/crates/worldinterface-core" }
 worldinterface-connector = { path = "../worldinterface/crates/worldinterface-connector" }
 worldinterface-host = { path = "../worldinterface/crates/worldinterface-host" }
-worldinterface-contextstore = { path = "../worldinterface/crates/worldinterface-contextstore" }
-worldinterface-coordinator = { path = "../worldinterface/crates/worldinterface-coordinator" }
-worldinterface-flowspec = { path = "../worldinterface/crates/worldinterface-flowspec" }
 
 # ActionQueue — local development (future epochs)
 actionqueue-core = { path = "../actionqueue/crates/actionqueue-core" }
