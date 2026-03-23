@@ -6,12 +6,11 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-
 use exoskeleton_core::{
     ArtifactId, LedgerEntryId, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
     TickId,
 };
+use serde::{Deserialize, Serialize};
 
 /// Configuration for the Align step's relationship checks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
