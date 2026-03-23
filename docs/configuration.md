@@ -169,6 +169,32 @@ listen = "127.0.0.1:7600"
 
 # Memory Consolidation token budget. Default: 6144.
 # memory_consolidation_token_budget = 6144
+
+
+[source]
+# Source code repositories to mount read-only in the vessel container.
+# Each [[source.repos]] entry creates a bind mount at /workspace/{name}.
+
+[[source.repos]]
+name = "exoskeleton"
+host_path = "/home/user/src/exoskeleton"
+# Optional: override the container mount point. Default: /workspace/{name}.
+# mount_point = "/workspace/exoskeleton"
+
+# [[source.repos]]
+# name = "worldinterface"
+# host_path = "/home/user/src/worldinterface"
+
+
+[sandbox]
+# Sandbox execution environment configuration.
+# When enabled, sandbox.exec runs commands in an ephemeral /sandbox directory.
+
+# Whether sandbox.exec is available. Default: true.
+enabled = true
+
+# Size of the /sandbox tmpfs mount in bytes. Default: 268435456 (256MB).
+tmpfs_size_bytes = 268435456
 ```
 
 ---
@@ -289,6 +315,36 @@ Optional. Omit the entire section to use compiled-in defaults for all built-in t
 | `memory_consolidation_token_budget` | u64 | No | `6144` | Token budget for Memory Consolidation |
 
 **Schedule values:** `"every_tick"` (runs every tick), `"every_N"` where N is a number (e.g., `"every_3"` runs every 3 ticks), `"on_demand"` (manual trigger only).
+
+### `[source]`
+
+Optional. Omit to disable source code access. Contains an array of `[[source.repos]]` entries.
+
+#### `[[source.repos]]`
+
+Each entry mounts a host directory read-only into the vessel container.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | String | **Yes** | -- | Display name; used as mount suffix (`/workspace/{name}`) |
+| `host_path` | String (absolute path) | **Yes** | -- | Absolute path to the repository on the Docker host |
+| `mount_point` | String | No | `/workspace/{name}` | Override the container mount point. Must start with `/workspace/`. |
+
+**Validation:**
+- `name` must be non-empty
+- `host_path` must be an absolute path
+- `mount_point` (if provided) must start with `/workspace/`
+
+### `[sandbox]`
+
+Optional. Omit to use defaults (enabled, 256MB tmpfs).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | bool | No | `true` | Whether `sandbox.exec` connector is available |
+| `tmpfs_size_bytes` | u64 | No | `268435456` (256MB) | Size of the `/sandbox` tmpfs mount in bytes |
+
+When enabled, Observatory creates a tmpfs mount at `/sandbox` in the vessel container. The `sandbox.exec` connector runs all commands in this ephemeral directory with restricted timeout (10s/60s), output limits (256KB), and no shell expansion.
 
 ---
 
