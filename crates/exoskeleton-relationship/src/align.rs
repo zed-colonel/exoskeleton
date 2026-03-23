@@ -6,13 +6,15 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+
 use exoskeleton_core::{
     ArtifactId, LedgerEntryId, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
     TickId,
 };
 
 /// Configuration for the Align step's relationship checks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlignConfig {
     /// Minimum trust level to approve any action (default: 0.3).
     pub min_trust_for_action: f64,
@@ -22,6 +24,13 @@ pub struct AlignConfig {
     pub destructive_tools: Vec<String>,
     /// Whether to block actions affecting principals with broken commitments.
     pub block_on_broken_commitments: bool,
+    /// Trust threshold for outbound vessel-to-vessel messaging.
+    /// Actions matching `vessel_messaging_tools` require this trust level.
+    /// Default: 0.6.
+    pub min_trust_for_vessel_messaging: f64,
+    /// Tool names classified as vessel messaging (use vessel messaging trust threshold).
+    /// Default: empty (vessel messaging currently uses http.request which is in destructive_tools).
+    pub vessel_messaging_tools: Vec<String>,
 }
 
 impl Default for AlignConfig {
@@ -36,6 +45,8 @@ impl Default for AlignConfig {
                 "sandbox.exec".into(),
             ],
             block_on_broken_commitments: false,
+            min_trust_for_vessel_messaging: 0.6,
+            vessel_messaging_tools: vec![],
         }
     }
 }
@@ -429,5 +440,45 @@ mod tests {
         let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
         assert_eq!(approved, vec![0]);
         assert!(blocked.is_empty());
+    }
+
+    // ── E4S1-T7: AlignConfig vessel messaging default ──
+
+    #[test]
+    fn align_vessel_messaging_config_default() {
+        let config = AlignConfig::default();
+        assert!(
+            (config.min_trust_for_vessel_messaging - 0.6).abs() < f64::EPSILON,
+            "min_trust_for_vessel_messaging should default to 0.6"
+        );
+    }
+
+    // ── E4S1-T8: AlignConfig vessel messaging tools default empty ──
+
+    #[test]
+    fn align_vessel_messaging_tools_default_empty() {
+        let config = AlignConfig::default();
+        assert!(
+            config.vessel_messaging_tools.is_empty(),
+            "vessel_messaging_tools should default to empty"
+        );
+    }
+
+    // ── E4S1-T9: AlignConfig serde roundtrip with new fields ──
+
+    #[test]
+    fn align_config_serde_roundtrip_with_new_fields() {
+        let config = AlignConfig {
+            min_trust_for_vessel_messaging: 0.7,
+            vessel_messaging_tools: vec!["peer.send".into()],
+            ..AlignConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtripped: AlignConfig = serde_json::from_str(&json).unwrap();
+        assert!(
+            (roundtripped.min_trust_for_vessel_messaging - 0.7).abs() < f64::EPSILON,
+        );
+        assert_eq!(roundtripped.vessel_messaging_tools, vec!["peer.send"]);
+        assert_eq!(roundtripped.destructive_tools, config.destructive_tools);
     }
 }
