@@ -34,7 +34,7 @@ pub use conversation::{
 };
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
-pub use event::{EventEntry, EventLedger, EventType, LiveEvent};
+pub use event::{CapabilityRequestPayload, EventEntry, EventLedger, EventType, LiveEvent};
 pub use id::{
     derive_external_principal_id, sha256_hex, ArtifactId, ArtifactIdError, ConversationId,
     EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId, TickId, VesselId,

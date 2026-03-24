@@ -70,6 +70,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/conversations/:id/messages",
             get(handlers::get_conversation_messages),
         )
+        // E4-S4: Capability escalation + webhooks
+        .route(
+            "/api/v1/events/:id/acknowledge",
+            post(handlers::post_acknowledge_event),
+        )
+        .route(
+            "/api/v1/capability-requests",
+            get(handlers::get_capability_requests),
+        )
+        .route(
+            "/api/v1/webhooks/generic",
+            post(handlers::post_webhook_generic),
+        )
         // Operational endpoints
         .route("/healthz", get(handlers::healthz))
         .route("/ready", get(handlers::readyz))

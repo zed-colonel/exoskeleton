@@ -39,6 +39,8 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
         vessel_id,
         event_tx,
         cors_origins: vec![],
+        acknowledged_events: Arc::new(dashmap::DashSet::new()),
+        webhook_secrets: std::collections::HashMap::new(),
     })
 }
 
@@ -212,6 +214,8 @@ async fn metrics_endpoint_has_live_data() {
         vessel_id: vessel.vessel_id(),
         event_tx: vessel.event_sender().clone(),
         cors_origins: vec![],
+        acknowledged_events: Arc::new(dashmap::DashSet::new()),
+        webhook_secrets: std::collections::HashMap::new(),
     });
     let app = build_router(state);
 

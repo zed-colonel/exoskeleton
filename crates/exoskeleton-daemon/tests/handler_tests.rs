@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use exoskeleton_core::id::derive_external_principal_id;
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
-    ArtifactId, ArtifactStore, ConversationStore, EventEntry, EventLedger, EventType,
-    LedgerEntryId, SnapshotStore, StateSnapshot, TickStore, VesselId,
+    ArtifactId, ArtifactStore, CapabilityRequestPayload, ConversationStore, EnvelopeKind,
+    EventEntry, EventLedger, EventType, LedgerEntryId, SnapshotStore, StateSnapshot, TickStore,
+    VesselId,
 };
 use exoskeleton_daemon::routes::build_router;
 use exoskeleton_daemon::state::AppState;
@@ -54,6 +56,8 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
         vessel_id: VesselId::new(),
         event_tx: tokio::sync::broadcast::channel(16).0,
         cors_origins: vec![],
+        acknowledged_events: Arc::new(dashmap::DashSet::new()),
+        webhook_secrets: std::collections::HashMap::new(),
     })
 }
 
@@ -89,6 +93,8 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
         vessel_id: VesselId::new(),
         event_tx: tokio::sync::broadcast::channel(16).0,
         cors_origins,
+        acknowledged_events: Arc::new(dashmap::DashSet::new()),
+        webhook_secrets: std::collections::HashMap::new(),
     })
 }
 
@@ -1208,4 +1214,335 @@ async fn parameterized_routes_reach_handlers() {
             resp.status()
         );
     }
+}
+
+// ── E4S4-T6: acknowledge_endpoint_marks_event ──
+#[tokio::test]
+async fn acknowledge_endpoint_marks_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Create a CapabilityRequest event
+    let event_id = LedgerEntryId::new();
+    let event = EventEntry {
+        id: event_id,
+        tick_id: None,
+        event_type: EventType::CapabilityRequest,
+        payload_ref: None,
+        summary: "test cap request".into(),
+        timestamp: chrono::Utc::now(),
+    };
+    state
+        .inspector
+        .storage()
+        .event_ledger()
+        .append(&event)
+        .unwrap();
+
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/v1/events/{event_id}/acknowledge"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(state.acknowledged_events.contains(&event_id));
+}
+
+// ── E4S4-T7: acknowledge_endpoint_not_found ──
+#[tokio::test]
+async fn acknowledge_endpoint_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    let fake_id = LedgerEntryId::new();
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/v1/events/{fake_id}/acknowledge"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── E4S4-T8: capability_requests_endpoint_returns_events ──
+#[tokio::test]
+async fn capability_requests_endpoint_returns_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Create a CapabilityRequest event with payload
+    let payload = CapabilityRequestPayload {
+        capability: "discord".into(),
+        reason: "trust too low".into(),
+        context: "need to send alert".into(),
+        acknowledged: false,
+    };
+    let payload_json = serde_json::to_vec(&payload).unwrap();
+    let artifact = exoskeleton_core::Artifact::new(
+        exoskeleton_core::ArtifactKind::Event,
+        payload_json,
+        "application/json".into(),
+    );
+    let artifact_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .unwrap();
+
+    let event = EventEntry {
+        id: LedgerEntryId::new(),
+        tick_id: None,
+        event_type: EventType::CapabilityRequest,
+        payload_ref: Some(artifact_id),
+        summary: "cap request discord".into(),
+        timestamp: chrono::Utc::now(),
+    };
+    state
+        .inspector
+        .storage()
+        .event_ledger()
+        .append(&event)
+        .unwrap();
+
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/capability-requests")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(json.len(), 1);
+    assert_eq!(json[0]["capability"], "discord");
+    assert_eq!(json[0]["acknowledged"], false);
+}
+
+// ── E4S4-T9: generic_webhook_injects_message ──
+#[tokio::test]
+async fn generic_webhook_injects_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/webhooks/generic")
+                .header("content-type", "application/json")
+                .header("x-webhook-source", "monitoring-alerts")
+                .body(Body::from(r#"{"alert": "CPU high"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let envelopes = state.inbox.receive().unwrap();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].kind, EnvelopeKind::HumanMessage);
+}
+
+// ── E4S4-T10: generic_webhook_hmac_valid ──
+#[tokio::test]
+async fn generic_webhook_hmac_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = StorageManager::open(dir.path()).unwrap();
+    let thread_store = Arc::new(InMemoryThreadStore::new());
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
+        Arc::new(InMemoryRelationshipLedger::new());
+    let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
+    let inbox: Arc<dyn exoskeleton_core::inbox::Inbox> =
+        Arc::new(exoskeleton_host::InMemoryInbox::new());
+    let config = exoskeleton_host::VesselConfig {
+        mission: "test".into(),
+        ..Default::default()
+    };
+    let inspector = VesselInspector::new(
+        storage,
+        thread_registry,
+        relationship_ledger,
+        None,
+        None,
+        wi_host_slot,
+        config,
+    );
+    let metrics = Arc::new(ExoMetrics::new().unwrap());
+
+    let secret = b"mysecret";
+    let body_bytes = b"{\"event\": \"deploy\"}";
+
+    // Compute HMAC
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret).unwrap();
+    mac.update(body_bytes);
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    let mut secrets = std::collections::HashMap::new();
+    secrets.insert("ci-deploy".to_string(), secret.to_vec());
+
+    let state = Arc::new(AppState {
+        inspector,
+        metrics,
+        inbox,
+        vessel_id: VesselId::new(),
+        event_tx: tokio::sync::broadcast::channel(16).0,
+        cors_origins: vec![],
+        acknowledged_events: Arc::new(dashmap::DashSet::new()),
+        webhook_secrets: secrets,
+    });
+
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/webhooks/generic")
+                .header("content-type", "application/json")
+                .header("x-webhook-source", "ci-deploy")
+                .header("x-webhook-signature", format!("sha256={signature}"))
+                .body(Body::from(&body_bytes[..]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+// ── E4S4-T11: generic_webhook_hmac_invalid ──
+#[tokio::test]
+async fn generic_webhook_hmac_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = StorageManager::open(dir.path()).unwrap();
+    let thread_store = Arc::new(InMemoryThreadStore::new());
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
+        Arc::new(InMemoryRelationshipLedger::new());
+    let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
+    let inbox: Arc<dyn exoskeleton_core::inbox::Inbox> =
+        Arc::new(exoskeleton_host::InMemoryInbox::new());
+    let config = exoskeleton_host::VesselConfig {
+        mission: "test".into(),
+        ..Default::default()
+    };
+    let inspector = VesselInspector::new(
+        storage,
+        thread_registry,
+        relationship_ledger,
+        None,
+        None,
+        wi_host_slot,
+        config,
+    );
+    let metrics = Arc::new(ExoMetrics::new().unwrap());
+
+    let mut secrets = std::collections::HashMap::new();
+    secrets.insert("ci-deploy".to_string(), b"mysecret".to_vec());
+
+    let state = Arc::new(AppState {
+        inspector,
+        metrics,
+        inbox,
+        vessel_id: VesselId::new(),
+        event_tx: tokio::sync::broadcast::channel(16).0,
+        cors_origins: vec![],
+        acknowledged_events: Arc::new(dashmap::DashSet::new()),
+        webhook_secrets: secrets,
+    });
+
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/webhooks/generic")
+                .header("content-type", "application/json")
+                .header("x-webhook-source", "ci-deploy")
+                .header("x-webhook-signature", "sha256=badhex")
+                .body(Body::from(r#"{"event": "deploy"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ── E4S4-T12: generic_webhook_no_hmac_when_no_secret ──
+#[tokio::test]
+async fn generic_webhook_no_hmac_when_no_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/webhooks/generic")
+                .header("content-type", "application/json")
+                .header("x-webhook-source", "unsecured-source")
+                .body(Body::from(r#"{"data": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+// ── E4S4-T13: generic_webhook_derives_principal ──
+#[tokio::test]
+async fn generic_webhook_derives_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state.clone());
+
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/webhooks/generic")
+                .header("content-type", "application/json")
+                .header("x-webhook-source", "monitoring-alerts")
+                .body(Body::from(r#"{"alert": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let envelopes = state.inbox.receive().unwrap();
+    assert_eq!(envelopes.len(), 1);
+    let expected = derive_external_principal_id("webhook:monitoring-alerts");
+    assert_eq!(envelopes[0].source, expected);
+}
+
+// ── E4S4-T14: generic_webhook_missing_source ──
+#[tokio::test]
+async fn generic_webhook_missing_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/webhooks/generic")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"data": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
