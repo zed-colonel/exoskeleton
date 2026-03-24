@@ -470,8 +470,6 @@ mod tests {
         );
     }
 
-    // ── E4S1-T9: AlignConfig serde roundtrip with new fields ──
-
     // ── E4S2-T28: AlignConfig default includes WASM connectors ──
 
     #[test]
