@@ -235,7 +235,9 @@ async fn setup_builtin_threads(
         tick_interval: Duration::from_millis(10),
         ..Default::default()
     };
-    let host = EmbeddedHost::start(host_config, registry).await.unwrap();
+    let host = EmbeddedHost::start(host_config, registry, None)
+        .await
+        .unwrap();
     let wi_host_slot: WiHostSlot = Arc::new(tokio::sync::Mutex::new(Some(host)));
 
     let counter = Arc::new(ApproximateTokenCounter);
@@ -299,7 +301,9 @@ async fn setup_builtin_threads_custom(
         tick_interval: Duration::from_millis(10),
         ..Default::default()
     };
-    let host = EmbeddedHost::start(host_config, registry).await.unwrap();
+    let host = EmbeddedHost::start(host_config, registry, None)
+        .await
+        .unwrap();
     let wi_host_slot: WiHostSlot = Arc::new(tokio::sync::Mutex::new(Some(host)));
 
     let counter = Arc::new(ApproximateTokenCounter);

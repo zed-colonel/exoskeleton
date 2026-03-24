@@ -36,8 +36,8 @@ pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
 pub use event::{EventEntry, EventLedger, EventType, LiveEvent};
 pub use id::{
-    sha256_hex, ArtifactId, ArtifactIdError, ConversationId, EnvelopeId, LedgerEntryId, PlanTaskId,
-    PrincipalId, ThreadId, TickId, VesselId,
+    derive_external_principal_id, sha256_hex, ArtifactId, ArtifactIdError, ConversationId,
+    EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId, TickId, VesselId,
 };
 pub use inbox::Inbox;
 pub use llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
