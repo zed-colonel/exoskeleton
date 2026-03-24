@@ -46,6 +46,9 @@ impl Default for AlignConfig {
                 "http.request".into(),
                 "shell.exec".into(),
                 "sandbox.exec".into(),
+                "webhook.send".into(),
+                "web.search".into(),
+                "discord".into(),
             ],
             block_on_broken_commitments: false,
             min_trust_for_vessel_messaging: 0.6,
@@ -465,6 +468,33 @@ mod tests {
             config.vessel_messaging_tools.is_empty(),
             "vessel_messaging_tools should default to empty"
         );
+    }
+
+    // ── E4S2-T28: AlignConfig default includes WASM connectors ──
+
+    #[test]
+    fn align_config_default_includes_wasm_connectors() {
+        let config = AlignConfig::default();
+        assert!(config
+            .destructive_tools
+            .contains(&"webhook.send".to_string()));
+        assert!(config.destructive_tools.contains(&"web.search".to_string()));
+        assert!(config.destructive_tools.contains(&"discord".to_string()));
+    }
+
+    // ── E4S2-T29: Align blocks WASM connector at low trust ──
+
+    #[test]
+    fn align_blocks_wasm_connector_at_low_trust() {
+        let snapshot = snapshot_with_trust(0.4); // Below destructive threshold (0.6)
+        let config = AlignConfig::default();
+        let actions = vec![test_action("discord")];
+        let tick_id = TickId::new();
+
+        let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
+        assert!(approved.is_empty());
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].1.contains("destructive"));
     }
 
     // ── E4S1-T9: AlignConfig serde roundtrip with new fields ──
