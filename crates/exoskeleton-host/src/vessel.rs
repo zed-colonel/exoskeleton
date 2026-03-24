@@ -265,9 +265,16 @@ impl Vessel {
             )));
         }
 
+        // 10c. Create streaming message handler for WI → inbox bridge
+        let stream_handler: Option<Arc<dyn worldinterface_core::streaming::StreamMessageHandler>> =
+            Some(Arc::new(crate::inbox::InboxStreamHandler::new(
+                Arc::clone(&inbox),
+                artifact_store.clone(),
+            )));
+
         // 11. Bootstrap WI Host (which bootstraps Tool AQ internally)
         let host_config = Self::build_host_config(&config);
-        let wi_host = match EmbeddedHost::start(host_config, registry).await {
+        let wi_host = match EmbeddedHost::start(host_config, registry, stream_handler).await {
             Ok(host) => host,
             Err(e) => {
                 // Clean up: stop tick loop and shutdown cognitive engine

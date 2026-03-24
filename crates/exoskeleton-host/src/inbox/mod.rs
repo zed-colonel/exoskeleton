@@ -6,6 +6,8 @@
 
 pub mod file_inbox;
 pub mod memory_inbox;
+pub mod stream_handler;
 
 pub use file_inbox::FileInbox;
 pub use memory_inbox::InMemoryInbox;
+pub use stream_handler::InboxStreamHandler;

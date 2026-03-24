@@ -298,7 +298,9 @@ mod tests {
             ..Default::default()
         };
         std::fs::create_dir_all(dir.join("wi").join("aq")).unwrap();
-        let host = EmbeddedHost::start(host_config, registry).await.unwrap();
+        let host = EmbeddedHost::start(host_config, registry, None)
+            .await
+            .unwrap();
 
         let wi_host_slot = Arc::new(tokio::sync::Mutex::new(Some(host)));
         let counter = Arc::new(ApproximateTokenCounter);

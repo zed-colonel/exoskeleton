@@ -89,6 +89,41 @@ define_id!(LedgerEntryId, "Identity of a Relationship Ledger entry.");
 define_id!(PlanTaskId, "Identity of a task within a structured plan.");
 define_id!(ConversationId, "Identity of a conversation grouping.");
 
+/// Exoskeleton namespace UUID for deriving external principal IDs.
+///
+/// This is a fixed, arbitrary UUID used as the namespace for UUID v5 generation.
+/// Changing this value would invalidate all previously derived PrincipalIds.
+const EXO_EXTERNAL_NAMESPACE: Uuid = Uuid::from_bytes([
+    0x8a, 0x3b, 0x7c, 0x1e, 0x4f, 0x2d, 0x4a, 0x9b, 0xb1, 0x5e, 0x6c, 0x8d, 0x3f, 0x0a, 0x2b, 0x4c,
+]);
+
+/// Derive a deterministic PrincipalId from an external identity string.
+///
+/// Uses UUID v5 (name-based, SHA-1) with an Exoskeleton-specific namespace.
+/// The same input always produces the same PrincipalId — enables durable
+/// relationship tracking for external principals.
+///
+/// # Identity format convention
+///
+/// `"{platform}:{type}:{id}"` — e.g., `"discord:user:123456789"`,
+/// `"webhook:alerts"`.
+///
+/// # Examples
+///
+/// ```
+/// use exoskeleton_core::id::derive_external_principal_id;
+///
+/// let id1 = derive_external_principal_id("discord:user:123456789");
+/// let id2 = derive_external_principal_id("discord:user:123456789");
+/// assert_eq!(id1, id2); // Deterministic
+///
+/// let id3 = derive_external_principal_id("discord:user:987654321");
+/// assert_ne!(id1, id3); // Different inputs → different IDs
+/// ```
+pub fn derive_external_principal_id(identity: &str) -> PrincipalId {
+    PrincipalId::from(Uuid::new_v5(&EXO_EXTERNAL_NAMESPACE, identity.as_bytes()))
+}
+
 /// Content-addressed artifact identity (SHA-256 hex string).
 ///
 /// Computed from the artifact's content bytes. Two artifacts with identical
@@ -300,6 +335,24 @@ mod tests {
         assert_eq!(decl, "type VesselId = string;", "VesselId: {decl}");
         let decl = ArtifactId::decl(&cfg);
         assert_eq!(decl, "type ArtifactId = string;", "ArtifactId: {decl}");
+    }
+
+    // ── E4S3-T16: derive_external_principal_id deterministic ──
+
+    #[test]
+    fn derive_external_principal_deterministic() {
+        let id1 = super::derive_external_principal_id("discord:user:123456789");
+        let id2 = super::derive_external_principal_id("discord:user:123456789");
+        assert_eq!(id1, id2);
+    }
+
+    // ── E4S3-T17: derive_external_principal_id different inputs ──
+
+    #[test]
+    fn derive_external_principal_different_inputs() {
+        let id1 = super::derive_external_principal_id("discord:user:123456789");
+        let id2 = super::derive_external_principal_id("discord:user:987654321");
+        assert_ne!(id1, id2);
     }
 
     #[test]
