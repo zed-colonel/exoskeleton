@@ -403,9 +403,7 @@ mod tests {
                     id: exoskeleton_core::LedgerEntryId::new(),
                     principal_id: principal,
                     signal_type: exoskeleton_core::RelationalSignalType::CommitmentMade,
-                    content_ref: ArtifactId::from_content(
-                        format!("bcast-made-{i}").as_bytes(),
-                    ),
+                    content_ref: ArtifactId::from_content(format!("bcast-made-{i}").as_bytes()),
                     tick_id: TickId::new(),
                     timestamp: ts + chrono::Duration::seconds(i * 2),
                     metadata: Default::default(),
@@ -416,9 +414,7 @@ mod tests {
                     id: exoskeleton_core::LedgerEntryId::new(),
                     principal_id: principal,
                     signal_type: exoskeleton_core::RelationalSignalType::CommitmentBroken,
-                    content_ref: ArtifactId::from_content(
-                        format!("bcast-broken-{i}").as_bytes(),
-                    ),
+                    content_ref: ArtifactId::from_content(format!("bcast-broken-{i}").as_bytes()),
                     tick_id: TickId::new(),
                     timestamp: ts + chrono::Duration::seconds(i * 2 + 1),
                     metadata: Default::default(),

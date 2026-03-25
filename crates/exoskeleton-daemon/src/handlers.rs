@@ -13,13 +13,13 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use exoskeleton_core::id::derive_external_principal_id;
-use hmac::Mac;
 use exoskeleton_core::{
     Artifact, ArtifactId, ArtifactKind, ArtifactStore, CapabilityRequestPayload, ConversationId,
     EnvelopeId, EnvelopeKind, EventType, ExoError, LedgerEntryId, LlmBackend, MessageEnvelope,
     PrincipalId, TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
+use hmac::Mac;
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
@@ -681,9 +681,7 @@ pub async fn get_capability_requests(
                                 .ok()
                         })
                         .map(|p| (p.capability, p.reason, p.context))
-                        .unwrap_or_else(|| {
-                            ("unknown".into(), "unknown".into(), "unknown".into())
-                        });
+                        .unwrap_or_else(|| ("unknown".into(), "unknown".into(), "unknown".into()));
 
                     CapabilityRequestResponse {
                         event_id: e.id,
@@ -753,8 +751,11 @@ pub async fn post_webhook_generic(
     let principal_id = derive_external_principal_id(&identity);
 
     // 5. Store content as artifact
-    let artifact =
-        Artifact::new(ArtifactKind::Envelope, body.to_vec(), "application/json".into());
+    let artifact = Artifact::new(
+        ArtifactKind::Envelope,
+        body.to_vec(),
+        "application/json".into(),
+    );
     let payload_ref = match state.inspector.storage().artifact_store().put(&artifact) {
         Ok(id) => id,
         Err(e) => {
