@@ -1,10 +1,12 @@
 //! Shared application state for the HTTP daemon.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
+use dashmap::DashSet;
 use exoskeleton_core::inbox::Inbox;
-use exoskeleton_core::{LiveEvent, VesselId};
+use exoskeleton_core::{LedgerEntryId, LiveEvent, VesselId};
 use exoskeleton_host::inspect::VesselInspector;
 use exoskeleton_host::metrics::ExoMetrics;
 
@@ -22,4 +24,10 @@ pub struct AppState {
     pub event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
     /// CORS allowed origins (U1). Empty means no CORS (same-origin only).
     pub cors_origins: Vec<HeaderValue>,
+    /// Event IDs that have been acknowledged by an operator.
+    /// In-memory only — resets on vessel restart.
+    pub acknowledged_events: Arc<DashSet<LedgerEntryId>>,
+    /// HMAC-SHA256 secrets for webhook signature verification.
+    /// Key: source name (from X-Webhook-Source header).
+    pub webhook_secrets: HashMap<String, Vec<u8>>,
 }

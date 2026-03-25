@@ -87,6 +87,8 @@ impl ExoDaemon {
             vessel_id,
             event_tx,
             cors_origins,
+            acknowledged_events: Arc::new(dashmap::DashSet::new()),
+            webhook_secrets: std::collections::HashMap::new(),
         });
 
         let router = routes::build_router(app_state);

@@ -75,13 +75,52 @@ pub fn align(
         .map(|&(i, ref reason)| (decision.actions[i].clone(), reason.clone()))
         .collect();
 
-    // Log blocked actions
+    // Emit CapabilityRequest events for blocked actions
     for (action, reason) in &blocked_actions {
         tracing::info!(
             tool = %action.tool_name,
             reason = %reason,
             "action blocked by Align step"
         );
+
+        // Create capability request payload artifact
+        let payload = exoskeleton_core::CapabilityRequestPayload {
+            capability: action.tool_name.clone(),
+            reason: reason.clone(),
+            context: action.rationale.clone(),
+            acknowledged: false,
+        };
+        let payload_json = serde_json::to_vec(&payload).unwrap_or_default();
+        let artifact = exoskeleton_core::Artifact::new(
+            exoskeleton_core::ArtifactKind::Event,
+            payload_json,
+            "application/json".into(),
+        );
+        let payload_ref = kernel.artifact_store.put(&artifact).ok();
+
+        // Append EventEntry to ledger
+        let event = exoskeleton_core::EventEntry {
+            id: exoskeleton_core::LedgerEntryId::new(),
+            tick_id: Some(tick_id),
+            event_type: exoskeleton_core::EventType::CapabilityRequest,
+            payload_ref,
+            summary: format!(
+                "Capability request: {} blocked — {}",
+                action.tool_name, reason
+            ),
+            timestamp: chrono::Utc::now(),
+        };
+        let _ = kernel.event_ledger.append(&event);
+
+        // Broadcast LiveEvent for real-time observers
+        let live_event = exoskeleton_core::LiveEvent {
+            event_type: exoskeleton_core::EventType::CapabilityRequest,
+            tick_number: None,
+            summary: event.summary.clone(),
+            timestamp: event.timestamp,
+            snapshot: None,
+        };
+        let _ = kernel.event_tx.send(live_event);
     }
 
     AlignmentResult {
@@ -264,5 +303,140 @@ mod tests {
         assert!(result.approved_actions.is_empty());
         assert_eq!(result.blocked_actions.len(), 1);
         assert!(result.blocked_actions[0].1.contains("trust gate"));
+    }
+
+    // ── E4S4-T3: align_emits_capability_request_on_block ──
+
+    #[test]
+    fn align_emits_capability_request_on_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(InMemoryRelationshipLedger::new());
+
+        // Build a principal with very low trust (same setup as align_with_low_trust_blocks_actions)
+        let principal = exoskeleton_core::PrincipalId::new();
+        let ts = chrono::Utc::now();
+        for i in 0..5 {
+            ledger
+                .append(&exoskeleton_core::RelationshipRecord {
+                    id: exoskeleton_core::LedgerEntryId::new(),
+                    principal_id: principal,
+                    signal_type: exoskeleton_core::RelationalSignalType::CommitmentMade,
+                    content_ref: ArtifactId::from_content(format!("cap-made-{i}").as_bytes()),
+                    tick_id: TickId::new(),
+                    timestamp: ts + chrono::Duration::seconds(i * 2),
+                    metadata: Default::default(),
+                })
+                .unwrap();
+            ledger
+                .append(&exoskeleton_core::RelationshipRecord {
+                    id: exoskeleton_core::LedgerEntryId::new(),
+                    principal_id: principal,
+                    signal_type: exoskeleton_core::RelationalSignalType::CommitmentBroken,
+                    content_ref: ArtifactId::from_content(format!("cap-broken-{i}").as_bytes()),
+                    tick_id: TickId::new(),
+                    timestamp: ts + chrono::Duration::seconds(i * 2 + 1),
+                    metadata: Default::default(),
+                })
+                .unwrap();
+        }
+
+        let kernel = test_kernel_with_ledger(dir.path(), ledger);
+        let decision = test_decision(vec![test_action("discord")]);
+        let perception = empty_perception();
+        let tick_id = TickId::new();
+
+        let _result = align(&kernel, &decision, &perception, tick_id);
+
+        // Verify CapabilityRequest event was appended to ledger
+        let events = kernel
+            .event_ledger
+            .by_type(exoskeleton_core::EventType::CapabilityRequest, 10)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].summary.contains("discord"));
+        assert!(events[0].payload_ref.is_some());
+
+        // Verify payload artifact content
+        let artifact = kernel
+            .artifact_store
+            .get(events[0].payload_ref.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        let payload: exoskeleton_core::CapabilityRequestPayload =
+            serde_json::from_slice(&artifact.content).unwrap();
+        assert_eq!(payload.capability, "discord");
+        assert!(!payload.acknowledged);
+    }
+
+    // ── E4S4-T4: align_no_capability_request_on_approve ──
+
+    #[test]
+    fn align_no_capability_request_on_approve() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(InMemoryRelationshipLedger::new());
+        let kernel = test_kernel_with_ledger(dir.path(), ledger);
+        let decision = test_decision(vec![test_action("delay"), test_action("fs.read")]);
+        let perception = empty_perception();
+        let tick_id = TickId::new();
+
+        let _result = align(&kernel, &decision, &perception, tick_id);
+
+        let events = kernel
+            .event_ledger
+            .by_type(exoskeleton_core::EventType::CapabilityRequest, 10)
+            .unwrap();
+        assert!(events.is_empty());
+    }
+
+    // ── E4S4-T5: align_capability_request_broadcasts_live_event ──
+
+    #[test]
+    fn align_capability_request_broadcasts_live_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(InMemoryRelationshipLedger::new());
+
+        let principal = exoskeleton_core::PrincipalId::new();
+        let ts = chrono::Utc::now();
+        for i in 0..5 {
+            ledger
+                .append(&exoskeleton_core::RelationshipRecord {
+                    id: exoskeleton_core::LedgerEntryId::new(),
+                    principal_id: principal,
+                    signal_type: exoskeleton_core::RelationalSignalType::CommitmentMade,
+                    content_ref: ArtifactId::from_content(format!("bcast-made-{i}").as_bytes()),
+                    tick_id: TickId::new(),
+                    timestamp: ts + chrono::Duration::seconds(i * 2),
+                    metadata: Default::default(),
+                })
+                .unwrap();
+            ledger
+                .append(&exoskeleton_core::RelationshipRecord {
+                    id: exoskeleton_core::LedgerEntryId::new(),
+                    principal_id: principal,
+                    signal_type: exoskeleton_core::RelationalSignalType::CommitmentBroken,
+                    content_ref: ArtifactId::from_content(format!("bcast-broken-{i}").as_bytes()),
+                    tick_id: TickId::new(),
+                    timestamp: ts + chrono::Duration::seconds(i * 2 + 1),
+                    metadata: Default::default(),
+                })
+                .unwrap();
+        }
+
+        let kernel = test_kernel_with_ledger(dir.path(), ledger);
+        // Subscribe BEFORE calling align
+        let mut rx = kernel.event_tx.subscribe();
+        let decision = test_decision(vec![test_action("webhook.send")]);
+        let perception = empty_perception();
+        let tick_id = TickId::new();
+
+        let _result = align(&kernel, &decision, &perception, tick_id);
+
+        // Check broadcast
+        let live_event = rx.try_recv().unwrap();
+        assert_eq!(
+            live_event.event_type,
+            exoskeleton_core::EventType::CapabilityRequest
+        );
+        assert!(live_event.summary.contains("webhook.send"));
     }
 }

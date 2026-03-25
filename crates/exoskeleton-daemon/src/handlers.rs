@@ -12,11 +12,14 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
+use exoskeleton_core::id::derive_external_principal_id;
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactKind, ArtifactStore, ConversationId, EnvelopeId, EnvelopeKind,
-    ExoError, LlmBackend, MessageEnvelope, PrincipalId, TickId,
+    Artifact, ArtifactId, ArtifactKind, ArtifactStore, CapabilityRequestPayload, ConversationId,
+    EnvelopeId, EnvelopeKind, EventType, ExoError, LedgerEntryId, LlmBackend, MessageEnvelope,
+    PrincipalId, TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
+use hmac::Mac;
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
@@ -606,6 +609,206 @@ pub struct SanitizedFrontierConfig {
     model: String,
     /// Name of the env var (NOT the key value).
     api_key_env: String,
+}
+
+// ── E4-S4: Capability Escalation + Webhooks ──
+
+/// Response for GET /api/v1/capability-requests.
+#[derive(Debug, Serialize)]
+pub struct CapabilityRequestResponse {
+    pub event_id: LedgerEntryId,
+    pub capability: String,
+    pub reason: String,
+    pub context: String,
+    pub acknowledged: bool,
+    pub summary: String,
+    pub timestamp: chrono::DateTime<Utc>,
+}
+
+/// POST /api/v1/events/:id/acknowledge -> 200 OK or 404
+pub async fn post_acknowledge_event(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+) -> impl IntoResponse {
+    let event_id: LedgerEntryId = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid event ID (expected UUID)".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Verify the event exists and is a CapabilityRequest
+    match state.inspector.recent_events(1000) {
+        Ok(events) => {
+            let found = events
+                .iter()
+                .any(|e| e.id == event_id && e.event_type == EventType::CapabilityRequest);
+            if !found {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
+
+    state.acknowledged_events.insert(event_id);
+    StatusCode::OK.into_response()
+}
+
+/// GET /api/v1/capability-requests -> list of capability requests with ack status
+pub async fn get_capability_requests(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LimitQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(100).min(1000);
+    match state.inspector.recent_events(limit) {
+        Ok(events) => {
+            let requests: Vec<CapabilityRequestResponse> = events
+                .iter()
+                .filter(|e| e.event_type == EventType::CapabilityRequest)
+                .map(|e| {
+                    let (capability, reason, context) = e
+                        .payload_ref
+                        .as_ref()
+                        .and_then(|ref_id| state.inspector.artifact(ref_id).ok().flatten())
+                        .and_then(|artifact| {
+                            serde_json::from_slice::<CapabilityRequestPayload>(&artifact.content)
+                                .ok()
+                        })
+                        .map(|p| (p.capability, p.reason, p.context))
+                        .unwrap_or_else(|| ("unknown".into(), "unknown".into(), "unknown".into()));
+
+                    CapabilityRequestResponse {
+                        event_id: e.id,
+                        capability,
+                        reason,
+                        context,
+                        acknowledged: state.acknowledged_events.contains(&e.id),
+                        summary: e.summary.clone(),
+                        timestamp: e.timestamp,
+                    }
+                })
+                .collect();
+            Json(requests).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// POST /api/v1/webhooks/generic -> 201 Created or 401/400
+pub async fn post_webhook_generic(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    // 1. Extract X-Webhook-Source (required)
+    let source = match headers
+        .get("x-webhook-source")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing or invalid X-Webhook-Source header".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Verify HMAC signature if a secret is configured for this source
+    if let Some(secret) = state.webhook_secrets.get(&source) {
+        let signature_header = headers
+            .get("x-webhook-signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !verify_hmac_sha256(secret, &body, signature_header) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "invalid webhook signature".to_string(),
+            )
+                .into_response();
+        }
+    }
+
+    // 3. Validate body is valid JSON
+    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "request body must be valid JSON".to_string(),
+        )
+            .into_response();
+    }
+
+    // 4. Derive PrincipalId from source
+    let identity = format!("webhook:{source}");
+    let principal_id = derive_external_principal_id(&identity);
+
+    // 5. Store content as artifact
+    let artifact = Artifact::new(
+        ArtifactKind::Envelope,
+        body.to_vec(),
+        "application/json".into(),
+    );
+    let payload_ref = match state.inspector.storage().artifact_store().put(&artifact) {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // 6. Create MessageEnvelope
+    let envelope_id = EnvelopeId::new();
+    let envelope = MessageEnvelope {
+        id: envelope_id,
+        source: principal_id,
+        target: None,
+        kind: EnvelopeKind::HumanMessage,
+        payload_ref,
+        timestamp: Utc::now(),
+        in_reply_to: None,
+    };
+
+    // 7. Write to inbox
+    match state.inbox.submit(&envelope) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "envelope_id": envelope_id,
+                "principal_id": principal_id,
+            })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Verify an HMAC-SHA256 signature.
+///
+/// Expected format: "sha256=<hex-encoded HMAC>"
+fn verify_hmac_sha256(secret: &[u8], body: &[u8], signature_header: &str) -> bool {
+    let expected_hex = match signature_header.strip_prefix("sha256=") {
+        Some(hex) => hex,
+        None => return false,
+    };
+
+    let expected_bytes = match hex::decode(expected_hex) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut mac = match hmac::Hmac::<sha2::Sha256>::new_from_slice(secret) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    hmac::Mac::update(&mut mac, body);
+    hmac::Mac::verify_slice(mac, &expected_bytes).is_ok()
 }
 
 // ── E3-S3: Snapshot Fork ──

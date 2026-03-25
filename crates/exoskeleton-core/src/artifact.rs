@@ -112,6 +112,9 @@ pub enum ArtifactKind {
     /// A ContextBreakdown artifact (E3-S2). Contains a serialized CompiledContext as JSON.
     /// Shows per-section token allocation from the Orient step.
     ContextBreakdown,
+    /// An event payload artifact (E4-S4). Contains serialized event-specific data as JSON.
+    /// Used for CapabilityRequest payloads and other structured event details.
+    Event,
 }
 
 /// Lightweight reference to an artifact (id + kind) for embedding in other structures.
@@ -229,6 +232,7 @@ mod tests {
             ArtifactKind::LlmResponse,
             ArtifactKind::Tick,
             ArtifactKind::ContextBreakdown,
+            ArtifactKind::Event,
         ];
         for kind in &variants {
             let json = serde_json::to_string(kind).unwrap();

@@ -78,6 +78,9 @@ pub enum EventType {
     EpisodicEvicted,
     /// The vessel produced a reply to a user message (OA-S1).
     VesselResponseSent,
+    /// An action was blocked by the Align step and the vessel is requesting
+    /// capability escalation. Details in payload_ref artifact.
+    CapabilityRequest,
     /// An error occurred.
     Error,
 }
@@ -102,6 +105,23 @@ pub struct LiveEvent {
     /// and vessel_started events to avoid a follow-up REST call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<StateSnapshot>,
+}
+
+/// Payload stored as a JSON artifact for CapabilityRequest events.
+///
+/// Contains the details of what was blocked and why. The operator can use
+/// this information to decide whether to adjust AlignConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+pub struct CapabilityRequestPayload {
+    /// The tool name that was blocked (e.g., "discord", "webhook.send").
+    pub capability: String,
+    /// The reason the action was blocked (from the Align step).
+    pub reason: String,
+    /// The rationale the LLM provided for wanting to use this tool.
+    pub context: String,
+    /// Whether this request has been acknowledged by an operator.
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 /// Append-only event ledger for the vessel's audit trail.
@@ -152,6 +172,7 @@ mod tests {
             EventType::VesselForked,
             EventType::EpisodicEvicted,
             EventType::VesselResponseSent,
+            EventType::CapabilityRequest,
             EventType::Error,
         ];
         for event_type in &variants {
@@ -327,5 +348,35 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("tick_id"));
         assert!(!obj.contains_key("payload_ref"));
+    }
+
+    // ── E4S4-T1: capability_request_event_serializes ──
+
+    #[test]
+    fn capability_request_event_serializes() {
+        let json = serde_json::to_string(&EventType::CapabilityRequest).unwrap();
+        assert_eq!(json, "\"capability_request\"");
+        let parsed: EventType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, EventType::CapabilityRequest);
+    }
+
+    // ── E4S4-T2: capability_request_payload_roundtrip ──
+
+    #[test]
+    fn capability_request_payload_roundtrip() {
+        let payload = CapabilityRequestPayload {
+            capability: "discord".into(),
+            reason: "trust gate: minimum trust (0.25) below threshold (0.60)".into(),
+            context: "Need to send notification to #alerts channel".into(),
+            acknowledged: false,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: CapabilityRequestPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(payload, parsed);
+
+        // Verify acknowledged defaults to false when omitted
+        let without_ack = r#"{"capability":"test","reason":"r","context":"c"}"#;
+        let parsed: CapabilityRequestPayload = serde_json::from_str(without_ack).unwrap();
+        assert!(!parsed.acknowledged);
     }
 }
