@@ -154,12 +154,46 @@ pub struct LlmCallRecord {
     /// Reference to the stored LLM response artifact (I3: replayable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_artifact_ref: Option<ArtifactId>,
+    /// Number of LLM turns in this record (E5-S1: multi-turn Decide).
+    /// Default: 1 for backward compatibility with single-turn Decide.
+    #[serde(default = "default_turns")]
+    pub turns: u32,
+}
+
+fn default_turns() -> u32 {
+    1
 }
 
 impl LlmCallRecord {
     /// Total tokens (in + out).
     pub fn total_tokens(&self) -> u64 {
         self.tokens_in + self.tokens_out
+    }
+
+    /// Merge multiple call records into a single summary.
+    /// Uses the first record's metadata (model) and sums tokens/costs.
+    pub fn merge(records: &[LlmCallRecord]) -> LlmCallRecord {
+        if records.is_empty() {
+            return LlmCallRecord {
+                model: String::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                cost_cents: 0.0,
+                latency_ms: 0,
+                response_artifact_ref: None,
+                turns: 0,
+            };
+        }
+        let first = &records[0];
+        LlmCallRecord {
+            model: first.model.clone(),
+            tokens_in: records.iter().map(|r| r.tokens_in).sum(),
+            tokens_out: records.iter().map(|r| r.tokens_out).sum(),
+            cost_cents: records.iter().map(|r| r.cost_cents).sum(),
+            latency_ms: records.iter().map(|r| r.latency_ms).sum(),
+            response_artifact_ref: records.last().and_then(|r| r.response_artifact_ref.clone()),
+            turns: records.len() as u32,
+        }
     }
 }
 
@@ -265,6 +299,7 @@ mod tests {
                 cost_cents: 0.0,
                 latency_ms: 250,
                 response_artifact_ref: Some(ArtifactId::from_content(b"llm response")),
+                turns: 1,
             }],
             decision_rationale: Some("Decided to write output file".into()),
             context_breakdown_ref: None,
@@ -298,8 +333,54 @@ mod tests {
             cost_cents: 0.5,
             latency_ms: 100,
             response_artifact_ref: None,
+            turns: 1,
         };
         assert_eq!(record.total_tokens(), 150);
+    }
+
+    #[test]
+    fn llm_call_record_turns_default() {
+        let json =
+            r#"{"model":"m","tokens_in":10,"tokens_out":5,"cost_cents":0.1,"latency_ms":50}"#;
+        let parsed: LlmCallRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.turns, 1); // backward compat default
+    }
+
+    #[test]
+    fn llm_call_record_merge() {
+        let r1 = LlmCallRecord {
+            model: "model-a".into(),
+            tokens_in: 100,
+            tokens_out: 50,
+            cost_cents: 0.5,
+            latency_ms: 200,
+            response_artifact_ref: None,
+            turns: 1,
+        };
+        let r2 = LlmCallRecord {
+            model: "model-a".into(),
+            tokens_in: 80,
+            tokens_out: 40,
+            cost_cents: 0.3,
+            latency_ms: 150,
+            response_artifact_ref: Some(ArtifactId::from_content(b"resp2")),
+            turns: 1,
+        };
+        let merged = LlmCallRecord::merge(&[r1, r2]);
+        assert_eq!(merged.model, "model-a");
+        assert_eq!(merged.tokens_in, 180);
+        assert_eq!(merged.tokens_out, 90);
+        assert!((merged.cost_cents - 0.8).abs() < f64::EPSILON);
+        assert_eq!(merged.latency_ms, 350);
+        assert_eq!(merged.turns, 2);
+        assert!(merged.response_artifact_ref.is_some());
+    }
+
+    #[test]
+    fn llm_call_record_merge_empty() {
+        let merged = LlmCallRecord::merge(&[]);
+        assert_eq!(merged.turns, 0);
+        assert_eq!(merged.tokens_in, 0);
     }
 
     #[test]

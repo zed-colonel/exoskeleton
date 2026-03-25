@@ -179,6 +179,7 @@ fn llm_reflect(
         cost_cents: response.cost_estimate_cents.unwrap_or(0.0),
         latency_ms: response.latency_ms,
         response_artifact_ref: Some(response_artifact_id),
+        turns: 1,
     };
 
     Ok(ReflectionResult {
@@ -465,6 +466,7 @@ mod tests {
             trust_decay_config: None,
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
         }
     }
 
@@ -501,6 +503,7 @@ mod tests {
             trust_decay_config: None,
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
         }
     }
 
@@ -536,6 +539,7 @@ mod tests {
                 cost_cents: 0.0,
                 latency_ms: 100,
                 response_artifact_ref: None,
+                turns: 1,
             },
             response_artifact_id: exoskeleton_core::ArtifactId::from_content(b"test"),
         }

@@ -80,6 +80,9 @@ pub struct KernelContext {
     /// Threat Monitor and Self-Critique receive bootstrap preamble context.
     /// 0 disables the grace period.
     pub bootstrap_grace_period_ticks: u64,
+    /// Maximum number of LLM turns in the Decide step (E5-S1). Each turn can
+    /// be an introspection query or the final decision. Default: 5.
+    pub max_decide_turns: u32,
 }
 
 /// Run one complete PODAARA tick.

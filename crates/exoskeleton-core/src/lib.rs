@@ -12,6 +12,7 @@ pub mod error;
 pub mod event;
 pub mod id;
 pub mod inbox;
+pub mod introspection;
 pub mod llm;
 pub mod memory;
 pub mod plan;
@@ -40,6 +41,7 @@ pub use id::{
     EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId, TickId, VesselId,
 };
 pub use inbox::Inbox;
+pub use introspection::{IntrospectionQuery, MAX_INTROSPECTION_LIMIT};
 pub use llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
 pub use memory::{EpisodicSummary, LongTermNote, MemoryTier};
 pub use plan::{Plan, PlanOp, PlanTask, PlanTaskStatus, PlanUpdate};

@@ -235,6 +235,12 @@ pub struct VesselConfig {
     /// The variable is read at vessel startup, not stored in config.
     /// Example: "EXO_OBSERVATORY_TOKEN"
     pub observatory_token_env: Option<String>,
+
+    // ── Multi-turn Decide settings (E5-S1) ──
+    /// Maximum number of LLM turns in the Decide step. Each turn can be
+    /// an introspection query or the final decision. Minimum: 1 (single-turn,
+    /// backward compatible). Default: 5.
+    pub max_decide_turns: u32,
 }
 
 impl Default for VesselConfig {
@@ -264,6 +270,7 @@ impl Default for VesselConfig {
             sandbox: SandboxConfig::default(),
             observatory_url: None,
             observatory_token_env: None,
+            max_decide_turns: 5,
         }
     }
 }
@@ -374,6 +381,7 @@ impl VesselConfig {
                 bootstrap_grace_period_ticks: self.bootstrap_grace_period_ticks,
                 observatory_url: self.observatory_url.clone(),
                 observatory_token_env: self.observatory_token_env.clone(),
+                max_decide_turns: self.max_decide_turns,
             },
             cognitive: CognitiveSection {
                 tick_interval_ms: self.cognitive_tick_interval.as_millis() as u64,
@@ -559,6 +567,9 @@ fn default_30() -> u64 {
 fn default_600() -> u64 {
     600
 }
+fn default_5() -> u32 {
+    5
+}
 
 /// TOML-friendly configuration file format.
 ///
@@ -637,6 +648,9 @@ pub struct VesselSection {
     /// Environment variable name holding the Observatory API bearer token.
     #[serde(default)]
     pub observatory_token_env: Option<String>,
+    /// Maximum number of LLM turns in the Decide step. Default: 5.
+    #[serde(default = "default_5")]
+    pub max_decide_turns: u32,
 }
 
 /// The `[cognitive]` section of the TOML config file.
@@ -881,6 +895,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             sandbox: file.sandbox.unwrap_or_default(),
             observatory_url: file.vessel.observatory_url,
             observatory_token_env: file.vessel.observatory_token_env,
+            max_decide_turns: file.vessel.max_decide_turns.max(1),
         })
     }
 }
@@ -1967,5 +1982,40 @@ observatory_token_env = "MY_CUSTOM_TOKEN"
             config.observatory_token_env.as_deref(),
             Some("MY_CUSTOM_TOKEN")
         );
+    }
+
+    // ── E5S1-T22: max_decide_turns default ──
+
+    #[test]
+    fn vessel_config_max_decide_turns_default() {
+        let config = VesselConfig::default();
+        assert_eq!(config.max_decide_turns, 5);
+    }
+
+    // ── E5S1-T23: max_decide_turns from TOML with floor enforcement ──
+
+    #[test]
+    fn vessel_config_max_decide_turns_from_toml() {
+        // Explicit value parses correctly
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+max_decide_turns = 3
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.max_decide_turns, 3);
+
+        // Zero is floored to 1 (max(1) enforcement)
+        let toml_str = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+max_decide_turns = 0
+"#;
+        let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
+        let config = VesselConfig::try_from(file).unwrap();
+        assert_eq!(config.max_decide_turns, 1);
     }
 }

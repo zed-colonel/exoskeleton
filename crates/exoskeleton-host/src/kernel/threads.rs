@@ -449,6 +449,7 @@ mod tests {
             trust_decay_config: None,
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
         }
     }
 

@@ -89,6 +89,44 @@ pub fn default_mock_response() -> LlmResponse {
     }
 }
 
+/// Mock LLM backend that returns a sequence of responses.
+///
+/// Returns the next response in the sequence on each call. Wraps around if
+/// calls exceed the sequence length.
+pub struct MockSequenceLlmBackend {
+    responses: Vec<LlmResponse>,
+    call_count: AtomicU64,
+}
+
+impl MockSequenceLlmBackend {
+    /// Create a mock that returns responses in sequence.
+    pub fn new(responses: Vec<LlmResponse>) -> Self {
+        assert!(!responses.is_empty(), "responses must not be empty");
+        Self {
+            responses,
+            call_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Number of times `call()` has been invoked.
+    pub fn call_count(&self) -> u64 {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+impl LlmHttpBackend for MockSequenceLlmBackend {
+    fn call(
+        &self,
+        _client: &reqwest::Client,
+        _request: &exoskeleton_core::llm::LlmRequest,
+        _cancellation: &CancellationToken,
+    ) -> Result<LlmResponse, ExoError> {
+        let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
+        let response = &self.responses[idx % self.responses.len()];
+        Ok(response.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole, StopReason};

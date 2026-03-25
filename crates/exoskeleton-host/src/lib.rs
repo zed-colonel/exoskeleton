@@ -14,6 +14,7 @@ pub mod cognitive_engine;
 pub mod config;
 pub mod inbox;
 pub mod inspect;
+pub mod introspection;
 pub mod kernel;
 pub mod llm;
 pub mod metrics;
@@ -34,7 +35,7 @@ pub use kernel::{KernelContext, WiHostSlot};
 pub use llm::client::LlmClient;
 pub use llm::direct::direct_llm_call;
 pub use llm::http::LlmHttpBackend;
-pub use llm::mock::{default_mock_response, MockLlmBackend};
+pub use llm::mock::{default_mock_response, MockLlmBackend, MockSequenceLlmBackend};
 pub use metrics::ExoMetrics;
 pub use storage::{
     SqliteArtifactStore, SqliteBudgetStore, SqliteEventLedger, SqliteMemoryStore,

@@ -194,6 +194,7 @@ impl Vessel {
             trust_decay_config: config.trust_decay.clone(),
             episodic_memory_capacity: config.episodic_memory_capacity,
             bootstrap_grace_period_ticks: config.bootstrap_grace_period_ticks,
+            max_decide_turns: config.max_decide_turns,
         });
 
         // 7.8 Seed episodic memory for first boot (Decoherence Fix)

@@ -1,4 +1,11 @@
-//! Decide step — call LLM and parse the decision.
+//! Decide step — multi-turn LLM reasoning with introspection (E5-S1).
+//!
+//! The Decide step is an iterative loop. Each iteration:
+//! 1. Calls the LLM backend directly (same deadlock-prevention pattern as before)
+//! 2. Parses the response as `DecideTurn`
+//! 3. If `Query`: resolves via `IntrospectionService`, appends results, continues
+//! 4. If `Decide`: returns the `DecisionResult`
+//! 5. Terminates at `max_decide_turns` or on budget exhaustion
 //!
 //! **Why direct backend call instead of LlmClient:** The LlmClient::call()
 //! method locks the CognitiveEngineSlot and calls engine.run_until_idle().
@@ -14,13 +21,17 @@ use exoskeleton_core::tick::LlmCallRecord;
 use exoskeleton_core::{Artifact, ArtifactKind, ExoError};
 
 use super::types::{
-    extract_json_from_code_fence, DecisionProtocol, DecisionResult, OrientationResult,
+    extract_json_from_code_fence, DecideTurn, DecisionProtocol, DecisionResult, OrientationResult,
     SnapshotDelta,
 };
 use super::KernelContext;
 use crate::cognitive_engine::CognitiveHandler;
+use crate::introspection::IntrospectionService;
 
-/// Execute the Decide step: call LLM and parse the decision.
+/// Execute the Decide step: multi-turn LLM reasoning with introspection.
+///
+/// The loop runs synchronously within the Cognitive AQ handler. No AQ tasks
+/// are spawned. Each turn is a separate HTTP call to the LLM backend.
 pub fn decide(
     handler: &CognitiveHandler,
     kernel: &KernelContext,
@@ -34,33 +45,21 @@ pub fn decide(
         ));
     }
 
-    // 2. Build system prompt with available tools from WI Host
+    // 2. Build system prompt with available tools and introspection description
     let tools_description = build_tools_description(kernel);
-    let system_prompt = build_system_prompt(kernel, &tools_description)?;
+    let introspection_description = build_introspection_description();
+    let system_prompt =
+        build_system_prompt(kernel, &tools_description, &introspection_description)?;
 
     // 3. Build user message from compiled context
     let user_message = orientation.compiled_context.prompt.clone();
 
-    // 4. Build LLM request
-    let request = LlmRequest {
-        backend: None, // use default
-        system_prompt: Some(system_prompt),
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: user_message,
-        }],
-        max_output_tokens: kernel.max_output_tokens,
-        temperature: Some(0.7),
-        stop_sequences: vec![],
-    };
-
-    // 5. Resolve backend — with escalation logic (Sprint 9)
+    // 4. Resolve backend — with escalation logic (Sprint 9)
     let backend_type = resolve_backend(handler, kernel, orientation);
     let backend = match backend_type {
         LlmBackend::Local => handler.local_backend.as_ref(),
         LlmBackend::Frontier => handler.frontier_backend.as_ref(),
     };
-    // Fallback: if chosen backend isn't configured, try the other
     let (backend, backend_type) = match backend {
         Some(b) => (b, backend_type),
         None => {
@@ -80,69 +79,193 @@ pub fn decide(
         }
     };
 
-    // 6. Make LLM call (direct backend call, NOT LlmClient — avoids deadlock H-1)
-    let start = Instant::now();
-    let mut llm_response = backend.call(&handler.http_client, &request, cancellation)?;
-    let latency_ms = start.elapsed().as_millis() as u64;
-    llm_response.latency_ms = latency_ms;
+    // 5. Multi-turn Decide loop
+    let introspection = IntrospectionService::new(kernel);
+    let max_turns = kernel.max_decide_turns;
 
-    // 6.5 Record LLM consumption in budget tracker (Sprint 9)
-    if let Some(ref tracker) = kernel.budget_tracker {
-        if let Ok(mut guard) = tracker.try_lock() {
-            guard.record_llm_call(
-                backend_type,
-                llm_response.tokens_in,
-                llm_response.tokens_out,
-                llm_response.cost_estimate_cents.unwrap_or(0.0),
-            );
+    let mut messages: Vec<LlmMessage> = vec![LlmMessage {
+        role: LlmRole::User,
+        content: user_message,
+    }];
+    let mut llm_records: Vec<LlmCallRecord> = Vec::new();
+    let mut all_response_text = String::new();
+
+    for turn in 0..max_turns {
+        // Check cancellation
+        if cancellation.is_cancelled() {
+            return Err(ExoError::LlmInvocation(
+                "cancelled during Decide loop".into(),
+            ));
+        }
+
+        // Check budget before each turn (except the first)
+        if turn > 0 {
+            if let Some(ref tracker) = kernel.budget_tracker {
+                if let Ok(guard) = tracker.try_lock() {
+                    if guard.budget_status(u64::MAX).local_tokens_remaining == 0 {
+                        tracing::info!(turn, "budget exhausted, ending Decide loop");
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Build LLM request for this turn
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some(system_prompt.clone()),
+            messages: messages.clone(),
+            max_output_tokens: kernel.max_output_tokens,
+            temperature: Some(0.7),
+            stop_sequences: vec![],
+        };
+
+        // Direct backend call (same deadlock prevention as before)
+        let start = Instant::now();
+        let mut llm_response = backend.call(&handler.http_client, &request, cancellation)?;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        llm_response.latency_ms = latency_ms;
+
+        // Record LLM consumption in budget tracker (Sprint 9)
+        if let Some(ref tracker) = kernel.budget_tracker {
+            if let Ok(mut guard) = tracker.try_lock() {
+                guard.record_llm_call(
+                    backend_type,
+                    llm_response.tokens_in,
+                    llm_response.tokens_out,
+                    llm_response.cost_estimate_cents.unwrap_or(0.0),
+                );
+            }
+        }
+
+        // Record LLM metrics (Sprint 10)
+        if let Some(ref m) = kernel.metrics {
+            let backend_label = match backend_type {
+                LlmBackend::Local => "local",
+                LlmBackend::Frontier => "frontier",
+            };
+            m.llm_calls_total.with_label_values(&[backend_label]).inc();
+            m.llm_tokens_total
+                .with_label_values(&[backend_label, "input"])
+                .inc_by(llm_response.tokens_in);
+            m.llm_tokens_total
+                .with_label_values(&[backend_label, "output"])
+                .inc_by(llm_response.tokens_out);
+            m.llm_cost_cents_total
+                .with_label_values(&[backend_label])
+                .inc_by(llm_response.cost_estimate_cents.unwrap_or(0.0));
+            m.llm_latency_seconds
+                .with_label_values(&[backend_label])
+                .observe(latency_ms as f64 / 1000.0);
+        }
+
+        // Record token usage
+        let call_record = LlmCallRecord {
+            model: llm_response.model.clone(),
+            tokens_in: llm_response.tokens_in,
+            tokens_out: llm_response.tokens_out,
+            cost_cents: llm_response.cost_estimate_cents.unwrap_or(0.0),
+            latency_ms,
+            response_artifact_ref: None, // set later for the final response
+            turns: 1,
+        };
+        llm_records.push(call_record);
+        all_response_text.push_str(&llm_response.content);
+        all_response_text.push('\n');
+
+        // Parse this turn
+        let turn_result = parse_decide_turn(&llm_response.content);
+
+        match turn_result {
+            DecideTurn::Query { queries } => {
+                tracing::info!(
+                    turn,
+                    query_count = queries.len(),
+                    "Decide turn: introspection queries"
+                );
+
+                // Resolve each query
+                let mut results = Vec::new();
+                for q in &queries {
+                    let result = introspection
+                        .query(q)
+                        .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+                    results.push(serde_json::json!({
+                        "query": q,
+                        "result": result,
+                    }));
+                }
+
+                // Append assistant turn + introspection results
+                messages.push(LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: llm_response.content.clone(),
+                });
+                messages.push(LlmMessage {
+                    role: LlmRole::User,
+                    content: format!(
+                        "Introspection results:\n```json\n{}\n```\n\n\
+                         Continue your analysis and provide your final decision.",
+                        serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".into()),
+                    ),
+                });
+            }
+            DecideTurn::Decide(protocol) => {
+                tracing::info!(
+                    turn,
+                    action_count = protocol.actions.len(),
+                    "Decide turn: final decision"
+                );
+                return build_decision_result(
+                    handler,
+                    kernel,
+                    protocol,
+                    llm_records,
+                    &all_response_text,
+                );
+            }
         }
     }
 
-    // 6.6 Record LLM metrics (Sprint 10)
-    if let Some(ref m) = kernel.metrics {
-        let backend_label = match backend_type {
-            LlmBackend::Local => "local",
-            LlmBackend::Frontier => "frontier",
-        };
-        m.llm_calls_total.with_label_values(&[backend_label]).inc();
-        m.llm_tokens_total
-            .with_label_values(&[backend_label, "input"])
-            .inc_by(llm_response.tokens_in);
-        m.llm_tokens_total
-            .with_label_values(&[backend_label, "output"])
-            .inc_by(llm_response.tokens_out);
-        m.llm_cost_cents_total
-            .with_label_values(&[backend_label])
-            .inc_by(llm_response.cost_estimate_cents.unwrap_or(0.0));
-        m.llm_latency_seconds
-            .with_label_values(&[backend_label])
-            .observe(latency_ms as f64 / 1000.0);
-    }
+    // Max turns reached — produce fallback decision
+    tracing::warn!(max_turns, "Decide loop reached max turns, forcing decision");
+    let fallback = DecisionProtocol {
+        reasoning: all_response_text.clone(),
+        reply: None,
+        plan_update: None,
+        working_memory_ops: None,
+        actions: vec![],
+        memory_notes: vec![],
+    };
+    build_decision_result(handler, kernel, fallback, llm_records, &all_response_text)
+}
 
-    // 7. Store LLM response as artifact BEFORE proceeding (I3, IBP §4.5)
-    let response_artifact = Artifact::from_json(ArtifactKind::LlmResponse, &llm_response)?;
+/// Build the final DecisionResult from the protocol and accumulated records.
+fn build_decision_result(
+    handler: &CognitiveHandler,
+    kernel: &KernelContext,
+    protocol: DecisionProtocol,
+    llm_records: Vec<LlmCallRecord>,
+    full_response_text: &str,
+) -> Result<DecisionResult, ExoError> {
+    // Store full response as artifact (I3)
+    let response_artifact = Artifact::new(
+        ArtifactKind::LlmResponse,
+        full_response_text.as_bytes().to_vec(),
+        "text/plain".into(),
+    );
     let response_artifact_id = handler.artifact_store.put(&response_artifact)?;
 
-    // 8. Parse DecisionProtocol from response
-    let (protocol, raw_reasoning) = parse_decision(&llm_response.content);
-
-    // 9. Store Decision artifact (I3)
+    // Store decision as artifact (I3)
     let decision_artifact = Artifact::from_json(ArtifactKind::Decision, &protocol)?;
-    handler.artifact_store.put(&decision_artifact)?;
+    kernel.artifact_store.put(&decision_artifact)?;
 
-    // 10. Build LlmCallRecord
-    let llm_call_record = LlmCallRecord {
-        model: llm_response.model,
-        tokens_in: llm_response.tokens_in,
-        tokens_out: llm_response.tokens_out,
-        cost_cents: llm_response.cost_estimate_cents.unwrap_or(0.0),
-        latency_ms,
-        response_artifact_ref: Some(response_artifact_id.clone()),
-    };
+    // Merge LLM call records into single summary
+    let mut merged_record = LlmCallRecord::merge(&llm_records);
+    merged_record.response_artifact_ref = Some(response_artifact_id.clone());
 
-    // 11. Build DecisionResult
     Ok(DecisionResult {
-        reasoning: raw_reasoning,
+        reasoning: protocol.reasoning.clone(),
         reply: protocol.reply,
         actions: protocol.actions,
         snapshot_delta: SnapshotDelta {
@@ -150,7 +273,7 @@ pub fn decide(
             working_memory_ops: protocol.working_memory_ops,
         },
         memory_notes: protocol.memory_notes,
-        llm_call_record,
+        llm_call_record: merged_record,
         response_artifact_id,
     })
 }
@@ -308,48 +431,79 @@ fn build_tools_description(kernel: &KernelContext) -> String {
     }
 }
 
-fn build_system_prompt(kernel: &KernelContext, tools: &str) -> Result<String, ExoError> {
-    kernel.prompt_registry.resolve(
+fn build_system_prompt(
+    kernel: &KernelContext,
+    tools: &str,
+    introspection: &str,
+) -> Result<String, ExoError> {
+    let base = kernel.prompt_registry.resolve(
         "decide-system",
         &[
             ("vessel_id", &kernel.vessel_id.to_string()),
             ("mission", &kernel.mission),
             ("tools", tools),
         ],
-    )
+    )?;
+    Ok(format!("{base}\n\n{introspection}"))
 }
 
-/// Parse a DecisionProtocol from LLM response text.
+/// Generate the introspection tools section for the system prompt.
+fn build_introspection_description() -> String {
+    r#"## Introspection Tools (resolved immediately)
+
+You can query your own internal state before making a decision. To do so,
+respond with a JSON object of type "query":
+
+```json
+{"type": "query", "queries": [{"query": "tick_history", "limit": 10}]}
+```
+
+Available queries:
+- tick_history(limit): Recent ticks with action counts, success rates, token usage
+- tick_detail(tick_id): Full detail for a specific tick
+- event_history(event_type?, limit): Events filtered by optional type
+- trust_scores: Current trust levels for all known principals
+- trust_history(principal_id, limit): Trust changes over time for one principal
+- budget_status: Current budget dimensions with consumed/remaining
+- thread_status: All threads with statuses and recent output summaries
+- memory_search(topic?, tags?): Search long-term memory
+- connector_details(name): Full descriptor for a named connector
+- watch_list: Active watches
+
+After receiving results, continue reasoning and provide your final decision.
+When ready, respond with your decision JSON (same format as before).
+You may issue up to 4 query rounds before your final decision."#
+        .to_string()
+}
+
+/// Parse a single turn of the multi-turn Decide loop.
 ///
-/// 1. Try direct JSON parse
-/// 2. Try extracting from code fences
-/// 3. Fall back to no-action decision with raw text as reasoning
-fn parse_decision(response_text: &str) -> (DecisionProtocol, String) {
-    // Attempt 1: direct JSON parse
-    if let Ok(protocol) = serde_json::from_str::<DecisionProtocol>(response_text) {
-        let reasoning = protocol.reasoning.clone();
-        return (protocol, reasoning);
+/// Attempts to parse as DecideTurn (tagged). On failure, falls back to
+/// DecisionProtocol (untagged) for backward compatibility. On complete
+/// failure, returns a no-action decision with the raw text as reasoning.
+fn parse_decide_turn(response_text: &str) -> DecideTurn {
+    let json_text = extract_json_from_code_fence(response_text).unwrap_or(response_text);
+
+    // Attempt 1: parse as tagged DecideTurn
+    if let Ok(turn) = serde_json::from_str::<DecideTurn>(json_text) {
+        return turn;
     }
 
-    // Attempt 2: extract from code fence
-    if let Some(json_str) = extract_json_from_code_fence(response_text) {
-        if let Ok(protocol) = serde_json::from_str::<DecisionProtocol>(json_str) {
-            let reasoning = protocol.reasoning.clone();
-            return (protocol, reasoning);
-        }
+    // Attempt 2: parse as untagged DecisionProtocol (backward compat)
+    if let Ok(protocol) = serde_json::from_str::<DecisionProtocol>(json_text) {
+        return DecideTurn::Decide(protocol);
     }
 
-    // Attempt 3: fallback — no-action decision with raw text as reasoning
+    // Attempt 3: fallback no-action decision
     tracing::warn!("LLM returned unparseable response, treating as no-action tick");
-    let protocol = DecisionProtocol {
+    DecideTurn::Decide(DecisionProtocol {
         reasoning: response_text.to_string(),
         reply: None,
         plan_update: None,
         working_memory_ops: None,
         actions: vec![],
         memory_notes: vec![],
-    };
-    (protocol, response_text.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -403,6 +557,7 @@ mod tests {
             trust_decay_config: None,
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
         }
     }
 
@@ -612,10 +767,28 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             test_kernel(dir.path())
         };
-        let prompt = build_system_prompt(&kernel_ctx, "- fs.write: Write a file").unwrap();
+        let introspection = build_introspection_description();
+        let prompt =
+            build_system_prompt(&kernel_ctx, "- fs.write: Write a file", &introspection).unwrap();
         assert!(prompt.contains("Available tools:"));
         assert!(prompt.contains("fs.write: Write a file"));
         assert!(prompt.contains("test mission"));
+    }
+
+    // E5S1-T18: System prompt contains introspection tool descriptions
+    #[test]
+    fn decide_tools_description_includes_introspection() {
+        let kernel_ctx = {
+            let dir = tempfile::tempdir().unwrap();
+            test_kernel(dir.path())
+        };
+        let introspection = build_introspection_description();
+        let prompt =
+            build_system_prompt(&kernel_ctx, "- fs.write: Write a file", &introspection).unwrap();
+        assert!(prompt.contains("Introspection Tools"));
+        assert!(prompt.contains("tick_history"));
+        assert!(prompt.contains("trust_scores"));
+        assert!(prompt.contains("budget_status"));
     }
 
     #[test]
@@ -678,6 +851,7 @@ mod tests {
             trust_decay_config: None,
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
         }
     }
 
@@ -1020,5 +1194,170 @@ mod tests {
         let result = resolve_backend(&handler, &kernel, &orientation);
         // Below threshold → no escalation → default (Local)
         assert_eq!(result, LlmBackend::Local);
+    }
+
+    // ── Multi-turn Decide tests (E5-S1) ──
+
+    fn test_handler_with_sequence(
+        responses: Vec<String>,
+        artifact_store: Arc<dyn ArtifactStore>,
+    ) -> CognitiveHandler {
+        let llm_responses: Vec<LlmResponse> = responses
+            .into_iter()
+            .map(mock_response_with_content)
+            .collect();
+        let mock = Arc::new(crate::llm::mock::MockSequenceLlmBackend::new(llm_responses));
+        CognitiveHandler::with_backends(Some(mock), None, LlmBackend::Local, artifact_store)
+    }
+
+    // E5S1-T19: parse_decide_turn parses query
+    #[test]
+    fn parse_decide_turn_query() {
+        let json = r#"{"type":"query","queries":[{"query":"tick_history","limit":5}]}"#;
+        let result = parse_decide_turn(json);
+        match result {
+            DecideTurn::Query { queries } => {
+                assert_eq!(queries.len(), 1);
+            }
+            other => panic!("expected Query, got: {other:?}"),
+        }
+    }
+
+    // E5S1-T20: parse_decide_turn parses decide
+    #[test]
+    fn parse_decide_turn_decide() {
+        let json =
+            r#"{"type":"decide","reasoning":"Based on analysis","actions":[],"memory_notes":[]}"#;
+        let result = parse_decide_turn(json);
+        match result {
+            DecideTurn::Decide(protocol) => {
+                assert_eq!(protocol.reasoning, "Based on analysis");
+            }
+            other => panic!("expected Decide, got: {other:?}"),
+        }
+    }
+
+    // E5S1-T21: parse_decide_turn handles untagged fallback
+    #[test]
+    fn parse_decide_turn_untagged_fallback() {
+        let json = r#"{"reasoning":"idle tick","actions":[],"memory_notes":[]}"#;
+        let result = parse_decide_turn(json);
+        match result {
+            DecideTurn::Decide(protocol) => {
+                assert_eq!(protocol.reasoning, "idle tick");
+            }
+            other => panic!("expected Decide (fallback), got: {other:?}"),
+        }
+    }
+
+    // E5S1-T13: Query turn → results appended → second turn produces decision
+    #[test]
+    fn decide_multi_turn_introspection() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        let handler = test_handler_with_sequence(
+            vec![
+                // Turn 1: query
+                r#"{"type":"query","queries":[{"query":"budget_status"}]}"#.into(),
+                // Turn 2: decide
+                r#"{"type":"decide","reasoning":"After reviewing budget...","actions":[],"memory_notes":[]}"#.into(),
+            ],
+            kernel.artifact_store.clone(),
+        );
+        let orientation = test_orientation();
+        let cancel = CancellationToken::new();
+
+        let result = decide(&handler, &kernel, &orientation, &cancel).unwrap();
+        assert!(result.reasoning.contains("After reviewing"));
+        assert_eq!(result.llm_call_record.turns, 2);
+    }
+
+    // E5S1-T17: DecisionProtocol without `type` field → single turn backward compat
+    #[test]
+    fn decide_single_turn_backward_compat() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        let response = mock_response_with_content(valid_decision_json());
+        let handler = test_handler_with_mock(response, kernel.artifact_store.clone());
+        let orientation = test_orientation();
+        let token = CancellationToken::new();
+
+        let result = decide(&handler, &kernel, &orientation, &token).unwrap();
+
+        assert_eq!(result.reasoning, "I need to write a file");
+        assert_eq!(result.llm_call_record.turns, 1);
+    }
+
+    // E5S1-T15: Terminates at max_turns, produces fallback decision
+    #[test]
+    fn decide_multi_turn_max_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut kernel = test_kernel(dir.path());
+        kernel.max_decide_turns = 2; // Low limit
+
+        let handler = test_handler_with_sequence(
+            vec![
+                // Keep querying, never deciding
+                r#"{"type":"query","queries":[{"query":"budget_status"}]}"#.into(),
+                r#"{"type":"query","queries":[{"query":"thread_status"}]}"#.into(),
+            ],
+            kernel.artifact_store.clone(),
+        );
+        let orientation = test_orientation();
+        let cancel = CancellationToken::new();
+
+        let result = decide(&handler, &kernel, &orientation, &cancel).unwrap();
+        // Fallback decision has no actions
+        assert!(result.actions.is_empty());
+        assert_eq!(result.llm_call_record.turns, 2);
+    }
+
+    // E5S1-T16: Budget exhaustion mid-loop terminates gracefully with fallback
+    #[test]
+    fn decide_multi_turn_budget_exhaustion() {
+        let dir = tempfile::tempdir().unwrap();
+        // Budget of 100 local tokens — mock response costs 150 (100 in + 50 out),
+        // so after turn 0 the budget is exhausted.
+        let mut config = default_budget_config();
+        config.local_token_budget = 100;
+        let mut kernel = test_kernel_with_budget(dir.path(), config);
+        kernel.max_decide_turns = 5;
+
+        let handler = test_handler_with_sequence(
+            vec![
+                // Turn 0: query (consumes 150 tokens → exhausts budget)
+                r#"{"type":"query","queries":[{"query":"budget_status"}]}"#.into(),
+                // Turn 1 would be a decide, but budget check should break before call
+                r#"{"type":"decide","reasoning":"Should not reach","actions":[],"memory_notes":[]}"#
+                    .into(),
+            ],
+            kernel.artifact_store.clone(),
+        );
+        let orientation = test_orientation();
+        let cancel = CancellationToken::new();
+
+        let result = decide(&handler, &kernel, &orientation, &cancel).unwrap();
+        // Fallback decision: no actions, only 1 LLM turn actually completed
+        assert!(result.actions.is_empty());
+        assert_eq!(result.llm_call_record.turns, 1);
+    }
+
+    // E5S1-T14: Action tools in decision → PlannedActions (not resolved inline)
+    #[test]
+    fn decide_multi_turn_action_deferred() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        let handler = test_handler_with_sequence(
+            vec![
+                r#"{"type":"decide","reasoning":"Need to write a file","actions":[{"tool_name":"fs.write","params":{"path":"/tmp/x"},"rationale":"write"}],"memory_notes":[]}"#.into(),
+            ],
+            kernel.artifact_store.clone(),
+        );
+        let orientation = test_orientation();
+        let cancel = CancellationToken::new();
+
+        let result = decide(&handler, &kernel, &orientation, &cancel).unwrap();
+        assert_eq!(result.actions.len(), 1);
+        assert_eq!(result.actions[0].tool_name, "fs.write");
     }
 }

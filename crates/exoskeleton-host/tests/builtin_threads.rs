@@ -197,6 +197,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         trust_decay_config: kernel.trust_decay_config.clone(),
         episodic_memory_capacity: kernel.episodic_memory_capacity,
         bootstrap_grace_period_ticks: kernel.bootstrap_grace_period_ticks,
+        max_decide_turns: kernel.max_decide_turns,
     }
 }
 
@@ -271,6 +272,7 @@ async fn setup_builtin_threads(
         trust_decay_config: None,
         episodic_memory_capacity: None,
         bootstrap_grace_period_ticks: 0,
+        max_decide_turns: 5,
     };
 
     (kernel, handler, mock)
@@ -337,6 +339,7 @@ async fn setup_builtin_threads_custom(
         trust_decay_config: None,
         episodic_memory_capacity: None,
         bootstrap_grace_period_ticks: 0,
+        max_decide_turns: 5,
     };
 
     (kernel, handler)

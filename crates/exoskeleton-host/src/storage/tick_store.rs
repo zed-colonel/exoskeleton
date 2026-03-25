@@ -324,6 +324,7 @@ mod tests {
                 cost_cents: 0.0,
                 latency_ms: 250,
                 response_artifact_ref: Some(ArtifactId::from_content(b"llm response")),
+                turns: 1,
             }],
             decision_rationale: Some("Decided to write output file".into()),
             context_breakdown_ref: None,

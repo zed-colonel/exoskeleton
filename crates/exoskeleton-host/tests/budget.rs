@@ -238,6 +238,7 @@ async fn s9_thrash_detection_identifies_patterns() {
                     cost_cents: 0.0,
                     latency_ms: 100,
                     response_artifact_ref: None,
+                    turns: 1,
                 }],
             )
         })
@@ -264,6 +265,7 @@ async fn s9_thrash_detection_identifies_patterns() {
                     cost_cents: 0.0,
                     latency_ms: 100,
                     response_artifact_ref: None,
+                    turns: 1,
                 }],
             )
         })

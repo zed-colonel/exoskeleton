@@ -43,6 +43,22 @@ pub struct OrientationResult {
     pub compiled_context: CompiledContext,
 }
 
+/// A single turn in the multi-turn Decide loop (E5-S1).
+///
+/// The LLM can either issue introspection queries (resolved inline) or
+/// produce a final decision (existing DecisionProtocol). If the response
+/// has no `type` field, it is treated as a decision for backward compat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DecideTurn {
+    /// The LLM wants to query the vessel's stores before deciding.
+    Query {
+        queries: Vec<exoskeleton_core::introspection::IntrospectionQuery>,
+    },
+    /// The LLM has produced a final decision.
+    Decide(DecisionProtocol),
+}
+
 /// The decision protocol: structured JSON format for LLM responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionProtocol {

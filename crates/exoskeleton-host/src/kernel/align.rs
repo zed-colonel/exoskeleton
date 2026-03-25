@@ -181,6 +181,7 @@ mod tests {
             trust_decay_config: None,
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
         }
     }
 
@@ -198,6 +199,7 @@ mod tests {
                 cost_cents: 0.0,
                 latency_ms: 0,
                 response_artifact_ref: None,
+                turns: 1,
             },
             response_artifact_id: ArtifactId::from_content(b"test"),
         }
