@@ -29,6 +29,7 @@ pub mod relationship_store;
 pub mod snapshot_store;
 pub mod thread_store;
 pub mod tick_store;
+pub mod watch_store;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -43,6 +44,7 @@ pub use relationship_store::SqliteRelationshipLedger;
 pub use snapshot_store::SqliteSnapshotStore;
 pub use thread_store::SqliteThreadStore;
 pub use tick_store::SqliteTickStore;
+pub use watch_store::SqliteWatchStore;
 
 /// Owns all persistence stores and provides access to them.
 ///
@@ -72,6 +74,7 @@ pub struct StorageManager {
     relationship_store: Arc<SqliteRelationshipLedger>,
     budget_store: Arc<SqliteBudgetStore>,
     conversation_store: Arc<SqliteConversationStore>,
+    watch_store: Arc<SqliteWatchStore>,
 }
 
 impl StorageManager {
@@ -117,6 +120,7 @@ impl StorageManager {
         let conversation_store = Arc::new(SqliteConversationStore::open(
             exo_dir.join("conversations.db"),
         )?);
+        let watch_store = Arc::new(SqliteWatchStore::open(exo_dir.join("watches.db"))?);
 
         Ok(Self {
             artifact_store,
@@ -128,6 +132,7 @@ impl StorageManager {
             relationship_store,
             budget_store,
             conversation_store,
+            watch_store,
         })
     }
 
@@ -174,6 +179,11 @@ impl StorageManager {
     /// Access the conversation store (E1-S2).
     pub fn conversation_store(&self) -> &Arc<SqliteConversationStore> {
         &self.conversation_store
+    }
+
+    /// Access the watch store (E5-S2).
+    pub fn watch_store(&self) -> &Arc<SqliteWatchStore> {
+        &self.watch_store
     }
 }
 

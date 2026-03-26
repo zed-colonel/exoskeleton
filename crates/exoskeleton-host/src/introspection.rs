@@ -224,8 +224,113 @@ impl<'a> IntrospectionService<'a> {
     }
 
     fn watch_list(&self) -> Result<Value, ExoError> {
-        // Placeholder — watches are added in E5-S2.
-        Ok(serde_json::json!([]))
+        let watches = self.kernel.watch_store.list()?;
+        let summaries: Vec<Value> = watches
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "id": w.id.to_string(),
+                    "name": w.name,
+                    "description": w.description,
+                    "watch_type": w.watch_type,
+                    "schedule": w.schedule,
+                    "status": w.status,
+                    "trigger_count": w.trigger_count,
+                    "last_checked_tick": w.last_checked_tick,
+                })
+            })
+            .collect();
+        Ok(Value::Array(summaries))
+    }
+
+    /// Resolve an internal metric to a single f64 value.
+    ///
+    /// Used by the WatchExecutor for threshold watch evaluation.
+    /// Not exposed as an LLM tool — watches use this internally.
+    pub fn query_metric(
+        &self,
+        metric: &exoskeleton_core::watch::MetricKind,
+    ) -> Result<f64, ExoError> {
+        use exoskeleton_core::watch::MetricKind;
+        match metric {
+            MetricKind::TrustLevel { principal_id } => {
+                let snapshot = exoskeleton_relationship::compile_relationship_snapshot(
+                    self.kernel.relationship_ledger.as_ref(),
+                    self.kernel.trust_decay_config.as_ref(),
+                    Utc::now(),
+                )?;
+                let trust = snapshot
+                    .principals
+                    .iter()
+                    .find(|p| p.principal_id == *principal_id)
+                    .map(|p| p.trust_level)
+                    .unwrap_or(0.5);
+                Ok(trust)
+            }
+            MetricKind::BudgetRemaining { dimension } => match &self.kernel.budget_tracker {
+                Some(tracker) => match tracker.try_lock() {
+                    Ok(guard) => {
+                        let status = guard.budget_status(u64::MAX);
+                        let remaining = match dimension.as_str() {
+                            "local_tokens" => status.local_tokens_remaining as f64,
+                            "frontier_tokens" => status.frontier_tokens_remaining as f64,
+                            "frontier_cost_cents" => status.frontier_cost_cents_remaining as f64,
+                            "time_secs" => status.time_secs_remaining as f64,
+                            "tool_invocations" => status.tool_invocations_remaining as f64,
+                            _ => 0.0,
+                        };
+                        Ok(remaining)
+                    }
+                    Err(_) => Ok(f64::NAN),
+                },
+                None => Ok(f64::INFINITY),
+            },
+            MetricKind::ConsecutiveFailures => {
+                let latest = self.kernel.tick_store.latest()?;
+                let end = latest.as_ref().map(|t| t.tick_number).unwrap_or(0);
+                let start = end.saturating_sub(50);
+                let ticks = self.kernel.tick_store.range(start, end)?;
+                let mut consecutive = 0u64;
+                for tick in ticks.iter().rev() {
+                    let all_failed = !tick.actions_taken.is_empty()
+                        && tick
+                            .actions_taken
+                            .iter()
+                            .all(|a| a.outcome != exoskeleton_core::ActionOutcome::Success);
+                    if all_failed {
+                        consecutive += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Ok(consecutive as f64)
+            }
+            MetricKind::TickDuration => {
+                let latest = self.kernel.tick_store.latest()?;
+                match latest {
+                    Some(tick) => match tick.completed_at {
+                        Some(completed) => {
+                            let duration = completed - tick.started_at;
+                            Ok(duration.num_milliseconds() as f64)
+                        }
+                        None => Ok(0.0),
+                    },
+                    None => Ok(0.0),
+                }
+            }
+            MetricKind::EventCount {
+                event_type,
+                lookback_ticks,
+            } => {
+                let et: exoskeleton_core::EventType = serde_json::from_value(
+                    serde_json::Value::String(event_type.clone()),
+                )
+                .map_err(|_| ExoError::Config(format!("unknown event type: {event_type}")))?;
+                let limit = (*lookback_ticks as usize) * 10;
+                let events = self.kernel.event_ledger.by_type(et, limit)?;
+                Ok(events.len() as f64)
+            }
+        }
     }
 }
 
@@ -279,6 +384,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 

@@ -81,6 +81,12 @@ pub enum EventType {
     /// An action was blocked by the Align step and the vessel is requesting
     /// capability escalation. Details in payload_ref artifact.
     CapabilityRequest,
+    /// A watch condition was triggered during the Perceive step.
+    /// Payload artifact contains the watch definition and trigger value.
+    WatchTriggered,
+    /// A Meta-Cognition thread proposed a charter modification.
+    /// Payload artifact contains the CharterProposal with current/proposed text.
+    CharterProposal,
     /// An error occurred.
     Error,
 }
@@ -173,6 +179,8 @@ mod tests {
             EventType::EpisodicEvicted,
             EventType::VesselResponseSent,
             EventType::CapabilityRequest,
+            EventType::WatchTriggered,
+            EventType::CharterProposal,
             EventType::Error,
         ];
         for event_type in &variants {

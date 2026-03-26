@@ -11,8 +11,8 @@ use exoskeleton_core::id::derive_external_principal_id;
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
     ArtifactId, ArtifactStore, CapabilityRequestPayload, ConversationStore, EnvelopeKind,
-    EventEntry, EventLedger, EventType, LedgerEntryId, SnapshotStore, StateSnapshot, TickStore,
-    VesselId,
+    EventEntry, EventLedger, EventType, InMemoryWatchStore, LedgerEntryId, SnapshotStore,
+    StateSnapshot, TickStore, VesselId,
 };
 use exoskeleton_daemon::routes::build_router;
 use exoskeleton_daemon::state::AppState;
@@ -28,7 +28,7 @@ use tower::ServiceExt;
 fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
     let storage = StorageManager::open(dir).unwrap();
     let thread_store = Arc::new(InMemoryThreadStore::new());
-    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store.clone()));
     let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
         Arc::new(InMemoryRelationshipLedger::new());
     let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
@@ -40,7 +40,7 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
 
     let inspector = VesselInspector::new(
         storage,
-        thread_registry,
+        thread_registry.clone(),
         relationship_ledger,
         None,
         None,
@@ -58,13 +58,16 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
         cors_origins: vec![],
         acknowledged_events: Arc::new(dashmap::DashSet::new()),
         webhook_secrets: std::collections::HashMap::new(),
+        charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+        watch_store: Arc::new(InMemoryWatchStore::new()),
+        thread_registry,
     })
 }
 
 fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<AppState> {
     let storage = StorageManager::open(dir).unwrap();
     let thread_store = Arc::new(InMemoryThreadStore::new());
-    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store.clone()));
     let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
         Arc::new(InMemoryRelationshipLedger::new());
     let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
@@ -76,7 +79,7 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
 
     let inspector = VesselInspector::new(
         storage,
-        thread_registry,
+        thread_registry.clone(),
         relationship_ledger,
         None,
         None,
@@ -95,6 +98,9 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
         cors_origins,
         acknowledged_events: Arc::new(dashmap::DashSet::new()),
         webhook_secrets: std::collections::HashMap::new(),
+        charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+        watch_store: Arc::new(InMemoryWatchStore::new()),
+        thread_registry,
     })
 }
 
@@ -1363,7 +1369,7 @@ async fn generic_webhook_hmac_valid() {
     let dir = tempfile::tempdir().unwrap();
     let storage = StorageManager::open(dir.path()).unwrap();
     let thread_store = Arc::new(InMemoryThreadStore::new());
-    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store.clone()));
     let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
         Arc::new(InMemoryRelationshipLedger::new());
     let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
@@ -1375,7 +1381,7 @@ async fn generic_webhook_hmac_valid() {
     };
     let inspector = VesselInspector::new(
         storage,
-        thread_registry,
+        thread_registry.clone(),
         relationship_ledger,
         None,
         None,
@@ -1405,6 +1411,9 @@ async fn generic_webhook_hmac_valid() {
         cors_origins: vec![],
         acknowledged_events: Arc::new(dashmap::DashSet::new()),
         webhook_secrets: secrets,
+        charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+        watch_store: Arc::new(InMemoryWatchStore::new()),
+        thread_registry,
     });
 
     let app = build_router(state);
@@ -1429,7 +1438,7 @@ async fn generic_webhook_hmac_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let storage = StorageManager::open(dir.path()).unwrap();
     let thread_store = Arc::new(InMemoryThreadStore::new());
-    let thread_registry = Arc::new(ThreadRegistry::new(thread_store));
+    let thread_registry = Arc::new(ThreadRegistry::new(thread_store.clone()));
     let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
         Arc::new(InMemoryRelationshipLedger::new());
     let wi_host_slot = Arc::new(tokio::sync::Mutex::new(None));
@@ -1441,7 +1450,7 @@ async fn generic_webhook_hmac_invalid() {
     };
     let inspector = VesselInspector::new(
         storage,
-        thread_registry,
+        thread_registry.clone(),
         relationship_ledger,
         None,
         None,
@@ -1462,6 +1471,9 @@ async fn generic_webhook_hmac_invalid() {
         cors_origins: vec![],
         acknowledged_events: Arc::new(dashmap::DashSet::new()),
         webhook_secrets: secrets,
+        charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+        watch_store: Arc::new(InMemoryWatchStore::new()),
+        thread_registry,
     });
 
     let app = build_router(state);

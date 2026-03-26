@@ -59,6 +59,7 @@ fn demo_config(dir: &Path) -> VesselConfig {
         observatory_url: None,
         observatory_token_env: None,
         max_decide_turns: 5,
+        max_watches: 20,
     }
 }
 

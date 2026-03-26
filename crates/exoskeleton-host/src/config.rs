@@ -241,6 +241,8 @@ pub struct VesselConfig {
     /// an introspection query or the final decision. Minimum: 1 (single-turn,
     /// backward compatible). Default: 5.
     pub max_decide_turns: u32,
+    /// Maximum number of active watches per vessel. Default: 20.
+    pub max_watches: u32,
 }
 
 impl Default for VesselConfig {
@@ -271,6 +273,7 @@ impl Default for VesselConfig {
             observatory_url: None,
             observatory_token_env: None,
             max_decide_turns: 5,
+            max_watches: exoskeleton_core::watch::DEFAULT_MAX_WATCHES,
         }
     }
 }
@@ -382,6 +385,7 @@ impl VesselConfig {
                 observatory_url: self.observatory_url.clone(),
                 observatory_token_env: self.observatory_token_env.clone(),
                 max_decide_turns: self.max_decide_turns,
+                max_watches: self.max_watches,
             },
             cognitive: CognitiveSection {
                 tick_interval_ms: self.cognitive_tick_interval.as_millis() as u64,
@@ -537,6 +541,11 @@ impl VesselConfig {
                 .as_deref()
                 .and_then(parse_thread_schedule),
             memory_consolidation_token_budget: ts.memory_consolidation_token_budget,
+            meta_cognition_schedule: ts
+                .meta_cognition_schedule
+                .as_deref()
+                .and_then(parse_thread_schedule),
+            meta_cognition_token_budget: ts.meta_cognition_token_budget,
         })
     }
 }
@@ -651,6 +660,13 @@ pub struct VesselSection {
     /// Maximum number of LLM turns in the Decide step. Default: 5.
     #[serde(default = "default_5")]
     pub max_decide_turns: u32,
+    /// Maximum number of active watches per vessel. Default: 20.
+    #[serde(default = "default_20")]
+    pub max_watches: u32,
+}
+
+fn default_20() -> u32 {
+    20
 }
 
 /// The `[cognitive]` section of the TOML config file.
@@ -729,6 +745,12 @@ pub struct ThreadsSection {
     /// Memory Consolidation token budget override. Default: 6144.
     #[serde(default)]
     pub memory_consolidation_token_budget: Option<u64>,
+    /// Meta-Cognition schedule override. Default: "every_10".
+    #[serde(default)]
+    pub meta_cognition_schedule: Option<String>,
+    /// Meta-Cognition token budget override. Default: 8192.
+    #[serde(default)]
+    pub meta_cognition_token_budget: Option<u64>,
 }
 
 /// Configuration for a source code repository to mount in the vessel container.
@@ -896,6 +918,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             observatory_url: file.vessel.observatory_url,
             observatory_token_env: file.vessel.observatory_token_env,
             max_decide_turns: file.vessel.max_decide_turns.max(1),
+            max_watches: file.vessel.max_watches.min(100),
         })
     }
 }

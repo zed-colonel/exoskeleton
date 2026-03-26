@@ -123,6 +123,44 @@ pub fn align(
         let _ = kernel.event_tx.send(live_event);
     }
 
+    // Process watch proposals (E5-S2)
+    for proposal in &decision.watch_proposals {
+        let current_count = kernel.watch_store.active_count().unwrap_or(0);
+        if current_count >= kernel.max_watches {
+            tracing::info!(
+                watch_name = %proposal.name,
+                current_count,
+                max = kernel.max_watches,
+                "watch proposal blocked: limit reached"
+            );
+            continue;
+        }
+
+        let watch = exoskeleton_core::watch::WatchDefinition {
+            id: exoskeleton_core::WatchId::new(),
+            name: proposal.name.clone(),
+            description: proposal.description.clone(),
+            watch_type: proposal.watch_type.clone(),
+            schedule: proposal.schedule,
+            status: exoskeleton_core::watch::WatchStatus::Active,
+            created_at_tick: 0, // Caller can set via tick_number context
+            last_checked_tick: None,
+            trigger_count: 0,
+            created_at: chrono::Utc::now(),
+        };
+
+        if let Err(e) = kernel.watch_store.save(&watch) {
+            tracing::warn!(error = %e, "failed to save approved watch");
+            continue;
+        }
+
+        tracing::info!(
+            watch_name = %watch.name,
+            watch_id = %watch.id,
+            "watch proposal approved and saved"
+        );
+    }
+
     AlignmentResult {
         approved_actions,
         blocked_actions,
@@ -182,6 +220,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 
@@ -202,6 +242,7 @@ mod tests {
                 turns: 1,
             },
             response_artifact_id: ArtifactId::from_content(b"test"),
+            watch_proposals: vec![],
         }
     }
 
@@ -440,5 +481,77 @@ mod tests {
             exoskeleton_core::EventType::CapabilityRequest
         );
         assert!(live_event.summary.contains("webhook.send"));
+    }
+
+    // ── E5S2-T9: watch_creation_align_gated ──
+
+    #[test]
+    fn watch_creation_align_gated() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(InMemoryRelationshipLedger::new());
+        let kernel = test_kernel_with_ledger(dir.path(), ledger);
+
+        let mut decision = test_decision(vec![]);
+        decision.watch_proposals = vec![exoskeleton_core::watch::WatchProposal {
+            name: "test-watch".into(),
+            description: "A test watch".into(),
+            watch_type: exoskeleton_core::watch::WatchType::Threshold {
+                metric: exoskeleton_core::watch::MetricKind::ConsecutiveFailures,
+                condition: exoskeleton_core::watch::WatchCondition::Above { value: 3.0 },
+            },
+            schedule: exoskeleton_core::watch::WatchSchedule::EveryNTicks { n: 1 },
+        }];
+
+        let perception = empty_perception();
+        let tick_id = TickId::new();
+
+        align(&kernel, &decision, &perception, tick_id);
+
+        // Watch should have been saved
+        assert_eq!(kernel.watch_store.list().unwrap().len(), 1);
+        assert_eq!(kernel.watch_store.active_count().unwrap(), 1);
+    }
+
+    // ── E5S2-T11: watch_count_limit_enforced ──
+
+    #[test]
+    fn watch_count_limit_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(InMemoryRelationshipLedger::new());
+        let mut kernel = test_kernel_with_ledger(dir.path(), ledger);
+        kernel.max_watches = 1; // Limit to 1
+
+        // First watch should be saved
+        let mut decision = test_decision(vec![]);
+        decision.watch_proposals = vec![
+            exoskeleton_core::watch::WatchProposal {
+                name: "first-watch".into(),
+                description: "First".into(),
+                watch_type: exoskeleton_core::watch::WatchType::Threshold {
+                    metric: exoskeleton_core::watch::MetricKind::TickDuration,
+                    condition: exoskeleton_core::watch::WatchCondition::Above { value: 1000.0 },
+                },
+                schedule: exoskeleton_core::watch::WatchSchedule::EveryNTicks { n: 1 },
+            },
+            exoskeleton_core::watch::WatchProposal {
+                name: "second-watch".into(),
+                description: "Second — should be blocked".into(),
+                watch_type: exoskeleton_core::watch::WatchType::Threshold {
+                    metric: exoskeleton_core::watch::MetricKind::TickDuration,
+                    condition: exoskeleton_core::watch::WatchCondition::Above { value: 2000.0 },
+                },
+                schedule: exoskeleton_core::watch::WatchSchedule::EveryNTicks { n: 1 },
+            },
+        ];
+
+        let perception = empty_perception();
+        let tick_id = TickId::new();
+
+        align(&kernel, &decision, &perception, tick_id);
+
+        // Only 1 watch should have been saved (limit is 1)
+        assert_eq!(kernel.watch_store.list().unwrap().len(), 1);
+        let watches = kernel.watch_store.list().unwrap();
+        assert_eq!(watches[0].name, "first-watch");
     }
 }

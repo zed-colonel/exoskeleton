@@ -29,8 +29,9 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
     let metrics = Arc::new(ExoMetrics::new().unwrap());
     let inbox = vessel.inbox().clone();
     let vessel_id = vessel.vessel_id();
-
     let event_tx = vessel.event_sender().clone();
+    let watch_store = vessel.watch_store();
+    let thread_registry = vessel.thread_registry().clone();
 
     Arc::new(AppState {
         inspector,
@@ -41,6 +42,9 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
         cors_origins: vec![],
         acknowledged_events: Arc::new(dashmap::DashSet::new()),
         webhook_secrets: std::collections::HashMap::new(),
+        charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+        watch_store,
+        thread_registry,
     })
 }
 
@@ -132,12 +136,14 @@ async fn threads_endpoint_lists_all_three() {
     let body = body_string(resp.into_body()).await;
     let json: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
 
-    assert_eq!(json.len(), 3, "should have 3 built-in threads");
+    // E5-S2 added MetaCognition as the 4th built-in thread.
+    assert_eq!(json.len(), 4, "should have 4 built-in threads");
 
     let names: Vec<&str> = json.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Threat Monitor"));
     assert!(names.contains(&"Self-Critique"));
     assert!(names.contains(&"Memory Consolidation"));
+    assert!(names.contains(&"Meta-Cognition"));
 
     support::shutdown_and_verify(vessel).await;
 }
@@ -216,6 +222,9 @@ async fn metrics_endpoint_has_live_data() {
         cors_origins: vec![],
         acknowledged_events: Arc::new(dashmap::DashSet::new()),
         webhook_secrets: std::collections::HashMap::new(),
+        charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+        watch_store: vessel.watch_store(),
+        thread_registry: vessel.thread_registry().clone(),
     });
     let app = build_router(state);
 

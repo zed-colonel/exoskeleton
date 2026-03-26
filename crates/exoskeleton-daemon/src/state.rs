@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use exoskeleton_core::inbox::Inbox;
-use exoskeleton_core::{LedgerEntryId, LiveEvent, VesselId};
+use exoskeleton_core::{LedgerEntryId, LiveEvent, ProposalStatus, VesselId, WatchStore};
 use exoskeleton_host::inspect::VesselInspector;
 use exoskeleton_host::metrics::ExoMetrics;
+use exoskeleton_threads::ThreadRegistry;
 
 /// Shared state available to all HTTP handlers via axum's `State` extractor.
 pub struct AppState {
@@ -30,4 +31,11 @@ pub struct AppState {
     /// HMAC-SHA256 secrets for webhook signature verification.
     /// Key: source name (from X-Webhook-Source header).
     pub webhook_secrets: HashMap<String, Vec<u8>>,
+    /// Operator-override statuses for charter proposals.
+    /// In-memory only — resets on vessel restart.
+    pub charter_proposal_statuses: Arc<DashMap<LedgerEntryId, ProposalStatus>>,
+    /// Watch store for listing active watches.
+    pub watch_store: Arc<dyn WatchStore>,
+    /// Thread registry for applying approved charter proposals.
+    pub thread_registry: Arc<ThreadRegistry>,
 }

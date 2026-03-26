@@ -766,7 +766,7 @@ mod tests {
         .unwrap();
 
         let threads = inspector.thread_status().unwrap();
-        assert_eq!(threads.len(), 3, "expected 3 built-in threads");
+        assert_eq!(threads.len(), 4, "expected 4 built-in threads");
     }
 
     #[test]

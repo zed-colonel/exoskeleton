@@ -14,9 +14,9 @@ use axum::Json;
 use chrono::Utc;
 use exoskeleton_core::id::derive_external_principal_id;
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactKind, ArtifactStore, CapabilityRequestPayload, ConversationId,
-    EnvelopeId, EnvelopeKind, EventType, ExoError, LedgerEntryId, LlmBackend, MessageEnvelope,
-    PrincipalId, TickId,
+    Artifact, ArtifactId, ArtifactKind, ArtifactStore, CapabilityRequestPayload, CharterProposal,
+    ConversationId, EnvelopeId, EnvelopeKind, EventType, ExoError, LedgerEntryId, LlmBackend,
+    MessageEnvelope, PrincipalId, ProposalStatus, TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
 use hmac::Mac;
@@ -864,6 +864,155 @@ pub async fn post_fork_snapshot(
         Err(ExoError::Config(msg)) if msg.contains("already exists") => {
             (StatusCode::CONFLICT, msg).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── E5-S2: Charter Governance + Watch primitives ──
+
+/// Response body for GET /api/v1/charter/proposals.
+#[derive(Debug, Serialize)]
+pub struct CharterProposalResponse {
+    pub event_id: LedgerEntryId,
+    pub thread_id: String,
+    pub thread_name: String,
+    pub current_charter: String,
+    pub proposed_charter: String,
+    pub rationale: String,
+    pub detected_patterns: Vec<String>,
+    pub status: ProposalStatus,
+    pub proposed_at_tick: u64,
+    pub timestamp: chrono::DateTime<Utc>,
+}
+
+/// Request body for POST /api/v1/charter/proposals/:id/review.
+#[derive(Debug, Deserialize)]
+pub struct ReviewAction {
+    pub action: String,
+}
+
+/// GET /api/v1/charter/proposals -> list of charter proposals with operator-override status.
+pub async fn get_charter_proposals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.inspector.recent_events(1000) {
+        Ok(events) => {
+            let proposals: Vec<CharterProposalResponse> = events
+                .iter()
+                .filter(|e| e.event_type == EventType::CharterProposal)
+                .filter_map(|e| {
+                    let payload = e
+                        .payload_ref
+                        .as_ref()
+                        .and_then(|ref_id| state.inspector.artifact(ref_id).ok().flatten())
+                        .and_then(|artifact| {
+                            serde_json::from_slice::<CharterProposal>(&artifact.content).ok()
+                        })?;
+
+                    // Operator override takes precedence over the stored status.
+                    let status = state
+                        .charter_proposal_statuses
+                        .get(&e.id)
+                        .map(|s| *s)
+                        .unwrap_or(payload.status);
+
+                    Some(CharterProposalResponse {
+                        event_id: e.id,
+                        thread_id: payload.thread_id.to_string(),
+                        thread_name: payload.thread_name,
+                        current_charter: payload.current_charter,
+                        proposed_charter: payload.proposed_charter,
+                        rationale: payload.rationale,
+                        detected_patterns: payload.detected_patterns,
+                        status,
+                        proposed_at_tick: payload.proposed_at_tick,
+                        timestamp: e.timestamp,
+                    })
+                })
+                .collect();
+            Json(proposals).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// POST /api/v1/charter/proposals/:id/review -> 200 OK, 400, or 404.
+pub async fn post_review_charter_proposal(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+    Json(body): Json<ReviewAction>,
+) -> impl IntoResponse {
+    let event_id: LedgerEntryId = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid event ID (expected UUID)".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Verify the event exists and is a CharterProposal.
+    let proposal = match state.inspector.recent_events(1000) {
+        Ok(events) => {
+            let entry = events
+                .into_iter()
+                .find(|e| e.id == event_id && e.event_type == EventType::CharterProposal);
+            match entry {
+                Some(e) => e
+                    .payload_ref
+                    .as_ref()
+                    .and_then(|ref_id| state.inspector.artifact(ref_id).ok().flatten())
+                    .and_then(|artifact| {
+                        serde_json::from_slice::<CharterProposal>(&artifact.content).ok()
+                    }),
+                None => return StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    match body.action.as_str() {
+        "approve" => {
+            if let Some(p) = proposal {
+                let thread_id = p.thread_id;
+                let charter = p.proposed_charter.clone();
+                match state.thread_registry.update_charter(thread_id, charter) {
+                    Ok(()) => {
+                        state
+                            .charter_proposal_statuses
+                            .insert(event_id, ProposalStatus::Applied);
+                        StatusCode::OK.into_response()
+                    }
+                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                }
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not decode proposal payload".to_string(),
+                )
+                    .into_response()
+            }
+        }
+        "deny" => {
+            state
+                .charter_proposal_statuses
+                .insert(event_id, ProposalStatus::Denied);
+            StatusCode::OK.into_response()
+        }
+        other => (
+            StatusCode::BAD_REQUEST,
+            format!("unknown action '{other}'; expected 'approve' or 'deny'"),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/watches -> list of all watch definitions.
+pub async fn get_watches(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.watch_store.list() {
+        Ok(watches) => Json(watches).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

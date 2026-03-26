@@ -177,6 +177,8 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         episodic_memory_capacity: kernel.episodic_memory_capacity,
         bootstrap_grace_period_ticks: kernel.bootstrap_grace_period_ticks,
         max_decide_turns: kernel.max_decide_turns,
+        watch_store: kernel.watch_store.clone(),
+        max_watches: kernel.max_watches,
     }
 }
 
@@ -263,6 +265,8 @@ async fn setup_with_threads(
         episodic_memory_capacity: None,
         bootstrap_grace_period_ticks: 0,
         max_decide_turns: 5,
+        watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+        max_watches: 20,
     };
 
     (kernel, handler, mock)
@@ -333,6 +337,8 @@ async fn setup_with_threads_custom_backend(
         episodic_memory_capacity: None,
         bootstrap_grace_period_ticks: 0,
         max_decide_turns: 5,
+        watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+        max_watches: 20,
     };
 
     (kernel, handler)

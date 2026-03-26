@@ -68,6 +68,8 @@ impl ExoDaemon {
         let inbox = self.vessel.inbox().clone();
         let vessel_id = self.vessel.vessel_id();
         let event_tx = self.vessel.event_sender().clone();
+        let watch_store = self.vessel.watch_store();
+        let thread_registry = self.vessel.thread_registry().clone();
 
         let cors_origins: Vec<HeaderValue> = self
             .cors_allowed_origins
@@ -89,6 +91,9 @@ impl ExoDaemon {
             cors_origins,
             acknowledged_events: Arc::new(dashmap::DashSet::new()),
             webhook_secrets: std::collections::HashMap::new(),
+            charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
+            watch_store,
+            thread_registry,
         });
 
         let router = routes::build_router(app_state);

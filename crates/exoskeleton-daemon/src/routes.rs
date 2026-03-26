@@ -83,6 +83,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/webhooks/generic",
             post(handlers::post_webhook_generic),
         )
+        // E5-S2: Charter governance + watch primitives
+        .route(
+            "/api/v1/charter/proposals",
+            get(handlers::get_charter_proposals),
+        )
+        .route(
+            "/api/v1/charter/proposals/:id/review",
+            post(handlers::post_review_charter_proposal),
+        )
+        .route("/api/v1/watches", get(handlers::get_watches))
         // Operational endpoints
         .route("/healthz", get(handlers::healthz))
         .route("/ready", get(handlers::readyz))

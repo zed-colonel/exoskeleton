@@ -1,11 +1,13 @@
 //! Built-in cognitive thread definitions.
 //!
-//! Three foundational threads ship with every Exoskeleton vessel:
+//! Four foundational threads ship with every Exoskeleton vessel:
 //! - **Threat Monitor** (Critical, EveryTick): safety and alignment scanning
 //! - **Self-Critique** (High, EveryTick): decision quality evaluation
 //! - **Memory Consolidation** (Normal, EveryNTicks(5)): experience consolidation
+//! - **Meta-Cognition** (Normal, EveryNTicks(10)): cognitive pattern analysis
 
 pub mod memory_consolidation;
+pub mod meta_cognition;
 pub mod self_critique;
 pub mod threat_monitor;
 
@@ -13,6 +15,9 @@ use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::ThreadSchedule;
 use exoskeleton_core::{ExoError, ThreadId};
 pub use memory_consolidation::{MemoryConsolidation, MemoryNote};
+pub use meta_cognition::{
+    CharterProposalDraft, CognitivePattern, MetaCognitionAnalysis, PatternSeverity, WatchSuggestion,
+};
 pub use self_critique::SelfCritique;
 pub use threat_monitor::{Threat, ThreatAssessment, ThreatSeverity};
 use uuid::Uuid;
@@ -37,6 +42,10 @@ pub struct ThreadConfigOverrides {
     pub memory_consolidation_schedule: Option<ThreadSchedule>,
     /// Memory Consolidation token budget override.
     pub memory_consolidation_token_budget: Option<u64>,
+    /// Meta-Cognition schedule override.
+    pub meta_cognition_schedule: Option<ThreadSchedule>,
+    /// Meta-Cognition token budget override.
+    pub meta_cognition_token_budget: Option<u64>,
 }
 
 /// Deterministic UUID for the Threat Monitor thread.
@@ -57,6 +66,11 @@ pub const MEMORY_CONSOLIDATION_ID: ThreadId = ThreadId::from_uuid(Uuid::from_byt
     0xca, 0xe1, 0x00, 0x03, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
 ]));
 
+/// Deterministic UUID for the Meta-Cognition thread.
+pub const META_COGNITION_ID: ThreadId = ThreadId::from_uuid(Uuid::from_bytes([
+    0xca, 0xe1, 0x00, 0x04, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+]));
+
 /// Register all built-in threads if they are not already present.
 ///
 /// Checks each built-in thread by its deterministic ID. If a thread with
@@ -74,6 +88,7 @@ pub fn register_builtin_threads(
         threat_monitor::spec(),
         self_critique::spec(),
         memory_consolidation::spec(),
+        meta_cognition::spec(),
     ];
 
     // Override charters from prompt registry (Epoch 0)
@@ -81,6 +96,7 @@ pub fn register_builtin_threads(
         "charter-threat-monitor",
         "charter-self-critique",
         "charter-memory-consolidation",
+        "charter-meta-cognition",
     ];
     for (spec, key) in builtin_specs.iter_mut().zip(charter_keys.iter()) {
         if let Some(charter) = prompts.get(key) {
@@ -110,6 +126,13 @@ pub fn register_builtin_threads(
         }
         if let Some(budget) = o.memory_consolidation_token_budget {
             builtin_specs[2].token_budget = budget;
+        }
+        // Meta-Cognition (index 3)
+        if let Some(schedule) = o.meta_cognition_schedule {
+            builtin_specs[3].schedule = schedule;
+        }
+        if let Some(budget) = o.meta_cognition_token_budget {
+            builtin_specs[3].token_budget = budget;
         }
     }
 
@@ -154,28 +177,38 @@ mod tests {
             MEMORY_CONSOLIDATION_ID,
             memory_consolidation::spec().thread_id
         );
+        assert_eq!(META_COGNITION_ID, meta_cognition::spec().thread_id);
     }
 
     #[test]
     fn deterministic_ids_are_distinct() {
-        assert_ne!(THREAT_MONITOR_ID, SELF_CRITIQUE_ID);
-        assert_ne!(SELF_CRITIQUE_ID, MEMORY_CONSOLIDATION_ID);
-        assert_ne!(THREAT_MONITOR_ID, MEMORY_CONSOLIDATION_ID);
+        let ids = [
+            THREAT_MONITOR_ID,
+            SELF_CRITIQUE_ID,
+            MEMORY_CONSOLIDATION_ID,
+            META_COGNITION_ID,
+        ];
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j]);
+            }
+        }
     }
 
     #[test]
-    fn register_builtin_threads_creates_all_three() {
+    fn register_builtin_threads_creates_all_four() {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
         register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
         let all = registry.list().unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         let names: Vec<&str> = all.iter().map(|(s, _)| s.name.as_str()).collect();
         assert!(names.contains(&"Threat Monitor"));
         assert!(names.contains(&"Self-Critique"));
         assert!(names.contains(&"Memory Consolidation"));
+        assert!(names.contains(&"Meta-Cognition"));
     }
 
     #[test]
@@ -189,7 +222,7 @@ mod tests {
         let all = registry.list().unwrap();
         assert_eq!(
             all.len(),
-            3,
+            4,
             "should not duplicate threads on re-registration"
         );
     }
@@ -214,7 +247,7 @@ mod tests {
         assert_eq!(status, ThreadStatus::Suspended);
 
         // Total count unchanged.
-        assert_eq!(registry.list().unwrap().len(), 3);
+        assert_eq!(registry.list().unwrap().len(), 4);
     }
 
     // ── DC-T11..DC-T13: Decoherence Fix — Thread Config Overrides ──
@@ -230,6 +263,8 @@ mod tests {
             self_critique_token_budget: Some(3000),
             memory_consolidation_schedule: Some(ThreadSchedule::EveryNTicks(10)),
             memory_consolidation_token_budget: Some(8000),
+            meta_cognition_schedule: None,
+            meta_cognition_token_budget: None,
         };
 
         register_builtin_threads(
@@ -292,7 +327,7 @@ mod tests {
 
         assert_eq!(
             registry.list().unwrap().len(),
-            3,
+            4,
             "should not duplicate threads on re-registration with overrides"
         );
     }

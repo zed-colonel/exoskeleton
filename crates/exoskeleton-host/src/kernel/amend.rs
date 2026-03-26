@@ -623,6 +623,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         };
         (kernel, inbox)
     }
@@ -654,6 +656,7 @@ mod tests {
                 turns: 1,
             },
             response_artifact_id: ArtifactId::from_content(b"test-resp"),
+            watch_proposals: vec![],
         };
         let perception = PerceptionResult {
             new_messages: vec![],

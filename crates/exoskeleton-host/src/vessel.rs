@@ -195,6 +195,8 @@ impl Vessel {
             episodic_memory_capacity: config.episodic_memory_capacity,
             bootstrap_grace_period_ticks: config.bootstrap_grace_period_ticks,
             max_decide_turns: config.max_decide_turns,
+            watch_store: storage.watch_store().clone() as Arc<dyn exoskeleton_core::WatchStore>,
+            max_watches: config.max_watches,
         });
 
         // 7.8 Seed episodic memory for first boot (Decoherence Fix)
@@ -553,6 +555,11 @@ impl Vessel {
     /// Access the thread registry.
     pub fn thread_registry(&self) -> &Arc<ThreadRegistry> {
         &self.thread_registry
+    }
+
+    /// Access the watch store (E5-S2).
+    pub fn watch_store(&self) -> Arc<dyn exoskeleton_core::WatchStore> {
+        self.storage.watch_store().clone() as Arc<dyn exoskeleton_core::WatchStore>
     }
 
     /// Access the budget tracker.

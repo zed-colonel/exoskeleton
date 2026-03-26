@@ -14,9 +14,10 @@ pub mod scheduling;
 pub mod store;
 
 pub use builtin::{
-    register_builtin_threads, MemoryConsolidation, MemoryNote, SelfCritique, ThreadConfigOverrides,
-    Threat, ThreatAssessment, ThreatSeverity, MEMORY_CONSOLIDATION_ID, SELF_CRITIQUE_ID,
-    THREAT_MONITOR_ID,
+    register_builtin_threads, CharterProposalDraft, CognitivePattern, MemoryConsolidation,
+    MemoryNote, MetaCognitionAnalysis, PatternSeverity, SelfCritique, ThreadConfigOverrides,
+    Threat, ThreatAssessment, ThreatSeverity, WatchSuggestion, MEMORY_CONSOLIDATION_ID,
+    META_COGNITION_ID, SELF_CRITIQUE_ID, THREAT_MONITOR_ID,
 };
 pub use context::compile_thread_context;
 pub use registry::ThreadRegistry;

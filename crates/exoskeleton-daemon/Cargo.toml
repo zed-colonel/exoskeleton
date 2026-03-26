@@ -17,6 +17,7 @@ path = "src/bin/export_types.rs"
 exoskeleton-core = { workspace = true }
 exoskeleton-host = { workspace = true }
 exoskeleton-memory = { workspace = true }
+exoskeleton-threads = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }

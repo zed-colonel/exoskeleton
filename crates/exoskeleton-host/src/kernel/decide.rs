@@ -236,6 +236,7 @@ pub fn decide(
         working_memory_ops: None,
         actions: vec![],
         memory_notes: vec![],
+        watch_proposals: vec![],
     };
     build_decision_result(handler, kernel, fallback, llm_records, &all_response_text)
 }
@@ -275,6 +276,7 @@ fn build_decision_result(
         memory_notes: protocol.memory_notes,
         llm_call_record: merged_record,
         response_artifact_id,
+        watch_proposals: protocol.watch_proposals,
     })
 }
 
@@ -503,6 +505,7 @@ fn parse_decide_turn(response_text: &str) -> DecideTurn {
         working_memory_ops: None,
         actions: vec![],
         memory_notes: vec![],
+        watch_proposals: vec![],
     })
 }
 
@@ -558,6 +561,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 
@@ -852,6 +857,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 

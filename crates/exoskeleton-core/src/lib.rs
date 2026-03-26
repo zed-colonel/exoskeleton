@@ -6,6 +6,7 @@
 
 pub mod artifact;
 pub mod budget;
+pub mod charter;
 pub mod conversation;
 pub mod envelope;
 pub mod error;
@@ -21,6 +22,7 @@ pub mod relationship;
 pub mod snapshot;
 pub mod thread;
 pub mod tick;
+pub mod watch;
 pub mod working_memory;
 
 // Re-export all public types for ergonomic imports.
@@ -29,6 +31,7 @@ pub use budget::{
     BudgetDimensionState, BudgetState, BudgetStore, CognitiveBudgetConfig, EscalationPolicy,
     PersistedBudgetState, ThrashAssessment, ThrashLevel, ToolBudgetConfig,
 };
+pub use charter::{CharterProposal, ProposalStatus};
 pub use conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
     ConversationStore, InMemoryConversationStore,
@@ -38,7 +41,7 @@ pub use error::ExoError;
 pub use event::{CapabilityRequestPayload, EventEntry, EventLedger, EventType, LiveEvent};
 pub use id::{
     derive_external_principal_id, sha256_hex, ArtifactId, ArtifactIdError, ConversationId,
-    EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId, TickId, VesselId,
+    EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId, TickId, VesselId, WatchId,
 };
 pub use inbox::Inbox;
 pub use introspection::{IntrospectionQuery, MAX_INTROSPECTION_LIMIT};
@@ -55,6 +58,10 @@ pub use thread::{ThreadOutput, ThreadPriority, ThreadSchedule, ThreadSpec, Threa
 pub use tick::{
     ActionOutcome, ActionRecord, LlmCallRecord, ThreadContribution, TickPhase, TickRecord,
     TickStore,
+};
+pub use watch::{
+    InMemoryWatchStore, MetricKind, WatchCondition, WatchDefinition, WatchProposal, WatchSchedule,
+    WatchStatus, WatchStore, WatchType, DEFAULT_MAX_WATCHES,
 };
 pub use working_memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemoryOp};
 

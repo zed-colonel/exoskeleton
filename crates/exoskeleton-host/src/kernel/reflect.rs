@@ -467,6 +467,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 
@@ -504,6 +506,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 
@@ -542,6 +546,7 @@ mod tests {
                 turns: 1,
             },
             response_artifact_id: exoskeleton_core::ArtifactId::from_content(b"test"),
+            watch_proposals: vec![],
         }
     }
 

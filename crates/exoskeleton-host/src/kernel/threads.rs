@@ -150,6 +150,91 @@ pub fn execute_thread(
     Ok(output)
 }
 
+/// Process Meta-Cognition thread output for charter proposals.
+///
+/// If the output contains charter_proposals, creates CharterProposal artifacts
+/// and EventType::CharterProposal events for each one.
+pub fn process_meta_cognition_output(
+    kernel: &KernelContext,
+    thread_output: &str,
+    tick_id: TickId,
+    tick_number: u64,
+) {
+    let analysis = exoskeleton_threads::builtin::meta_cognition::parse_output(thread_output);
+
+    for draft in &analysis.charter_proposals {
+        let thread = match find_thread_by_name(kernel, &draft.thread_name) {
+            Some(t) => t,
+            None => {
+                tracing::warn!(
+                    thread_name = %draft.thread_name,
+                    "charter proposal for unknown thread — skipping"
+                );
+                continue;
+            }
+        };
+
+        let proposal = exoskeleton_core::CharterProposal {
+            thread_id: thread.thread_id,
+            thread_name: draft.thread_name.clone(),
+            current_charter: draft.current_charter.clone(),
+            proposed_charter: draft.proposed_charter.clone(),
+            rationale: draft.rationale.clone(),
+            detected_patterns: analysis
+                .cognitive_patterns
+                .iter()
+                .map(|p| p.description.clone())
+                .collect(),
+            proposed_at_tick: tick_number,
+            status: exoskeleton_core::ProposalStatus::Pending,
+        };
+
+        let artifact = exoskeleton_core::Artifact::new(
+            exoskeleton_core::ArtifactKind::Event,
+            serde_json::to_vec(&proposal).unwrap_or_default(),
+            "application/json".into(),
+        );
+        let payload_ref = kernel.artifact_store.put(&artifact).ok();
+
+        let event = exoskeleton_core::EventEntry {
+            id: exoskeleton_core::LedgerEntryId::new(),
+            tick_id: Some(tick_id),
+            event_type: exoskeleton_core::EventType::CharterProposal,
+            payload_ref,
+            summary: format!(
+                "Charter proposal for '{}': {}",
+                draft.thread_name,
+                draft.rationale.chars().take(100).collect::<String>()
+            ),
+            timestamp: chrono::Utc::now(),
+        };
+        let _ = kernel.event_ledger.append(&event);
+
+        let _ = kernel.event_tx.send(exoskeleton_core::LiveEvent {
+            event_type: exoskeleton_core::EventType::CharterProposal,
+            tick_number: Some(tick_number),
+            summary: event.summary.clone(),
+            timestamp: event.timestamp,
+            snapshot: None,
+        });
+
+        tracing::info!(
+            thread_name = %draft.thread_name,
+            "charter proposal emitted"
+        );
+    }
+}
+
+fn find_thread_by_name(kernel: &KernelContext, name: &str) -> Option<exoskeleton_core::ThreadSpec> {
+    kernel
+        .thread_registry
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|(spec, _)| spec.name == name)
+        .map(|(spec, _)| spec)
+}
+
 /// Returns `true` if this thread should receive bootstrap preamble during grace period.
 ///
 /// Only Threat Monitor and Self-Critique are bootstrap-sensitive.
@@ -303,6 +388,21 @@ pub fn execute_due_threads(
                     snapshot: None,
                 });
 
+                // Process Meta-Cognition output for charter proposals (E5-S2)
+                if thread.thread_id == exoskeleton_threads::META_COGNITION_ID {
+                    // Retrieve raw response from artifact store
+                    if let Ok(Some(artifact)) = kernel.artifact_store.get(&output.artifact_id) {
+                        if let Ok(raw_text) = std::str::from_utf8(&artifact.content) {
+                            process_meta_cognition_output(
+                                kernel,
+                                raw_text,
+                                tick_id,
+                                snapshot.tick_number + 1,
+                            );
+                        }
+                    }
+                }
+
                 contributions.push(ThreadContribution {
                     thread_id: output.thread_id,
                     artifact_id: output.artifact_id,
@@ -450,6 +550,8 @@ mod tests {
             episodic_memory_capacity: None,
             bootstrap_grace_period_ticks: 0,
             max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
         }
     }
 

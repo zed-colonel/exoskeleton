@@ -11,6 +11,7 @@ pub mod perceive;
 pub mod reflect;
 pub mod threads;
 pub mod types;
+pub mod watches;
 
 use std::sync::Arc;
 
@@ -83,6 +84,10 @@ pub struct KernelContext {
     /// Maximum number of LLM turns in the Decide step (E5-S1). Each turn can
     /// be an introspection query or the final decision. Default: 5.
     pub max_decide_turns: u32,
+    /// Watch store for persistent observation specifications (E5-S2).
+    pub watch_store: Arc<dyn exoskeleton_core::WatchStore>,
+    /// Maximum number of active watches (default: 20).
+    pub max_watches: u32,
 }
 
 /// Run one complete PODAARA tick.
@@ -211,6 +216,15 @@ pub fn run_tick(
         });
     }
 
+    // 7.1 Check watches (E5-S2)
+    let watch_result = watches::check_watches(kernel, tick_number);
+    if !watch_result.triggered_events.is_empty() {
+        tracing::info!(
+            count = watch_result.triggered_events.len(),
+            "watches triggered"
+        );
+    }
+
     // 7.5 Execute due threads (Sprint 6)
     let thread_contributions =
         match threads::execute_due_threads(handler, kernel, &snapshot, tick_id, cancellation) {
@@ -280,6 +294,13 @@ pub fn run_tick(
     // 13. Align
     tracing::info!(tick_number, "Align");
     let alignment = align::align(kernel, &decision, &perception, tick_id);
+
+    // 13.5 Merge poll watch actions (E5-S2) — bypass Align (already approved at watch creation)
+    let alignment = {
+        let mut merged = alignment;
+        merged.approved_actions.extend(watch_result.poll_actions);
+        merged
+    };
 
     // 14. Act
     tracing::info!(tick_number, "Act");

@@ -79,6 +79,10 @@ pub struct DecisionProtocol {
     pub actions: Vec<PlannedAction>,
     #[serde(default)]
     pub memory_notes: Vec<String>,
+    /// Watch proposals — persistent observations the vessel wants to set up.
+    /// Proposed by Decide, approved/blocked by Align (I4).
+    #[serde(default)]
+    pub watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
 }
 
 /// A single action the LLM wants to execute.
@@ -102,6 +106,8 @@ pub struct DecisionResult {
     pub memory_notes: Vec<String>,
     pub llm_call_record: LlmCallRecord,
     pub response_artifact_id: ArtifactId,
+    /// Watch proposals approved by Decide, awaiting Align approval.
+    pub watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
 }
 
 /// Proposed changes to the StateSnapshot from the Decide step.
@@ -277,6 +283,7 @@ mod tests {
             working_memory_ops: None,
             actions: vec![],
             memory_notes: vec![],
+            watch_proposals: vec![],
         };
         let json = serde_json::to_string(&proto).unwrap();
         let parsed: DecisionProtocol = serde_json::from_str(&json).unwrap();
@@ -296,6 +303,7 @@ mod tests {
             working_memory_ops: None,
             actions: vec![],
             memory_notes: vec![],
+            watch_proposals: vec![],
         };
         let value: serde_json::Value = serde_json::to_value(&proto).unwrap();
         let obj = value.as_object().unwrap();

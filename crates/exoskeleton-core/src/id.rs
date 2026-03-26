@@ -88,6 +88,7 @@ define_id!(EnvelopeId, "Identity of a message envelope.");
 define_id!(LedgerEntryId, "Identity of a Relationship Ledger entry.");
 define_id!(PlanTaskId, "Identity of a task within a structured plan.");
 define_id!(ConversationId, "Identity of a conversation grouping.");
+define_id!(WatchId, "Unique identifier for a watch definition");
 
 /// Exoskeleton namespace UUID for deriving external principal IDs.
 ///

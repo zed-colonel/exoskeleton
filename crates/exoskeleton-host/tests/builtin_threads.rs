@@ -38,6 +38,8 @@ const CRITIQUE_RESPONSE: &str = r#"{"summary":"Good progress","recommendations":
 
 const MC_RESPONSE: &str = r#"{"summary":"Consolidated recent ticks","recommendations":[],"episodic_summary":"Ticks covered in this span were productive","long_term_notes":[{"topic":"strategy","content":"Incremental approach is effective","tags":["reliability"]}],"deprecated_notes":[]}"#;
 
+const META_COG_RESPONSE: &str = r#"{"summary":"Vessel performing normally","recommendations":[],"cognitive_patterns":[],"charter_proposals":[],"watch_suggestions":[]}"#;
+
 const DECISION_NO_ACTIONS: &str =
     r#"{"reasoning":"No actions needed","actions":[],"memory_notes":[]}"#;
 
@@ -198,6 +200,8 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         episodic_memory_capacity: kernel.episodic_memory_capacity,
         bootstrap_grace_period_ticks: kernel.bootstrap_grace_period_ticks,
         max_decide_turns: kernel.max_decide_turns,
+        watch_store: kernel.watch_store.clone(),
+        max_watches: kernel.max_watches,
     }
 }
 
@@ -273,6 +277,8 @@ async fn setup_builtin_threads(
         episodic_memory_capacity: None,
         bootstrap_grace_period_ticks: 0,
         max_decide_turns: 5,
+        watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+        max_watches: 20,
     };
 
     (kernel, handler, mock)
@@ -340,6 +346,8 @@ async fn setup_builtin_threads_custom(
         episodic_memory_capacity: None,
         bootstrap_grace_period_ticks: 0,
         max_decide_turns: 5,
+        watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+        max_watches: 20,
     };
 
     (kernel, handler)
@@ -356,7 +364,7 @@ fn builtin_threads_registered_on_setup() {
     register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let all = registry.list().unwrap();
-    assert_eq!(all.len(), 3);
+    assert_eq!(all.len(), 4);
 
     // Verify correct types
     let (tm, tm_status) = registry.get(THREAT_MONITOR_ID).unwrap().unwrap();
@@ -383,7 +391,7 @@ fn builtin_registration_idempotent() {
     register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
     register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
     register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
-    assert_eq!(registry.list().unwrap().len(), 3);
+    assert_eq!(registry.list().unwrap().len(), 4);
 }
 
 #[test]
@@ -406,7 +414,7 @@ fn builtin_registration_preserves_suspended() {
         ThreadStatus::Suspended,
         "should preserve operator's suspension"
     );
-    assert_eq!(registry.list().unwrap().len(), 3);
+    assert_eq!(registry.list().unwrap().len(), 4);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -421,6 +429,7 @@ async fn tick_with_all_builtin_threads() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -447,14 +456,14 @@ async fn tick_with_all_builtin_threads() {
     );
 
     // Verify all 3 threads + decide were called
-    assert_eq!(mock.call_count(), 4, "3 threads + 1 decide = 4 LLM calls");
+    assert_eq!(mock.call_count(), 5, "4 threads + 1 decide = 5 LLM calls");
 
     // Verify thread summaries in snapshot
     let snapshot = kernel.snapshot_store.latest().unwrap().unwrap();
     assert_eq!(
         snapshot.thread_summaries.len(),
-        3,
-        "all 3 built-in threads should appear in summaries"
+        4,
+        "all 4 built-in threads should appear in summaries"
     );
 
     shutdown_host(&kernel).await;
@@ -469,6 +478,7 @@ async fn tick_2_only_everytick_threads_due() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
         // Tick 2
         THREAT_RESPONSE.into(),
@@ -515,8 +525,8 @@ async fn tick_2_only_everytick_threads_due() {
         actionqueue_executor_local::HandlerOutput::Success { .. }
     ));
 
-    // Tick 1: 4 calls, Tick 2: 3 calls = 7 total
-    assert_eq!(mock.call_count(), 7, "tick 1 (4) + tick 2 (3) = 7");
+    // Tick 1: 5 calls (4 threads + decide), Tick 2: 3 calls (2 threads + decide) = 8 total
+    assert_eq!(mock.call_count(), 8, "tick 1 (5) + tick 2 (3) = 8");
 
     shutdown_host(&kernel).await;
 }
@@ -528,6 +538,7 @@ async fn thread_outputs_in_tick_record() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -548,8 +559,8 @@ async fn thread_outputs_in_tick_record() {
     let tick_record = kernel.tick_store.latest().unwrap().unwrap();
     assert_eq!(
         tick_record.thread_contributions.len(),
-        3,
-        "3 thread contributions expected"
+        4,
+        "4 thread contributions expected"
     );
 
     // Verify thread IDs in contributions
@@ -577,6 +588,7 @@ async fn memory_consolidation_writes_to_memory_store() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -615,6 +627,7 @@ async fn memory_consolidation_artifact_stored() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -637,7 +650,7 @@ async fn memory_consolidation_artifact_stored() {
         .list_by_kind(ArtifactKind::ThreadOutput, 10)
         .unwrap();
     assert!(
-        thread_outputs.len() >= 3,
+        thread_outputs.len() >= 4,
         "expected at least 3 ThreadOutput artifacts (one per thread)"
     );
 
@@ -656,6 +669,7 @@ async fn convergence_thread_summaries_in_snapshot() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -673,7 +687,7 @@ async fn convergence_thread_summaries_in_snapshot() {
     .unwrap();
 
     let snapshot = kernel.snapshot_store.latest().unwrap().unwrap();
-    assert_eq!(snapshot.thread_summaries.len(), 3);
+    assert_eq!(snapshot.thread_summaries.len(), 4);
 
     // Verify names
     let names: Vec<&str> = snapshot
@@ -704,6 +718,7 @@ async fn convergence_all_outputs_are_durable_artifacts() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -724,8 +739,8 @@ async fn convergence_all_outputs_are_durable_artifacts() {
     let tick_record = kernel.tick_store.latest().unwrap().unwrap();
     assert_eq!(
         tick_record.thread_contributions.len(),
-        3,
-        "expected 3 thread contributions in tick record"
+        4,
+        "expected 4 thread contributions in tick record"
     );
 
     // ThreadOutput artifacts should exist (one per thread)
@@ -734,7 +749,7 @@ async fn convergence_all_outputs_are_durable_artifacts() {
         .list_by_kind(ArtifactKind::ThreadOutput, 10)
         .unwrap();
     assert!(
-        thread_output_artifacts.len() >= 3,
+        thread_output_artifacts.len() >= 4,
         "expected at least 3 ThreadOutput artifacts, got {}",
         thread_output_artifacts.len()
     );
@@ -745,7 +760,7 @@ async fn convergence_all_outputs_are_durable_artifacts() {
         .list_by_kind(ArtifactKind::LlmResponse, 10)
         .unwrap();
     assert!(
-        llm_responses.len() >= 3,
+        llm_responses.len() >= 4,
         "expected at least 3 LlmResponse artifacts from threads"
     );
 
@@ -762,6 +777,7 @@ async fn convergence_all_work_on_cognitive_aq() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -794,7 +810,7 @@ async fn convergence_all_work_on_cognitive_aq() {
         .iter()
         .filter(|e| e.event_type == EventType::ThreadRan)
         .collect();
-    assert_eq!(thread_events.len(), 3, "3 ThreadRan events expected");
+    assert_eq!(thread_events.len(), 4, "4 ThreadRan events expected");
 
     shutdown_host(&kernel).await;
 }
@@ -810,6 +826,7 @@ async fn replay_tick_record_references_correct_artifacts() {
         THREAT_RESPONSE.into(),
         CRITIQUE_RESPONSE.into(),
         MC_RESPONSE.into(),
+        META_COG_RESPONSE.into(),
         DECISION_NO_ACTIONS.into(),
     ];
     let (kernel, handler, _mock) = setup_builtin_threads(dir.path(), responses).await;
@@ -851,7 +868,7 @@ async fn replay_tick_record_references_correct_artifacts() {
         .list_by_kind(ArtifactKind::ThreadOutput, 10)
         .unwrap();
     assert!(
-        thread_output_artifacts.len() >= 3,
+        thread_output_artifacts.len() >= 4,
         "expected at least 3 ThreadOutput artifacts, got {}",
         thread_output_artifacts.len()
     );
@@ -862,8 +879,8 @@ async fn replay_tick_record_references_correct_artifacts() {
         .list_by_kind(ArtifactKind::LlmResponse, 20)
         .unwrap();
     assert!(
-        llm_artifacts.len() >= 4,
-        "expected at least 4 LlmResponse artifacts (3 threads + 1 decide), got {}",
+        llm_artifacts.len() >= 5,
+        "expected at least 5 LlmResponse artifacts (4 threads + 1 decide), got {}",
         llm_artifacts.len()
     );
 
@@ -891,11 +908,14 @@ fn builtin_threads_due_in_priority_order() {
     register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
     let due = registry.due_threads(1).unwrap();
-    assert_eq!(due.len(), 3);
+    assert_eq!(due.len(), 4);
     // Critical first, then High, then Normal
     assert_eq!(due[0].name, "Threat Monitor");
     assert_eq!(due[1].name, "Self-Critique");
-    assert_eq!(due[2].name, "Memory Consolidation");
+    // Memory Consolidation and Meta-Cognition are both Normal priority
+    let normal_names: Vec<&str> = due[2..].iter().map(|t| t.name.as_str()).collect();
+    assert!(normal_names.contains(&"Memory Consolidation"));
+    assert!(normal_names.contains(&"Meta-Cognition"));
 }
 
 #[test]
@@ -979,9 +999,9 @@ async fn one_thread_failure_doesnt_abort_tick() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_thread_failures_still_completes_tick() {
     let dir = tempfile::tempdir().unwrap();
-    // All 3 threads fail (indices 0, 1, 2), Decide succeeds (index 3)
+    // All 4 threads fail (indices 0, 1, 2, 3), Decide succeeds (index 4)
     let backend = Arc::new(FailOnIndexBackend::new(
-        vec![0, 1, 2],
+        vec![0, 1, 2, 3],
         DECISION_NO_ACTIONS.into(),
     ));
     let (kernel, handler) = setup_builtin_threads_custom(dir.path(), backend).await;
@@ -1008,7 +1028,7 @@ async fn all_thread_failures_still_completes_tick() {
 
     // Verify snapshot still has 3 thread summaries (from registry, not from outputs)
     let snapshot = kernel.snapshot_store.latest().unwrap().unwrap();
-    assert_eq!(snapshot.thread_summaries.len(), 3);
+    assert_eq!(snapshot.thread_summaries.len(), 4);
 
     shutdown_host(&kernel).await;
 }
@@ -1054,8 +1074,8 @@ async fn thread_error_events_logged() {
         .collect();
     assert_eq!(
         thread_ran.len(),
-        2,
-        "2 successful threads should have ThreadRan events"
+        3,
+        "3 successful threads should have ThreadRan events"
     );
 
     shutdown_host(&kernel).await;
