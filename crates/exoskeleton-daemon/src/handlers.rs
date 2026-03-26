@@ -15,12 +15,13 @@ use chrono::Utc;
 use exoskeleton_core::id::derive_external_principal_id;
 use exoskeleton_core::{
     Artifact, ArtifactId, ArtifactKind, ArtifactStore, CapabilityRequestPayload, CharterProposal,
-    ConversationId, EnvelopeId, EnvelopeKind, EventType, ExoError, LedgerEntryId, LlmBackend,
-    MessageEnvelope, PrincipalId, ProposalStatus, TickId,
+    ConversationId, EnvelopeId, EnvelopeKind, EventLedger, EventType, ExoError, LedgerEntryId,
+    LlmBackend, MessageEnvelope, PrincipalId, ProposalStatus, TickId,
 };
 use exoskeleton_host::config::LocalApiFormat;
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
+use worldinterface_core::descriptor::Descriptor;
 
 use crate::state::AppState;
 
@@ -625,10 +626,23 @@ pub struct CapabilityRequestResponse {
     pub timestamp: chrono::DateTime<Utc>,
 }
 
+/// Optional action body for POST /api/v1/events/:id/acknowledge.
+///
+/// Backward-compatible: the endpoint works with no body (pure acknowledgement)
+/// or with an action body to trigger a follow-up operation such as loading a connector.
+#[derive(Debug, Default, Deserialize)]
+pub struct AcknowledgeAction {
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub destructive: bool,
+}
+
 /// POST /api/v1/events/:id/acknowledge -> 200 OK or 404
 pub async fn post_acknowledge_event(
     State(state): State<Arc<AppState>>,
     Path(id_str): Path<String>,
+    body: Option<Json<AcknowledgeAction>>,
 ) -> impl IntoResponse {
     let event_id: LedgerEntryId = match id_str.parse() {
         Ok(id) => id,
@@ -642,21 +656,80 @@ pub async fn post_acknowledge_event(
     };
 
     // Verify the event exists and is a CapabilityRequest
-    match state.inspector.recent_events(1000) {
+    let event_entry = match state.inspector.recent_events(1000) {
         Ok(events) => {
             let found = events
-                .iter()
-                .any(|e| e.id == event_id && e.event_type == EventType::CapabilityRequest);
-            if !found {
-                return StatusCode::NOT_FOUND.into_response();
+                .into_iter()
+                .find(|e| e.id == event_id && e.event_type == EventType::CapabilityRequest);
+            match found {
+                Some(e) => e,
+                None => return StatusCode::NOT_FOUND.into_response(),
             }
         }
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
-    }
+    };
 
     state.acknowledged_events.insert(event_id);
+
+    // Optional follow-up: load connector if action == "load_connector"
+    if let Some(Json(action)) = body {
+        if action.action.as_deref() == Some("load_connector") {
+            // Retrieve the connector name from the capability request payload
+            let connector_name = event_entry
+                .payload_ref
+                .as_ref()
+                .and_then(|ref_id| state.inspector.artifact(ref_id).ok().flatten())
+                .and_then(|artifact| {
+                    serde_json::from_slice::<CapabilityRequestPayload>(&artifact.content).ok()
+                })
+                .map(|p| p.capability);
+
+            if let Some(name) = connector_name {
+                let connectors_dir = match &state.connectors_dir {
+                    Some(dir) => dir.clone(),
+                    None => {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "no connectors directory configured".to_string(),
+                        )
+                            .into_response();
+                    }
+                };
+
+                let manifest_path = connectors_dir.join(format!("{name}.connector.toml"));
+                let wasm_path = connectors_dir.join(format!("{name}.wasm"));
+
+                let guard = state.wi_host_slot.lock().await;
+                let host = match guard.as_ref() {
+                    Some(h) => h,
+                    None => {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "WI host not started".to_string(),
+                        )
+                            .into_response();
+                    }
+                };
+
+                match host.load_connector(&manifest_path, &wasm_path).await {
+                    Ok(descriptor) => {
+                        if action.destructive {
+                            if let Some(align) = &state.align_config {
+                                align.add_destructive_tool(descriptor.name.clone());
+                            }
+                        }
+                        emit_connector_event(&state, EventType::ConnectorLoaded, &descriptor);
+                    }
+                    Err(e) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                    }
+                }
+            }
+        }
+    }
+
     StatusCode::OK.into_response()
 }
 
@@ -1013,6 +1086,188 @@ pub async fn post_review_charter_proposal(
 pub async fn get_watches(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.watch_store.list() {
         Ok(watches) => Json(watches).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── E5-S3: Connector hot-loading endpoints ──
+
+/// Request body for POST /api/v1/connectors/load.
+#[derive(Debug, Deserialize)]
+pub struct LoadConnectorRequest {
+    pub name: String,
+    #[serde(default)]
+    pub destructive: bool,
+}
+
+/// Emit a ConnectorLoaded or ConnectorUnloaded event to the ledger and broadcast channel.
+fn emit_connector_event(state: &AppState, event_type: EventType, descriptor: &Descriptor) {
+    let payload = serde_json::to_vec(descriptor).unwrap_or_default();
+    let artifact = exoskeleton_core::Artifact::new(
+        exoskeleton_core::ArtifactKind::Event,
+        payload,
+        "application/json".into(),
+    );
+    let payload_ref = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .ok();
+    let verb = if event_type == EventType::ConnectorLoaded {
+        "loaded"
+    } else {
+        "unloaded"
+    };
+    let summary = format!("Connector '{}' {verb}", descriptor.name);
+    let event = exoskeleton_core::EventEntry {
+        id: exoskeleton_core::LedgerEntryId::new(),
+        tick_id: None,
+        event_type,
+        payload_ref,
+        summary: summary.clone(),
+        timestamp: chrono::Utc::now(),
+    };
+    let _ = state.inspector.storage().event_ledger().append(&event);
+    let _ = state.event_tx.send(exoskeleton_core::LiveEvent {
+        event_type,
+        tick_number: None,
+        summary,
+        timestamp: event.timestamp,
+        snapshot: None,
+    });
+}
+
+/// Emit a ConnectorUnloaded event for a connector identified only by name.
+fn emit_connector_event_by_name(state: &AppState, event_type: EventType, name: &str) {
+    let summary = format!("Connector '{name}' unloaded");
+    let event = exoskeleton_core::EventEntry {
+        id: exoskeleton_core::LedgerEntryId::new(),
+        tick_id: None,
+        event_type,
+        payload_ref: None,
+        summary: summary.clone(),
+        timestamp: chrono::Utc::now(),
+    };
+    let _ = state.inspector.storage().event_ledger().append(&event);
+    let _ = state.event_tx.send(exoskeleton_core::LiveEvent {
+        event_type,
+        tick_number: None,
+        summary,
+        timestamp: event.timestamp,
+        snapshot: None,
+    });
+}
+
+/// GET /api/v1/connectors -> list all registered connector descriptors.
+pub async fn get_connectors(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let guard = state.wi_host_slot.lock().await;
+    match guard.as_ref() {
+        Some(host) => Json(host.list_capabilities()).into_response(),
+        None => Json(Vec::<Descriptor>::new()).into_response(),
+    }
+}
+
+/// POST /api/v1/connectors/load -> hot-load a WASM connector by name.
+pub async fn post_load_connector(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoadConnectorRequest>,
+) -> impl IntoResponse {
+    let connectors_dir = match &state.connectors_dir {
+        Some(dir) => dir.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no connectors directory configured".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let manifest_path = connectors_dir.join(format!("{}.connector.toml", req.name));
+    let wasm_path = connectors_dir.join(format!("{}.wasm", req.name));
+
+    let guard = state.wi_host_slot.lock().await;
+    let host = match guard.as_ref() {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WI host not started".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    match host.load_connector(&manifest_path, &wasm_path).await {
+        Ok(descriptor) => {
+            // Optionally classify as destructive
+            if req.destructive {
+                if let Some(align) = &state.align_config {
+                    align.add_destructive_tool(descriptor.name.clone());
+                }
+            }
+            emit_connector_event(&state, EventType::ConnectorLoaded, &descriptor);
+            (StatusCode::CREATED, Json(descriptor)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// DELETE /api/v1/connectors/:name -> unload a connector by name.
+pub async fn delete_connector(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let guard = state.wi_host_slot.lock().await;
+    let host = match guard.as_ref() {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WI host not started".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    match host.unload_connector(&name) {
+        Ok(()) => {
+            emit_connector_event_by_name(&state, EventType::ConnectorUnloaded, &name);
+            StatusCode::OK.into_response()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("unknown") {
+                StatusCode::NOT_FOUND.into_response()
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+            }
+        }
+    }
+}
+
+/// POST /api/v1/connectors/rescan -> rescan connectors directory and hot-load new modules.
+pub async fn post_rescan_connectors(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let guard = state.wi_host_slot.lock().await;
+    let host = match guard.as_ref() {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WI host not started".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    match host.rescan_connectors().await {
+        Ok(descriptors) => {
+            for desc in &descriptors {
+                emit_connector_event(&state, EventType::ConnectorLoaded, desc);
+            }
+            Json(descriptors).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

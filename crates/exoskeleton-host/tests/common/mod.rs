@@ -47,6 +47,7 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         sandbox: exoskeleton_host::config::SandboxConfig::default(),
         observatory_url: None,
         observatory_token_env: None,
+        extra_destructive_tools: vec![],
     }
 }
 

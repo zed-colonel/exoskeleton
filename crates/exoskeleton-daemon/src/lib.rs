@@ -70,6 +70,7 @@ impl ExoDaemon {
         let event_tx = self.vessel.event_sender().clone();
         let watch_store = self.vessel.watch_store();
         let thread_registry = self.vessel.thread_registry().clone();
+        let wi_host_slot = self.vessel.wi_host_slot().clone();
 
         let cors_origins: Vec<HeaderValue> = self
             .cors_allowed_origins
@@ -94,6 +95,9 @@ impl ExoDaemon {
             charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
             watch_store,
             thread_registry,
+            wi_host_slot,
+            connectors_dir: None,
+            align_config: None,
         });
 
         let router = routes::build_router(app_state);

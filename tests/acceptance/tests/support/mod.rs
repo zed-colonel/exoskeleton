@@ -53,6 +53,7 @@ pub fn test_config(dir: &Path) -> VesselConfig {
         observatory_token_env: None,
         max_decide_turns: 5,
         max_watches: 20,
+        extra_destructive_tools: vec![],
     }
 }
 

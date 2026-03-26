@@ -33,6 +33,8 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
     let watch_store = vessel.watch_store();
     let thread_registry = vessel.thread_registry().clone();
 
+    let wi_host_slot = vessel.wi_host_slot().clone();
+
     Arc::new(AppState {
         inspector,
         metrics,
@@ -45,6 +47,9 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
         charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
         watch_store,
         thread_registry,
+        wi_host_slot,
+        connectors_dir: None,
+        align_config: None,
     })
 }
 
@@ -225,6 +230,9 @@ async fn metrics_endpoint_has_live_data() {
         charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
         watch_store: vessel.watch_store(),
         thread_registry: vessel.thread_registry().clone(),
+        wi_host_slot: vessel.wi_host_slot().clone(),
+        connectors_dir: None,
+        align_config: None,
     });
     let app = build_router(state);
 

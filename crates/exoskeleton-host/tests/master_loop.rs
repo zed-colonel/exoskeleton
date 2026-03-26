@@ -116,7 +116,7 @@ async fn setup_kernel_with_host(
     );
 
     // Boot WI Host for Act step
-    let mut registry = ConnectorRegistry::new();
+    let registry = ConnectorRegistry::new();
     registry.register(Arc::new(DelayConnector));
     std::fs::create_dir_all(dir.join("wi").join("aq")).unwrap();
     let host_config = HostConfig {

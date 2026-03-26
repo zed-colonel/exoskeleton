@@ -61,6 +61,9 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
         charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
         watch_store: Arc::new(InMemoryWatchStore::new()),
         thread_registry,
+        wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
+        connectors_dir: None,
+        align_config: None,
     })
 }
 
@@ -101,6 +104,9 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
         charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
         watch_store: Arc::new(InMemoryWatchStore::new()),
         thread_registry,
+        wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
+        connectors_dir: None,
+        align_config: None,
     })
 }
 
@@ -1414,6 +1420,9 @@ async fn generic_webhook_hmac_valid() {
         charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
         watch_store: Arc::new(InMemoryWatchStore::new()),
         thread_registry,
+        wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
+        connectors_dir: None,
+        align_config: None,
     });
 
     let app = build_router(state);
@@ -1474,6 +1483,9 @@ async fn generic_webhook_hmac_invalid() {
         charter_proposal_statuses: Arc::new(dashmap::DashMap::new()),
         watch_store: Arc::new(InMemoryWatchStore::new()),
         thread_registry,
+        wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
+        connectors_dir: None,
+        align_config: None,
     });
 
     let app = build_router(state);
@@ -1557,4 +1569,288 @@ async fn generic_webhook_missing_source() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Sprint E5-S3: Connector Hot-Loading Endpoint Tests
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── E5S3-T10: daemon_load_connector_endpoint ──
+#[tokio::test]
+async fn daemon_load_connector_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    // WI host slot is None, so this should return 503 (Service Unavailable)
+    let body = serde_json::json!({"name": "test.connector"});
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/connectors/load")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body_string(resp.into_body()).await;
+    assert!(
+        text.contains("WI host not started") || text.contains("connectors directory"),
+        "expected WI host or connectors_dir error, got: {text}"
+    );
+}
+
+// ── E5S3-T11: daemon_unload_connector_endpoint ──
+#[tokio::test]
+async fn daemon_unload_connector_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    // WI host slot is None, so DELETE should return 503
+    let resp = app
+        .oneshot(
+            Request::delete("/api/v1/connectors/nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ── E5S3-T12: daemon_list_connectors_endpoint ──
+#[tokio::test]
+async fn daemon_list_connectors_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    // With no WI host, should return an empty JSON array
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/connectors")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let json: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.is_empty(),
+        "expected empty array when no WI host, got: {json:?}"
+    );
+}
+
+// ── E5S3-T13: daemon_rescan_endpoint ──
+#[tokio::test]
+async fn daemon_rescan_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+    let app = build_router(state);
+
+    // WI host slot is None, so rescan should return 503
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/connectors/rescan")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ── E5S3-T14: capability_approval_triggers_load ──
+#[tokio::test]
+async fn capability_approval_triggers_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Create a CapabilityRequest event with payload containing a capability name
+    let payload = CapabilityRequestPayload {
+        capability: "test.connector".into(),
+        reason: "need access".into(),
+        context: "integration test".into(),
+        acknowledged: false,
+    };
+    let payload_json = serde_json::to_vec(&payload).unwrap();
+    let artifact = exoskeleton_core::Artifact::new(
+        exoskeleton_core::ArtifactKind::Event,
+        payload_json,
+        "application/json".into(),
+    );
+    let artifact_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .unwrap();
+
+    let event_id = LedgerEntryId::new();
+    let event = EventEntry {
+        id: event_id,
+        tick_id: None,
+        event_type: EventType::CapabilityRequest,
+        payload_ref: Some(artifact_id),
+        summary: "cap request test.connector".into(),
+        timestamp: chrono::Utc::now(),
+    };
+    state
+        .inspector
+        .storage()
+        .event_ledger()
+        .append(&event)
+        .unwrap();
+
+    let app = build_router(state.clone());
+    let action_body = serde_json::json!({"action": "load_connector"});
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/v1/events/{event_id}/acknowledge"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&action_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // No connectors_dir configured, so it should fail with 503
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // But the event should still have been acknowledged
+    assert!(state.acknowledged_events.contains(&event_id));
+}
+
+// ── E5S3-T15: connector_loaded_event_emitted ──
+#[tokio::test]
+async fn connector_loaded_event_emitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Subscribe to broadcast channel before emitting
+    let mut rx = state.event_tx.subscribe();
+
+    // Simulate a ConnectorLoaded event by replicating what emit_connector_event does:
+    // write to event ledger + broadcast
+    let descriptor = worldinterface_core::descriptor::Descriptor {
+        name: "test.loaded".into(),
+        display_name: "Test Loaded".into(),
+        description: "A test connector".into(),
+        category: worldinterface_core::descriptor::ConnectorCategory::Custom("test".into()),
+        input_schema: None,
+        output_schema: None,
+        idempotent: true,
+        side_effects: false,
+    };
+    let payload = serde_json::to_vec(&descriptor).unwrap();
+    let artifact = exoskeleton_core::Artifact::new(
+        exoskeleton_core::ArtifactKind::Event,
+        payload,
+        "application/json".into(),
+    );
+    let payload_ref = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&artifact)
+        .ok();
+    let event = EventEntry {
+        id: LedgerEntryId::new(),
+        tick_id: None,
+        event_type: EventType::ConnectorLoaded,
+        payload_ref,
+        summary: "Connector 'test.loaded' loaded".into(),
+        timestamp: chrono::Utc::now(),
+    };
+    state
+        .inspector
+        .storage()
+        .event_ledger()
+        .append(&event)
+        .unwrap();
+
+    let live_event = exoskeleton_core::LiveEvent {
+        event_type: EventType::ConnectorLoaded,
+        tick_number: None,
+        summary: "Connector 'test.loaded' loaded".into(),
+        timestamp: event.timestamp,
+        snapshot: None,
+    };
+    let _ = state.event_tx.send(live_event);
+
+    // Verify the event is in the ledger
+    let events = state.inspector.recent_events(10).unwrap();
+    let loaded_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == EventType::ConnectorLoaded)
+        .collect();
+    assert_eq!(loaded_events.len(), 1);
+    assert!(loaded_events[0].summary.contains("test.loaded"));
+
+    // Verify the broadcast was received
+    let received = rx.try_recv().unwrap();
+    assert_eq!(received.event_type, EventType::ConnectorLoaded);
+    assert!(received.summary.contains("test.loaded"));
+}
+
+// ── E5S3-T16: decide_sees_new_connector ──
+#[tokio::test]
+async fn decide_sees_new_connector() {
+    use worldinterface_connector::registry::RegistryError;
+    use worldinterface_connector::traits::Connector;
+    use worldinterface_connector::ConnectorRegistry;
+    use worldinterface_core::descriptor::{ConnectorCategory, Descriptor};
+
+    struct StubConnector {
+        name: String,
+    }
+    impl Connector for StubConnector {
+        fn describe(&self) -> Descriptor {
+            Descriptor {
+                name: self.name.clone(),
+                display_name: self.name.clone(),
+                description: "stub".into(),
+                category: ConnectorCategory::Custom("test".into()),
+                input_schema: None,
+                output_schema: None,
+                idempotent: true,
+                side_effects: false,
+            }
+        }
+        fn invoke(
+            &self,
+            _ctx: &worldinterface_connector::InvocationContext,
+            _params: &serde_json::Value,
+        ) -> Result<serde_json::Value, worldinterface_connector::ConnectorError> {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    let registry = ConnectorRegistry::new();
+    assert!(registry.list_capabilities().is_empty());
+
+    // Register via register_runtime (the hot-load path)
+    let connector = Arc::new(StubConnector {
+        name: "hot.loaded".into(),
+    });
+    registry.register_runtime(connector).unwrap();
+
+    // Verify it appears in list_capabilities
+    let caps = registry.list_capabilities();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].name, "hot.loaded");
+
+    // Duplicate should fail
+    let dup = Arc::new(StubConnector {
+        name: "hot.loaded".into(),
+    });
+    let err = registry.register_runtime(dup).unwrap_err();
+    assert!(matches!(err, RegistryError::DuplicateConnector(_)));
 }

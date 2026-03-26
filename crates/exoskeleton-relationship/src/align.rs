@@ -4,16 +4,16 @@
 //! on the Cognitive AQ (I9). Blocked actions never reach the Tool AQ.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use exoskeleton_core::{
     ArtifactId, LedgerEntryId, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
     TickId,
 };
-use serde::{Deserialize, Serialize};
 
 /// Configuration for the Align step's relationship checks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct AlignConfig {
     /// Minimum trust level to approve any action (default: 0.3).
     pub min_trust_for_action: f64,
@@ -21,19 +21,37 @@ pub struct AlignConfig {
     pub min_trust_for_destructive: f64,
     /// Tool names considered "destructive" (e.g., "fs.write", "http.request").
     pub destructive_tools: Vec<String>,
+    /// Dynamically added destructive tools (hot-loaded connectors classified by operator).
+    /// Interior mutable — can be updated at runtime without &mut self.
+    dynamic_destructive_tools: Mutex<Vec<String>>,
     /// Whether to block actions affecting principals with broken commitments.
     pub block_on_broken_commitments: bool,
     /// Trust threshold for outbound vessel-to-vessel messaging.
-    /// Actions matching `vessel_messaging_tools` require this trust level.
-    /// Default: 0.6. Not yet enforced in `check_alignment()` — vessel messaging
-    /// currently uses `http.request` which is gated via `destructive_tools` at the
-    /// same threshold. Will be wired into check_alignment() when a dedicated
-    /// `peer.send` connector is added.
     pub min_trust_for_vessel_messaging: f64,
     /// Tool names classified as vessel messaging (use vessel messaging trust threshold).
-    /// Default: empty (vessel messaging currently uses http.request which is in destructive_tools).
-    /// Not yet enforced — see `min_trust_for_vessel_messaging` doc.
     pub vessel_messaging_tools: Vec<String>,
+}
+
+impl AlignConfig {
+    /// Add a tool to the dynamic destructive list at runtime.
+    pub fn add_destructive_tool(&self, name: String) {
+        let mut tools = self.dynamic_destructive_tools.lock().unwrap();
+        if !tools.contains(&name) {
+            tools.push(name);
+        }
+    }
+
+    /// Check whether a tool is classified as destructive
+    /// (either in the static defaults or dynamically added).
+    pub fn is_destructive(&self, tool_name: &str) -> bool {
+        self.destructive_tools.iter().any(|t| t == tool_name)
+            || self
+                .dynamic_destructive_tools
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t == tool_name)
+    }
 }
 
 impl Default for AlignConfig {
@@ -50,6 +68,7 @@ impl Default for AlignConfig {
                 "web.search".into(),
                 "discord".into(),
             ],
+            dynamic_destructive_tools: Mutex::new(Vec::new()),
             block_on_broken_commitments: false,
             min_trust_for_vessel_messaging: 0.6,
             vessel_messaging_tools: vec![],
@@ -121,7 +140,7 @@ pub fn check_alignment(
             .any(|p| p.trust_level < config.min_trust_for_action);
 
     for (i, action) in actions.iter().enumerate() {
-        let is_destructive = config.destructive_tools.contains(&action.tool_name);
+        let is_destructive = config.is_destructive(&action.tool_name);
         let threshold = if is_destructive {
             config.min_trust_for_destructive
         } else {
@@ -497,19 +516,64 @@ mod tests {
         assert!(blocked[0].1.contains("destructive"));
     }
 
-    // ── E4S1-T9: AlignConfig serde roundtrip with new fields ──
+    // ── E5S3-T17: align_config_dynamic_destructive ──
 
     #[test]
-    fn align_config_serde_roundtrip_with_new_fields() {
-        let config = AlignConfig {
-            min_trust_for_vessel_messaging: 0.7,
-            vessel_messaging_tools: vec!["peer.send".into()],
-            ..AlignConfig::default()
+    fn align_config_dynamic_destructive() {
+        let config = AlignConfig::default();
+
+        // "custom.tool" is not in the static defaults
+        assert!(!config.is_destructive("custom.tool"));
+
+        // Static defaults work
+        assert!(config.is_destructive("fs.write"));
+        assert!(config.is_destructive("shell.exec"));
+
+        // Add dynamically
+        config.add_destructive_tool("custom.tool".into());
+        assert!(config.is_destructive("custom.tool"));
+
+        // Duplicate add is a no-op (no panic)
+        config.add_destructive_tool("custom.tool".into());
+
+        // Still see static defaults
+        assert!(config.is_destructive("fs.write"));
+    }
+
+    // ── E5S3-T17b: dynamic_destructive_gates_action ──
+
+    #[test]
+    fn dynamic_destructive_gates_action() {
+        let config = AlignConfig::default();
+        let tick_id = TickId::new();
+
+        // Low trust principal
+        let snapshot = RelationshipSnapshot {
+            principals: vec![PrincipalSummary {
+                principal_id: PrincipalId::new(),
+                display_name: "test".into(),
+                role: "peer-agent".into(),
+                trust_level: 0.4,
+                active_commitments: 0,
+                last_interaction: None,
+                notes: None,
+            }],
+            compiled_at: chrono::Utc::now(),
         };
-        let json = serde_json::to_string(&config).unwrap();
-        let roundtripped: AlignConfig = serde_json::from_str(&json).unwrap();
-        assert!((roundtripped.min_trust_for_vessel_messaging - 0.7).abs() < f64::EPSILON,);
-        assert_eq!(roundtripped.vessel_messaging_tools, vec!["peer.send"]);
-        assert_eq!(roundtripped.destructive_tools, config.destructive_tools);
+
+        // "custom.tool" is not destructive by default, so action passes at 0.4 trust
+        let actions = vec![test_action("custom.tool")];
+        let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
+        assert_eq!(approved.len(), 1);
+        assert!(blocked.is_empty());
+
+        // Add "custom.tool" as destructive
+        config.add_destructive_tool("custom.tool".into());
+
+        // Now it requires 0.6 trust, so 0.4 should block
+        let (approved, blocked, _) = check_alignment(&actions, &snapshot, &config, tick_id);
+        assert!(approved.is_empty());
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].1.contains("destructive"));
     }
 }

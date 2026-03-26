@@ -110,7 +110,7 @@ impl Vessel {
     /// without requiring a real LLM endpoint.
     pub async fn start_with_registry_and_backends(
         config: VesselConfig,
-        mut registry: ConnectorRegistry,
+        registry: ConnectorRegistry,
         local_backend: Option<Arc<dyn crate::llm::http::LlmHttpBackend>>,
         frontier_backend: Option<Arc<dyn crate::llm::http::LlmHttpBackend>>,
     ) -> Result<Self, ExoError> {
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn peer_resolve_registered_when_observatory_url_set() {
-        let mut registry = default_registry();
+        let registry = default_registry();
         assert_eq!(registry.len(), 6);
 
         // Simulate the conditional registration from start_with_registry_and_backends

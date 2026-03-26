@@ -87,6 +87,11 @@ pub enum EventType {
     /// A Meta-Cognition thread proposed a charter modification.
     /// Payload artifact contains the CharterProposal with current/proposed text.
     CharterProposal,
+    /// A connector was hot-loaded into the registry at runtime.
+    /// Payload artifact contains the connector Descriptor.
+    ConnectorLoaded,
+    /// A connector was unloaded from the registry at runtime.
+    ConnectorUnloaded,
     /// An error occurred.
     Error,
 }
@@ -181,6 +186,8 @@ mod tests {
             EventType::CapabilityRequest,
             EventType::WatchTriggered,
             EventType::CharterProposal,
+            EventType::ConnectorLoaded,
+            EventType::ConnectorUnloaded,
             EventType::Error,
         ];
         for event_type in &variants {

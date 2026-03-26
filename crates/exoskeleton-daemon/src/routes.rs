@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{header, Method};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 
@@ -93,6 +93,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(handlers::post_review_charter_proposal),
         )
         .route("/api/v1/watches", get(handlers::get_watches))
+        // E5-S3: Connector hot-loading endpoints
+        .route("/api/v1/connectors", get(handlers::get_connectors))
+        .route(
+            "/api/v1/connectors/load",
+            post(handlers::post_load_connector),
+        )
+        .route(
+            "/api/v1/connectors/rescan",
+            post(handlers::post_rescan_connectors),
+        )
+        .route(
+            "/api/v1/connectors/:name",
+            delete(handlers::delete_connector),
+        )
         // Operational endpoints
         .route("/healthz", get(handlers::healthz))
         .route("/ready", get(handlers::readyz))

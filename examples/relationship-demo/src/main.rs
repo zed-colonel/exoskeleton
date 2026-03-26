@@ -60,12 +60,13 @@ fn demo_config(dir: &Path) -> VesselConfig {
         observatory_token_env: None,
         max_decide_turns: 5,
         max_watches: 20,
+        extra_destructive_tools: vec![],
     }
 }
 
 /// Build a ConnectorRegistry WITHOUT the HTTP connector (avoids runtime conflict).
 fn demo_registry() -> ConnectorRegistry {
-    let mut registry = ConnectorRegistry::new();
+    let registry = ConnectorRegistry::new();
     registry.register(Arc::new(DelayConnector));
     registry.register(Arc::new(FsReadConnector));
     registry.register(Arc::new(FsWriteConnector));

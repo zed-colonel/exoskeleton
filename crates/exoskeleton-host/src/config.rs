@@ -243,6 +243,9 @@ pub struct VesselConfig {
     pub max_decide_turns: u32,
     /// Maximum number of active watches per vessel. Default: 20.
     pub max_watches: u32,
+    /// Additional tools classified as destructive beyond the AlignConfig defaults.
+    /// Loaded from [connectors.destructive] in vessel.toml.
+    pub extra_destructive_tools: Vec<String>,
 }
 
 impl Default for VesselConfig {
@@ -274,6 +277,7 @@ impl Default for VesselConfig {
             observatory_token_env: None,
             max_decide_turns: 5,
             max_watches: exoskeleton_core::watch::DEFAULT_MAX_WATCHES,
+            extra_destructive_tools: vec![],
         }
     }
 }
@@ -409,6 +413,13 @@ impl VesselConfig {
                 })
             },
             sandbox: Some(self.sandbox.clone()),
+            connectors: if self.extra_destructive_tools.is_empty() {
+                None
+            } else {
+                Some(ConnectorsSection {
+                    destructive: self.extra_destructive_tools.clone(),
+                })
+            },
         };
 
         let toml_str = toml::to_string_pretty(&config_file)
@@ -546,6 +557,11 @@ impl VesselConfig {
                 .as_deref()
                 .and_then(parse_thread_schedule),
             meta_cognition_token_budget: ts.meta_cognition_token_budget,
+            creative_synthesis_schedule: ts
+                .creative_synthesis_schedule
+                .as_deref()
+                .and_then(parse_thread_schedule),
+            creative_synthesis_token_budget: ts.creative_synthesis_token_budget,
         })
     }
 }
@@ -610,6 +626,9 @@ pub struct VesselConfigFile {
     /// `[sandbox]` section — sandbox execution config.
     #[serde(default)]
     pub sandbox: Option<SandboxConfig>,
+    /// `[connectors]` section — runtime connector configuration.
+    #[serde(default)]
+    pub connectors: Option<ConnectorsSection>,
 }
 
 /// The `[daemon]` section of the TOML config file.
@@ -751,6 +770,12 @@ pub struct ThreadsSection {
     /// Meta-Cognition token budget override. Default: 8192.
     #[serde(default)]
     pub meta_cognition_token_budget: Option<u64>,
+    /// Creative Synthesis schedule override. Default: "every_15".
+    #[serde(default)]
+    pub creative_synthesis_schedule: Option<String>,
+    /// Creative Synthesis token budget override. Default: 8192.
+    #[serde(default)]
+    pub creative_synthesis_token_budget: Option<u64>,
 }
 
 /// Configuration for a source code repository to mount in the vessel container.
@@ -838,6 +863,14 @@ impl Default for SandboxConfig {
     }
 }
 
+/// The `[connectors]` section of the TOML config file.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConnectorsSection {
+    /// Additional tool names classified as destructive beyond AlignConfig defaults.
+    #[serde(default)]
+    pub destructive: Vec<String>,
+}
+
 /// Parse a thread schedule string into a `ThreadSchedule`.
 ///
 /// Accepts: "every_tick", "on_demand", "every_N" (e.g., "every_5").
@@ -919,6 +952,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             observatory_token_env: file.vessel.observatory_token_env,
             max_decide_turns: file.vessel.max_decide_turns.max(1),
             max_watches: file.vessel.max_watches.min(100),
+            extra_destructive_tools: file.connectors.map(|c| c.destructive).unwrap_or_default(),
         })
     }
 }

@@ -216,7 +216,7 @@ async fn setup_with_threads(
     );
 
     // WI Host
-    let mut registry = ConnectorRegistry::new();
+    let registry = ConnectorRegistry::new();
     registry.register(Arc::new(DelayConnector));
     let host_config = HostConfig {
         aq_data_dir: dir.join("wi").join("aq"),
@@ -290,7 +290,7 @@ async fn setup_with_threads_custom_backend(
         artifact_store.clone(),
     );
 
-    let mut registry = ConnectorRegistry::new();
+    let registry = ConnectorRegistry::new();
     registry.register(Arc::new(DelayConnector));
     let host_config = HostConfig {
         aq_data_dir: dir.join("wi").join("aq"),

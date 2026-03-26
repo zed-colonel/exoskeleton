@@ -1,6 +1,7 @@
 //! Shared application state for the HTTP daemon.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
@@ -8,7 +9,9 @@ use dashmap::{DashMap, DashSet};
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{LedgerEntryId, LiveEvent, ProposalStatus, VesselId, WatchStore};
 use exoskeleton_host::inspect::VesselInspector;
+use exoskeleton_host::kernel::WiHostSlot;
 use exoskeleton_host::metrics::ExoMetrics;
+use exoskeleton_relationship::AlignConfig;
 use exoskeleton_threads::ThreadRegistry;
 
 /// Shared state available to all HTTP handlers via axum's `State` extractor.
@@ -38,4 +41,10 @@ pub struct AppState {
     pub watch_store: Arc<dyn WatchStore>,
     /// Thread registry for applying approved charter proposals.
     pub thread_registry: Arc<ThreadRegistry>,
+    /// WI host slot for connector hot-loading (shared with KernelContext).
+    pub wi_host_slot: WiHostSlot,
+    /// Connectors directory path (for resolving load requests by name).
+    pub connectors_dir: Option<PathBuf>,
+    /// AlignConfig for dynamic destructive tool classification.
+    pub align_config: Option<Arc<AlignConfig>>,
 }

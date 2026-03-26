@@ -970,6 +970,8 @@ dependencies = [
  "tracing",
  "ts-rs",
  "uuid",
+ "worldinterface-connector",
+ "worldinterface-core",
 ]
 
 [[package]]

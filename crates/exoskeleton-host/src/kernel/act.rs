@@ -292,7 +292,7 @@ mod tests {
         let storage = StorageManager::open(dir).unwrap();
 
         // Boot a real WI Host with the delay connector
-        let mut registry = ConnectorRegistry::new();
+        let registry = ConnectorRegistry::new();
         registry.register(Arc::new(DelayConnector));
         let host_config = HostConfig {
             aq_data_dir: dir.join("wi").join("aq"),
