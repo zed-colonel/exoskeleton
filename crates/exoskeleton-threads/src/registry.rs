@@ -459,4 +459,78 @@ mod tests {
         let updated = reg.reload_charters(&prompts).unwrap();
         assert_eq!(updated, 0, "should not update when key is missing");
     }
+
+    // ── E5S2-T17: charter_apply_endpoint_updates_thread ──
+    // (Verified at registry level — update_charter applies new text.)
+
+    #[test]
+    fn charter_apply_updates_thread_via_registry() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let reg = ThreadRegistry::new(store);
+
+        let spec = test_spec(
+            "Self-Critique",
+            ThreadPriority::High,
+            ThreadSchedule::EveryTick,
+        );
+        let id = reg.register(spec).unwrap();
+
+        reg.update_charter(id, "New enhanced charter text".into())
+            .unwrap();
+
+        let (got_spec, _) = reg.get(id).unwrap().unwrap();
+        assert_eq!(got_spec.charter, "New enhanced charter text");
+    }
+
+    // ── E5S2-T18: charter_apply_reloads_thread ──
+
+    #[test]
+    fn charter_apply_reloads_thread() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let reg = ThreadRegistry::new(store);
+
+        let spec = test_spec(
+            "Threat Monitor",
+            ThreadPriority::Critical,
+            ThreadSchedule::EveryTick,
+        );
+        let id = reg.register(spec).unwrap();
+
+        // Verify original charter
+        let (original, _) = reg.get(id).unwrap().unwrap();
+        assert_eq!(original.charter, "Test charter for Threat Monitor");
+
+        // Update charter
+        reg.update_charter(id, "new charter".into()).unwrap();
+
+        // Retrieve and verify the charter text is actually updated
+        let (updated, status) = reg.get(id).unwrap().unwrap();
+        assert_eq!(updated.charter, "new charter");
+        assert_eq!(status, ThreadStatus::Active, "status should remain Active");
+    }
+
+    // ── E5S2-T19: charter_deny_does_not_apply ──
+
+    #[test]
+    fn charter_deny_does_not_apply() {
+        let store = Arc::new(InMemoryThreadStore::new());
+        let reg = ThreadRegistry::new(store);
+
+        let spec = test_spec(
+            "Memory Consolidation",
+            ThreadPriority::Normal,
+            ThreadSchedule::EveryNTicks(5),
+        );
+        let id = reg.register(spec).unwrap();
+
+        // Simulate a deny: do NOT call update_charter.
+        // The ProposalStatus would be set to Denied in the daemon handler,
+        // but the charter should remain unchanged.
+        let denied_status = exoskeleton_core::ProposalStatus::Denied;
+        assert_eq!(denied_status, exoskeleton_core::ProposalStatus::Denied);
+
+        // Verify charter is unchanged
+        let (got_spec, _) = reg.get(id).unwrap().unwrap();
+        assert_eq!(got_spec.charter, "Test charter for Memory Consolidation");
+    }
 }

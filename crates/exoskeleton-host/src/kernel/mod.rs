@@ -293,7 +293,7 @@ pub fn run_tick(
 
     // 13. Align
     tracing::info!(tick_number, "Align");
-    let alignment = align::align(kernel, &decision, &perception, tick_id);
+    let alignment = align::align(kernel, &decision, &perception, tick_id, tick_number);
 
     // 13.5 Merge poll watch actions (E5-S2) — bypass Align (already approved at watch creation)
     let alignment = {

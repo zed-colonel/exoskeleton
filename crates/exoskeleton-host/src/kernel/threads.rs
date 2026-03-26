@@ -989,4 +989,69 @@ mod tests {
         assert_eq!(contributions[0].thread_id, t_critical.thread_id);
         assert_eq!(contributions[1].thread_id, t_normal.thread_id);
     }
+
+    // ── E5S2-T15: meta_cognition_proposes_charter ──
+
+    #[test]
+    fn meta_cognition_proposes_charter() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+
+        // Register a thread that the charter proposal will target
+        let thread = test_thread("Self-Critique");
+        kernel.thread_registry.register(thread.clone()).unwrap();
+
+        let tick_id = TickId::new();
+        let tick_number = 10;
+
+        // Build Meta-Cognition output JSON with a charter proposal
+        let mc_output = serde_json::json!({
+            "summary": "Detected declining decision quality",
+            "recommendations": ["Improve self-critique focus"],
+            "cognitive_patterns": [
+                {
+                    "pattern_type": "over_reasoning",
+                    "description": "Excessive deliberation without action",
+                    "severity": "medium",
+                    "evidence": ["Tick 8: 3 reasoning loops before acting"]
+                }
+            ],
+            "charter_proposals": [
+                {
+                    "thread_name": "Self-Critique",
+                    "current_charter": "Monitor for threats",
+                    "proposed_charter": "Enhanced self-critique charter",
+                    "rationale": "Decision quality has been declining"
+                }
+            ],
+            "watch_suggestions": []
+        });
+
+        process_meta_cognition_output(&kernel, &mc_output.to_string(), tick_id, tick_number);
+
+        // Verify CharterProposal event was appended to the event ledger
+        let events = kernel
+            .event_ledger
+            .by_type(exoskeleton_core::EventType::CharterProposal, 10)
+            .unwrap();
+        assert_eq!(events.len(), 1, "expected one CharterProposal event");
+        assert!(events[0].summary.contains("Self-Critique"));
+
+        // Verify payload_ref points to a valid artifact
+        let payload_ref = events[0]
+            .payload_ref
+            .as_ref()
+            .expect("CharterProposal event should have a payload_ref");
+        let artifact = kernel
+            .artifact_store
+            .get(payload_ref)
+            .unwrap()
+            .expect("artifact should exist");
+        let proposal: exoskeleton_core::CharterProposal =
+            serde_json::from_slice(&artifact.content).unwrap();
+        assert_eq!(proposal.thread_id, thread.thread_id);
+        assert_eq!(proposal.proposed_charter, "Enhanced self-critique charter");
+        assert_eq!(proposal.proposed_at_tick, tick_number);
+        assert_eq!(proposal.status, exoskeleton_core::ProposalStatus::Pending);
+    }
 }

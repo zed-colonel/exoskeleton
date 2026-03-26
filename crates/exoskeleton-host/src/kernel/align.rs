@@ -22,6 +22,7 @@ pub fn align(
     decision: &DecisionResult,
     perception: &PerceptionResult,
     tick_id: TickId,
+    tick_number: u64,
 ) -> AlignmentResult {
     // 1. Process relational signals from inbox messages → ledger entries
     let _signal_ids = exoskeleton_relationship::process_relational_signals(
@@ -143,7 +144,7 @@ pub fn align(
             watch_type: proposal.watch_type.clone(),
             schedule: proposal.schedule,
             status: exoskeleton_core::watch::WatchStatus::Active,
-            created_at_tick: 0, // Caller can set via tick_number context
+            created_at_tick: tick_number,
             last_checked_tick: None,
             trigger_count: 0,
             created_at: chrono::Utc::now(),
@@ -275,7 +276,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        let result = align(&kernel, &decision, &perception, tick_id);
+        let result = align(&kernel, &decision, &perception, tick_id, 1);
         assert_eq!(result.approved_actions.len(), 2);
         assert!(result.blocked_actions.is_empty());
         assert!(result.relationship_snapshot.is_some());
@@ -296,7 +297,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        let result = align(&kernel, &decision, &perception, tick_id);
+        let result = align(&kernel, &decision, &perception, tick_id, 1);
         assert!(result.approved_actions.is_empty());
         assert!(result.blocked_actions.is_empty());
     }
@@ -341,7 +342,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        let result = align(&kernel, &decision, &perception, tick_id);
+        let result = align(&kernel, &decision, &perception, tick_id, 1);
         // Trust should be well below 0.3 after 5 broken commitments (-0.15 each from 0.5)
         assert!(result.approved_actions.is_empty());
         assert_eq!(result.blocked_actions.len(), 1);
@@ -388,7 +389,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        let _result = align(&kernel, &decision, &perception, tick_id);
+        let _result = align(&kernel, &decision, &perception, tick_id, 1);
 
         // Verify CapabilityRequest event was appended to ledger
         let events = kernel
@@ -422,7 +423,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        let _result = align(&kernel, &decision, &perception, tick_id);
+        let _result = align(&kernel, &decision, &perception, tick_id, 1);
 
         let events = kernel
             .event_ledger
@@ -472,7 +473,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        let _result = align(&kernel, &decision, &perception, tick_id);
+        let _result = align(&kernel, &decision, &perception, tick_id, 1);
 
         // Check broadcast
         let live_event = rx.try_recv().unwrap();
@@ -505,11 +506,14 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        align(&kernel, &decision, &perception, tick_id);
+        align(&kernel, &decision, &perception, tick_id, 42);
 
         // Watch should have been saved
         assert_eq!(kernel.watch_store.list().unwrap().len(), 1);
         assert_eq!(kernel.watch_store.active_count().unwrap(), 1);
+        // Verify created_at_tick uses the actual tick number
+        let watches = kernel.watch_store.list().unwrap();
+        assert_eq!(watches[0].created_at_tick, 42);
     }
 
     // ── E5S2-T11: watch_count_limit_enforced ──
@@ -547,7 +551,7 @@ mod tests {
         let perception = empty_perception();
         let tick_id = TickId::new();
 
-        align(&kernel, &decision, &perception, tick_id);
+        align(&kernel, &decision, &perception, tick_id, 1);
 
         // Only 1 watch should have been saved (limit is 1)
         assert_eq!(kernel.watch_store.list().unwrap().len(), 1);
