@@ -124,7 +124,7 @@ async fn ticks_endpoint_returns_history() {
 }
 
 #[tokio::test]
-async fn threads_endpoint_lists_all_three() {
+async fn threads_endpoint_lists_builtin_threads() {
     let dir = tempfile::tempdir().unwrap();
     let vessel = support::boot_vessel(dir.path()).await;
     let _ticks = support::wait_for_ticks(vessel.storage(), 3, TICK_TIMEOUT).await;
@@ -141,14 +141,15 @@ async fn threads_endpoint_lists_all_three() {
     let body = body_string(resp.into_body()).await;
     let json: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
 
-    // E5-S2 added MetaCognition as the 4th built-in thread.
-    assert_eq!(json.len(), 4, "should have 4 built-in threads");
+    // E5-S3 added Creative Synthesis as the 5th built-in thread.
+    assert_eq!(json.len(), 5, "should have 5 built-in threads");
 
     let names: Vec<&str> = json.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Threat Monitor"));
     assert!(names.contains(&"Self-Critique"));
     assert!(names.contains(&"Memory Consolidation"));
     assert!(names.contains(&"Meta-Cognition"));
+    assert!(names.contains(&"Creative-Synthesis"));
 
     support::shutdown_and_verify(vessel).await;
 }

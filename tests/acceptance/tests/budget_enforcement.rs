@@ -267,23 +267,26 @@ async fn cognitive_budget_tracks_consumption() {
 #[tokio::test]
 async fn cognitive_budget_exhaustion_reflected_in_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    // Very small budget: ~200 tokens. With ~45 tokens/tick, exhausted after ~4 ticks.
+    // Small budget: 250 tokens. With 5 built-in threads consuming ~54
+    // tokens/tick, exhausted during tick 5. We wait for 5 ticks; the budget
+    // is consumed by the end and the BudgetGate blocks further dispatch.
     // frontier_cost_budget_cents must be > 0 because AQ allocates CostCents dimension.
     let cognitive = CognitiveBudgetConfig {
-        local_token_budget: 200,
+        local_token_budget: 250,
         frontier_token_budget: 0,
         frontier_cost_budget_cents: 1,
         time_window_secs: 3600,
-        per_tick_token_cap: 200,
-        per_thread_token_cap: 200,
+        per_tick_token_cap: 250,
+        per_thread_token_cap: 250,
         escalation_policy: EscalationPolicy::default(),
     };
     let config = support::test_config_with_budget(dir.path(), Some(cognitive), None);
     let vessel = support::boot_vessel_with_config(config).await;
 
     // Wait for enough ticks that budget should be exhausted.
-    // 200 tokens / ~45 per tick ≈ 4-5 ticks. After tick 5, the AQ BudgetGate
-    // blocks further dispatch since cumulative consumption exceeds the budget.
+    // 250 tokens / ~54 per tick ≈ 4.6 ticks. Tick 5 runs but pushes
+    // cumulative consumption past the budget. The AQ BudgetGate then
+    // blocks tick 6.
     let _ticks = support::wait_for_ticks(vessel.storage(), 5, TICK_TIMEOUT).await;
 
     // Give a moment for the final tick's consumption to be recorded
