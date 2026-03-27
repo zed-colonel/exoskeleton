@@ -169,15 +169,15 @@ The v2 plan included a "Platform WI service" (W-61, W-62) — a shared workflow 
 
 ---
 
-## Floating Items — Observatory Polish
+## Floating Items — Scheduling Decisions
 
-Slotted into any epoch as capacity allows:
+Previously "slotted into any epoch as capacity allows." Now explicitly scheduled:
 
-| ID | Item | Complexity | Notes |
-|----|------|------------|-------|
-| W-31 | Artifact full-text search | M | Daemon endpoint + Observatory UI |
-| W-32 | Cross-tick snapshot comparison | M | Two-snapshot diff view |
-| W-38 | Force-directed fleet topology | M | d3-force graph (pairs with W-25, natural fit for E7 Phase 2) |
+| ID | Item | Complexity | Decision | Rationale |
+|----|------|------------|----------|-----------|
+| W-31 | Artifact full-text search | M | **Epoch 6, Sprint 2** | Operationally useful — debugging production vessels requires finding artifacts by content. Daemon endpoint + Observatory UI. |
+| W-32 | Cross-tick snapshot comparison | M | **Epoch 6, Sprint 2** | Two-snapshot diff view. Pairs with W-31 for production debugging workflow. |
+| W-38 | Force-directed fleet topology | M | **Epoch 7, Phase 2** | d3-force graph showing vessel-to-vessel communication topology. Natural fit alongside W-35 (cross-agent message flow) and W-37 (side-by-side timelines). |
 
 ---
 

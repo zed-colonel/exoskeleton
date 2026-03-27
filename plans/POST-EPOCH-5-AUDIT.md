@@ -100,8 +100,8 @@ Observatory's `exoskeleton-core` dependency is the thinnest possible coupling, b
 | Gap | Severity | Notes |
 |-----|----------|-------|
 | No coverage metrics tool (cargo-llvm-cov, tarpaulin) | **Medium** | Flying blind on which code paths are exercised |
-| exoskeleton-cli: 18 tests for 23 files (0.78 tests/file) | **Medium** | User-facing tool undertested |
-| exoskeleton-daemon: 3 tests for 8 files (0.375 tests/file) | **Medium** | HTTP endpoints undertested |
+| exoskeleton-cli: 18 unit tests (no integration test suite) | **Low** | CLI calls HTTP API tested via daemon integration tests |
+| ~~exoskeleton-daemon: 3 tests~~ **CORRECTED: 75 tests** (56 handler + 13 bootstrap + 3 ts-export + 3 inline) | **N/A** | Initial audit undercounted — tests/ directory was missed |
 | worldinterface-coordinator: 12 tests for complex orchestration | **Medium** | Integration-heavy, difficult to unit test |
 | Observatory Rust backend: 58 tests for full auth+fleet+docker+bootstrap+proxy | **Low** | Adequate but light |
 | Observatory flaky test: `ensure_admin_without_env_var_writes_token` | **Low** | Setup token file creation race condition |
