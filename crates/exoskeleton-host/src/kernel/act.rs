@@ -410,7 +410,7 @@ mod tests {
 
         // Must run from a blocking thread because act() uses block_on internally
         let result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -433,7 +433,7 @@ mod tests {
         let token = CancellationToken::new();
 
         let result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -457,7 +457,7 @@ mod tests {
         let token = CancellationToken::new();
 
         let result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -482,7 +482,7 @@ mod tests {
         let artifact_store = kernel.artifact_store.clone();
 
         let result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -518,7 +518,7 @@ mod tests {
         let event_ledger = kernel.event_ledger.clone();
 
         let _result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -583,7 +583,7 @@ mod tests {
         let token = CancellationToken::new();
 
         let result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -616,7 +616,7 @@ mod tests {
         token.cancel();
 
         let result = tokio::task::spawn_blocking({
-            let kernel = unsafe_send_kernel(&kernel);
+            let kernel = clone_kernel_for_blocking(&kernel);
             move || act(&kernel, &alignment, tick_id, &token)
         })
         .await
@@ -714,7 +714,7 @@ mod tests {
 
     /// Clone the kernel's Arc fields into a new KernelContext that can be sent
     /// to a blocking thread.
-    fn unsafe_send_kernel(kernel: &KernelContext) -> KernelContext {
+    fn clone_kernel_for_blocking(kernel: &KernelContext) -> KernelContext {
         KernelContext {
             snapshot_store: kernel.snapshot_store.clone(),
             event_ledger: kernel.event_ledger.clone(),

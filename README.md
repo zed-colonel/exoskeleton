@@ -29,6 +29,8 @@ Exoskeleton operates **two physically separate ActionQueue engines** (invariant 
 - **Threat Monitor** (Critical/EveryTick) -- adversarial prompt detection, capability abuse
 - **Self-Critique** (High/EveryTick) -- reasoning quality assessment, uncertainty scoring
 - **Memory Consolidation** (Normal/EveryNTicks(5)) -- episodic compression, long-term note extraction
+- **Meta-Cognition** (Normal/EveryNTicks(10)) -- cognitive pattern analysis, charter modification proposals
+- **Creative Synthesis** (Background/EveryNTicks(15)) -- novel cross-domain connections, hypothesis generation
 - Thread outputs converge into a single StateSnapshot per tick
 - Custom threads via `ThreadSpec` registration
 
@@ -62,7 +64,7 @@ Exoskeleton operates **two physically separate ActionQueue engines** (invariant 
 
 ### Observability
 
-- **HTTP daemon** -- axum-based REST API with 24 endpoints + WebSocket
+- **HTTP daemon** -- axum-based REST API with 35 endpoints + WebSocket
 - **CLI** -- `exo` binary with `bootstrap`, `start`, `inspect`, `thread`, `relationship`, `budget`, `events`, `engines`, `send`, `artifact`, `memory`, `snapshots`, `inbox-history`, `config`, `reload-charters`, `fork` commands
 - **Docker** -- multi-stage build, compose profiles for single and multi-vessel
 - **Observatory** -- fleet management UI and vessel orchestration ([separate project](https://github.com/zed-colonel/observatory))
@@ -221,7 +223,7 @@ exo engines                        # Dual engine health
 
 ```bash
 cargo build --workspace                               # Build all crates
-cargo test --workspace                                # Run all tests (~997)
+cargo test --workspace                                # Run all tests (~1,100)
 cargo clippy --all --all-targets -- -D warnings       # Lint (strict)
 cargo fmt --all -- --check                            # Format check
 cargo doc --workspace --no-deps                       # Build docs
@@ -249,11 +251,11 @@ Nine governing principles enforced across all crates:
 
 ## Testing
 
-~997 Rust tests across unit, integration, and acceptance levels:
+~1,100 Rust tests across unit, integration, and acceptance levels:
 
 - **Unit tests** -- in-crate `#[cfg(test)] mod tests` blocks
 - **Integration tests** -- multi-crate interaction tests in `exoskeleton-host`
-- **Acceptance tests** (8 test files, 40 tests) -- full Vessel boot with mock LLM:
+- **Acceptance tests** (8 test files, 47 tests) -- full Vessel boot with mock LLM:
   - **A: Thread Convergence** -- 3 threads converge into 1 StateSnapshot
   - **B: Kill/Restart Durability** -- relationship and tick state survives crash/restart
   - **C: Thread Replay** -- artifact chain from TickRecord to ThreadOutput to LlmResponse
