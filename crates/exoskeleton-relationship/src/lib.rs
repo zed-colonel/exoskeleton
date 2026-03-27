@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Relationship Ledger + Snapshot + Align step logic for Exoskeleton.
 //!
 //! This crate provides the relationship substrate for I8 (relationship awareness

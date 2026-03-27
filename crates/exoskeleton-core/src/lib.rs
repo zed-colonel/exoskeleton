@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Core domain types for Exoskeleton.
 //!
 //! Pure domain model crate with zero external runtime dependencies beyond

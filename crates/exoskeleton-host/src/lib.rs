@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Vessel runtime: dual-engine bootstrap, master loop kernel, and LLM handler.
 //!
 //! The Vessel owns two independent ActionQueue engines (I9):

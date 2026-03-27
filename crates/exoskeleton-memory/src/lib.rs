@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Context Compiler + episodic/long-term memory tiers for Exoskeleton.
 //!
 //! This crate provides the cognitive infrastructure for I5 (context compiled,

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! CLI binary for Exoskeleton (`exo`).
 //!
 //! Provides two modes of operation:

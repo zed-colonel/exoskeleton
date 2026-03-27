@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! HTTP daemon for remote inspection of a running Exoskeleton vessel.
 //!
 //! The daemon exposes read-only REST endpoints for inspecting vessel state

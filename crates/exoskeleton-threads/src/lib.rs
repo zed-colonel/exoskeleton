@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Thread registry, sub-workflow execution, and context slicing for Exoskeleton.
 //!
 //! This crate provides:
