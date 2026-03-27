@@ -106,7 +106,7 @@ impl OpenAiCompatBackend {
         OpenAiRequest {
             model: self.model.clone(),
             messages,
-            max_tokens: request.max_output_tokens,
+            max_completion_tokens: request.max_output_tokens,
             temperature: request.temperature,
             stop: if request.stop_sequences.is_empty() {
                 None
@@ -121,7 +121,10 @@ impl OpenAiCompatBackend {
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
-    max_tokens: u64,
+    /// Newer OpenAI models (o1, o3, gpt-4.1+) require `max_completion_tokens`
+    /// instead of the legacy `max_tokens`. Using the new name is backwards-
+    /// compatible with older models that accept both.
+    max_completion_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -700,7 +703,7 @@ mod tests {
         assert_eq!(body.messages[0].role, "system");
         assert_eq!(body.messages[0].content, "You are helpful.");
         assert_eq!(body.messages[1].role, "user");
-        assert_eq!(body.max_tokens, 1024);
+        assert_eq!(body.max_completion_tokens, 1024);
         assert_eq!(body.temperature, Some(0.7));
         assert_eq!(body.stop, Some(vec!["</answer>".into()]));
     }
