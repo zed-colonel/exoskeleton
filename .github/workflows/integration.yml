@@ -1,0 +1,108 @@
+name: Integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run nightly at 03:00 UTC
+    - cron: '0 3 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  full-stack:
+    name: Full Stack Integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Show available space
+        run: df -h /
+
+      # Check out all four repos
+      - uses: actions/checkout@v4
+        with:
+          path: exoskeleton
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/worldinterface
+          path: worldinterface
+          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/actionqueue
+          path: actionqueue
+          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-colonel/observatory
+          path: observatory
+          ssh-key: ${{ secrets.DEPLOY_KEY_OBSERVATORY }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: observatory/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            exoskeleton
+            worldinterface
+            actionqueue
+            observatory
+
+      # ActionQueue: test with all features
+      - name: ActionQueue — clippy + test (all features)
+        run: |
+          cargo clippy --all --all-targets --features workflow,budget,actor,platform -- -D warnings
+          cargo test --workspace --features workflow,budget,actor,platform --no-fail-fast -- --test-threads=1
+        working-directory: actionqueue
+
+      # WorldInterface: test
+      - name: WorldInterface — clippy + test
+        run: |
+          cargo clippy --all --all-targets -- -D warnings
+          cargo test --workspace --no-fail-fast -- --test-threads=1
+        working-directory: worldinterface
+
+      # Exoskeleton: test (depends on WI + AQ via path patches)
+      - name: Exoskeleton — clippy + test
+        run: |
+          cargo clippy --all --all-targets --no-default-features -- -D warnings
+          cargo test --workspace --no-default-features --no-fail-fast -- --test-threads=1
+        working-directory: exoskeleton
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+
+      # Observatory: Rust test (depends on exoskeleton-core)
+      - name: Observatory — Rust clippy + test
+        run: |
+          mkdir -p dist && touch dist/index.html
+          cargo clippy --all --all-targets -- -D warnings
+          cargo test --workspace --no-fail-fast -- --test-threads=1
+        working-directory: observatory
+
+      # Observatory: TypeScript test
+      - name: Observatory — SPA type-check + lint + test
+        run: |
+          npm ci
+          npm run type-check
+          npm run lint
+          npm test -- --run
+        working-directory: observatory
