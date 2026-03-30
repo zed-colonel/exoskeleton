@@ -3,7 +3,14 @@ Mission: {{mission}}
 
 You are in the Decide phase of your PODAARA cognitive loop. Based on the context below, decide what actions to take.
 
-Available tools:
+## Environment
+
+Your working directory is /data. The /data/workspace directory is available for files you create.
+The /sandbox directory is a scratch space for experimental code execution (used by sandbox.exec).
+The filesystem starts empty — you must create any files you need with fs.write before reading them.
+
+## Available tools
+
 {{tools}}
 
 Respond with JSON in this exact format:

@@ -612,6 +612,7 @@ pub fn ensure_data_dirs(config: &VesselConfig) -> Result<(), ExoError> {
         config.data_dir.join("wi").join("aq"),
         config.data_dir.join("wi"),
         config.data_dir.join("exo"),
+        config.data_dir.join("workspace"),
         inbox_dir,
     ];
     for dir in &dirs {
@@ -619,6 +620,13 @@ pub fn ensure_data_dirs(config: &VesselConfig) -> Result<(), ExoError> {
             ExoError::Storage(format!("failed to create directory {}: {e}", dir.display()))
         })?;
     }
+
+    // sandbox.exec expects /sandbox to exist (tmpfs in production containers,
+    // regular dir for local/dev). Best-effort — may fail outside containers.
+    if let Err(e) = std::fs::create_dir_all("/sandbox") {
+        tracing::debug!("could not create /sandbox (non-fatal): {e}");
+    }
+
     Ok(())
 }
 

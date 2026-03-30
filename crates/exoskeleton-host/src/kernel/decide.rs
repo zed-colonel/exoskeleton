@@ -781,7 +781,7 @@ mod tests {
         let introspection = build_introspection_description();
         let prompt =
             build_system_prompt(&kernel_ctx, "- fs.write: Write a file", &introspection).unwrap();
-        assert!(prompt.contains("Available tools:"));
+        assert!(prompt.contains("Available tools"));
         assert!(prompt.contains("fs.write: Write a file"));
         assert!(prompt.contains("test mission"));
     }
