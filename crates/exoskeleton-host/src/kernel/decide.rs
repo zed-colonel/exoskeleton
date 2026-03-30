@@ -422,7 +422,13 @@ fn build_tools_description(kernel: &KernelContext) -> String {
                     "No tools available.".into()
                 } else {
                     caps.iter()
-                        .map(|d| format!("- {}: {}", d.name, d.description))
+                        .map(|d| {
+                            let mut line = format!("- {}: {}", d.name, d.description);
+                            if let Some(schema) = &d.input_schema {
+                                line.push_str(&format!("\n  params: {}", schema));
+                            }
+                            line
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 }
