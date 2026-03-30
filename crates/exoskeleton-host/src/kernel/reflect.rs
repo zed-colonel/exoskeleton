@@ -234,8 +234,18 @@ fn build_reflect_user_message(
             "- {} [{}]: {}\n",
             exec.action.tool_name, status, exec.action.rationale
         ));
-        if let Err(ref e) = exec.result {
-            msg.push_str(&format!("  Error: {e}\n"));
+        match &exec.result {
+            Ok(val) => {
+                let json_str = val.to_string();
+                if json_str.len() > 500 {
+                    msg.push_str(&format!("  Output: {}...\n", &json_str[..497]));
+                } else {
+                    msg.push_str(&format!("  Output: {json_str}\n"));
+                }
+            }
+            Err(e) => {
+                msg.push_str(&format!("  Error: {e}\n"));
+            }
         }
     }
     if let Some(ref plan) = snapshot.plan {

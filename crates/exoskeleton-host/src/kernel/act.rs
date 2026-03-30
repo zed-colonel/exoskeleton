@@ -131,7 +131,21 @@ pub fn act(
             outcome,
         };
 
-        // Log ActionExecuted event to the Event Ledger
+        // Log ActionExecuted event to the Event Ledger.
+        // Include the result output so the vessel can see what its tools returned
+        // in subsequent ticks (e.g., file paths from fs.write, response bodies, etc.)
+        let result_summary = match &result_value {
+            Ok(val) => {
+                let json_str = val.to_string();
+                // Truncate very large outputs to keep event summaries reasonable
+                if json_str.len() > 500 {
+                    format!("succeeded — {}...", &json_str[..497])
+                } else {
+                    format!("succeeded — {json_str}")
+                }
+            }
+            Err(e) => format!("failed: {e}"),
+        };
         let event = EventEntry {
             id: LedgerEntryId::new(),
             tick_id: Some(tick_id),
@@ -139,12 +153,7 @@ pub fn act(
             payload_ref: record.receipt_ref.clone(),
             summary: format!(
                 "Action {}: {} ({})",
-                action.tool_name,
-                match &result_value {
-                    Ok(_) => "succeeded".to_string(),
-                    Err(e) => format!("failed: {e}"),
-                },
-                action.rationale,
+                action.tool_name, result_summary, action.rationale,
             ),
             timestamp: Utc::now(),
         };
