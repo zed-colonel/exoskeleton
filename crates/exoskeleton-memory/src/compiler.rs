@@ -5,14 +5,15 @@
 //! calls `compile()` with fresh data from stores. The compiler never carries
 //! forward state between calls — it is purely functional.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use exoskeleton_core::conversation::Conversation;
 use exoskeleton_core::plan::Plan;
 use exoskeleton_core::working_memory::WorkingMemory;
 use exoskeleton_core::{
-    EpisodicSummary, EventEntry, ExoError, LongTermNote, RelationshipSnapshot, StateSnapshot,
-    ThreadContribution, VesselId,
+    ArtifactId, EpisodicSummary, EventEntry, ExoError, LongTermNote, RelationshipSnapshot,
+    StateSnapshot, ThreadContribution, VesselId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +49,10 @@ pub struct ContextSources<'a> {
     pub working_memory: &'a WorkingMemory,
     /// Active conversations with message references (E1-S2).
     pub conversations: &'a [Conversation],
+    /// Resolved message content keyed by ArtifactId (payload_ref).
+    /// When provided, the conversation renderer displays actual message text
+    /// instead of opaque envelope references.
+    pub resolved_message_content: Option<&'a HashMap<ArtifactId, String>>,
     /// Pre-resolved system section template (Epoch 0).
     /// If Some, used instead of the hardcoded `render_system_section()` output.
     /// The host layer resolves the template and passes the result as data.
@@ -494,7 +499,10 @@ impl ContextCompiler {
             ),
             (
                 "conversations",
-                render::render_conversations(sources.conversations),
+                render::render_conversations(
+                    sources.conversations,
+                    sources.resolved_message_content,
+                ),
                 p.conversations.priority,
             ),
             (
@@ -583,6 +591,7 @@ mod tests {
             plan: snapshot.plan.as_ref(),
             working_memory: &snapshot.working_memory,
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         }
     }
@@ -638,6 +647,7 @@ mod tests {
             plan: snap.plan.as_ref(),
             working_memory: &snap.working_memory,
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -673,6 +683,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -698,6 +709,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -773,6 +785,7 @@ mod tests {
                 "Current focus".into(),
             ),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -829,6 +842,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -870,6 +884,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -923,6 +938,7 @@ mod tests {
                 "Some focus text".into(),
             ),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -984,6 +1000,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -1026,6 +1043,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
         let result = compiler.compile(&sources).unwrap();
@@ -1054,6 +1072,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
         let result = compiler.compile(&sources).unwrap();
@@ -1145,6 +1164,7 @@ mod tests {
                 "Evaluating options".into(),
             ),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -1238,6 +1258,7 @@ mod tests {
                 "Current task".into(),
             ),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -1271,6 +1292,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
         let result1 = compiler.compile(&sources1).unwrap();
@@ -1298,6 +1320,7 @@ mod tests {
                 "New focus".into(),
             ),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
         let result2 = compiler.compile(&sources2).unwrap();
@@ -1336,6 +1359,7 @@ mod tests {
             plan: None,
             working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
             conversations: &[],
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -1381,6 +1405,7 @@ mod tests {
             plan: snap.plan.as_ref(),
             working_memory: &snap.working_memory,
             conversations: &conversations,
+            resolved_message_content: None,
             system_section_override: None,
         };
 
@@ -1456,6 +1481,7 @@ mod tests {
             plan: snap.plan.as_ref(),
             working_memory: &snap.working_memory,
             conversations: &conversations,
+            resolved_message_content: None,
             system_section_override: None,
         };
 

@@ -1,6 +1,8 @@
 //! Orient step — compile context for the LLM.
 
-use exoskeleton_core::{ExoError, RelationshipSnapshot, StateSnapshot};
+use std::collections::HashMap;
+
+use exoskeleton_core::{ArtifactId, ExoError, RelationshipSnapshot, StateSnapshot};
 use exoskeleton_memory::ContextSources;
 
 use super::types::{OrientationResult, PerceptionResult};
@@ -44,6 +46,43 @@ pub fn orient(
             None => None,
         };
 
+    // Resolve conversation message content from artifact store.
+    // Each ConversationMessage holds a payload_ref (ArtifactId) pointing to the
+    // actual text in the artifact store. We resolve these here so the context
+    // compiler can render readable message content instead of opaque references.
+    let resolved_message_content: HashMap<ArtifactId, String> = {
+        let mut map = HashMap::new();
+        for conv in &perception.active_conversations {
+            // Resolve last 3 messages per conversation (matches renderer limit)
+            for msg in conv.message_refs.iter().rev().take(3) {
+                if map.contains_key(&msg.payload_ref) {
+                    continue;
+                }
+                match kernel.artifact_store.get(&msg.payload_ref) {
+                    Ok(Some(artifact)) => {
+                        if let Ok(text) = String::from_utf8(artifact.content) {
+                            map.insert(msg.payload_ref.clone(), text);
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            payload_ref = %msg.payload_ref,
+                            "conversation message artifact not found"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            payload_ref = %msg.payload_ref,
+                            "failed to load conversation message artifact"
+                        );
+                    }
+                }
+            }
+        }
+        map
+    };
+
     // Resolve the system section template (Epoch 0)
     let system_section = kernel
         .prompt_registry
@@ -68,6 +107,7 @@ pub fn orient(
         plan: snapshot.plan.as_ref(),
         working_memory: &snapshot.working_memory,
         conversations: &perception.active_conversations,
+        resolved_message_content: Some(&resolved_message_content),
         system_section_override: system_section.as_deref(),
     };
 

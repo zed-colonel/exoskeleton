@@ -74,6 +74,7 @@ mod tests {
                 plan: None,
                 working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
                 conversations: &[],
+                resolved_message_content: None,
                 system_section_override: None,
             };
 

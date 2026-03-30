@@ -7,11 +7,13 @@
 //! Section headers use the `=== SECTION NAME ===` format for clear delineation.
 //! Renderers return empty string for empty input — the compiler skips those sections.
 
+use std::collections::HashMap;
+
 use exoskeleton_core::conversation::{Conversation, ConversationState};
 use exoskeleton_core::plan::{Plan, PlanTaskStatus};
 use exoskeleton_core::working_memory::WorkingMemory;
 use exoskeleton_core::{
-    EpisodicSummary, EventEntry, LongTermNote, PrincipalSummary, RelationshipSnapshot,
+    ArtifactId, EpisodicSummary, EventEntry, LongTermNote, PrincipalSummary, RelationshipSnapshot,
     StateSnapshot, ThreadContribution, VesselId, WorkingMemoryEntry,
 };
 
@@ -223,10 +225,17 @@ pub fn render_working_memory(memory: &WorkingMemory) -> String {
 /// Render active conversations for the LLM context.
 ///
 /// Shows each conversation's participants, message count, and the last few
-/// message references. Conversations are shown in the order provided (typically
-/// newest-updated first from the ConversationStore).
+/// messages with their resolved content. When `resolved_content` is provided,
+/// the actual message text is displayed; otherwise falls back to envelope
+/// references (useful for tests or when artifact resolution is unavailable).
+///
+/// Conversations are shown in the order provided (typically newest-updated
+/// first from the ConversationStore).
 /// Returns empty string if no conversations exist.
-pub fn render_conversations(conversations: &[Conversation]) -> String {
+pub fn render_conversations(
+    conversations: &[Conversation],
+    resolved_content: Option<&HashMap<ArtifactId, String>>,
+) -> String {
     if conversations.is_empty() {
         return String::new();
     }
@@ -246,15 +255,30 @@ pub fn render_conversations(conversations: &[Conversation]) -> String {
             status,
         ));
         s.push_str(&format!("  Participants: {}\n", participants.join(", ")));
-        // Show last 3 message references (most recent context)
+        // Show last 3 messages (most recent context)
         let recent: Vec<_> = conv.message_refs.iter().rev().take(3).collect();
         for msg in recent.into_iter().rev() {
-            s.push_str(&format!(
-                "  [{} {}]: envelope:{}\n",
-                msg.source,
-                msg.timestamp.format("%H:%M:%S"),
-                msg.envelope_id,
-            ));
+            let content = resolved_content
+                .and_then(|map| map.get(&msg.payload_ref))
+                .map(|text| text.as_str());
+            match content {
+                Some(text) => {
+                    s.push_str(&format!(
+                        "  [{} {}]: {}\n",
+                        msg.source,
+                        msg.timestamp.format("%H:%M:%S"),
+                        text,
+                    ));
+                }
+                None => {
+                    s.push_str(&format!(
+                        "  [{} {}]: (unresolved envelope:{})\n",
+                        msg.source,
+                        msg.timestamp.format("%H:%M:%S"),
+                        msg.envelope_id,
+                    ));
+                }
+            }
         }
     }
     s
@@ -662,7 +686,7 @@ mod tests {
         );
         conv.topic = Some("Debugging issue #42".into());
 
-        let output = super::render_conversations(&[conv]);
+        let output = super::render_conversations(&[conv], None);
         assert!(output.contains("CONVERSATIONS"));
         assert!(output.contains("Debugging issue #42"));
         assert!(output.contains("1 msgs"));
@@ -673,7 +697,7 @@ mod tests {
     // ── E1-T56: render_conversations empty returns empty ──
     #[test]
     fn render_conversations_empty() {
-        let output = super::render_conversations(&[]);
+        let output = super::render_conversations(&[], None);
         assert!(output.is_empty());
     }
 
@@ -701,11 +725,43 @@ mod tests {
         }
         assert_eq!(conv.message_count(), 5);
 
-        let output = super::render_conversations(&[conv]);
-        // Should show "5 msgs" but only last 3 message lines
+        let output = super::render_conversations(&[conv], None);
+        // Should show "5 msgs" but only last 3 message lines (unresolved fallback)
         assert!(output.contains("5 msgs"));
-        let envelope_lines: Vec<&str> =
-            output.lines().filter(|l| l.contains("envelope:")).collect();
-        assert_eq!(envelope_lines.len(), 3, "should show last 3 messages only");
+        let msg_lines: Vec<&str> =
+            output.lines().filter(|l| l.contains("unresolved envelope:")).collect();
+        assert_eq!(msg_lines.len(), 3, "should show last 3 messages only");
+    }
+
+    // ── render_conversations resolves message content from map ──
+    #[test]
+    fn render_conversations_with_resolved_content() {
+        use std::collections::HashMap;
+
+        use exoskeleton_core::conversation::Conversation;
+        use exoskeleton_core::EnvelopeId;
+
+        let p1 = PrincipalId::new();
+        let now = Utc::now();
+        let payload1 = ArtifactId::from_content(b"msg1");
+        let payload2 = ArtifactId::from_content(b"msg2");
+        let mut conv = Conversation::from_first_message(p1, EnvelopeId::new(), payload1.clone(), now);
+        conv.add_message(
+            p1,
+            EnvelopeId::new(),
+            payload2.clone(),
+            now + chrono::Duration::seconds(1),
+        );
+        conv.topic = Some("Test conversation".into());
+
+        let mut content_map = HashMap::new();
+        content_map.insert(payload1, "Hello, how can I help?".to_string());
+        content_map.insert(payload2, "Please analyze the logs.".to_string());
+
+        let output = super::render_conversations(&[conv], Some(&content_map));
+        assert!(output.contains("Hello, how can I help?"));
+        assert!(output.contains("Please analyze the logs."));
+        // Should NOT contain envelope references when content is resolved
+        assert!(!output.contains("unresolved envelope:"));
     }
 }

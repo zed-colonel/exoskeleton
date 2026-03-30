@@ -445,6 +445,7 @@ fn context_compilation_with_relationships() {
         plan: None,
         working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
         conversations: &[],
+        resolved_message_content: None,
         system_section_override: None,
     };
 
@@ -599,6 +600,7 @@ fn context_prompt_contains_principal_details() {
         plan: None,
         working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
         conversations: &[],
+        resolved_message_content: None,
         system_section_override: None,
     };
 
