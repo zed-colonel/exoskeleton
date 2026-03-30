@@ -39,7 +39,7 @@ services:
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
       - RUST_LOG=${RUST_LOG:-info}
       # LLM API keys — pass through from host
-      - ANTHROPIC_API_KEY
+      - ANTHROPIC_PLATFORM_API_KEY
       - OPENAI_API_KEY
     restart: unless-stopped
 
@@ -62,7 +62,7 @@ services:
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
       - RUST_LOG=${RUST_LOG:-info}
-      - ANTHROPIC_API_KEY
+      - ANTHROPIC_PLATFORM_API_KEY
       - OPENAI_API_KEY
     restart: unless-stopped
 
@@ -85,6 +85,6 @@ services:
       - EXO_DATA_DIR=/data
       - EXO_DAEMON_LISTEN=0.0.0.0:7600
       - RUST_LOG=${RUST_LOG:-info}
-      - ANTHROPIC_API_KEY
+      - ANTHROPIC_PLATFORM_API_KEY
       - OPENAI_API_KEY
     restart: unless-stopped
