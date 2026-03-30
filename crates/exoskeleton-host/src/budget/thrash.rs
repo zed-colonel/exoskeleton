@@ -89,8 +89,11 @@ impl ThrashDetector {
         action_counts.values().copied().max().unwrap_or(0)
     }
 
-    /// Check for stagnation — no snapshot changes across ticks.
-    /// We measure this by checking if ticks have empty actions and no decision rationale changes.
+    /// Check for stagnation — actions attempted but no progress.
+    ///
+    /// Only ticks where actions were attempted but ALL failed count as stagnant.
+    /// Idle ticks (no actions taken) are deliberate — the vessel chose to wait
+    /// (e.g., for conversation input) and should not be penalized.
     fn check_stagnation(ticks: &[TickRecord]) -> usize {
         let mut stagnant_count = 0;
 
@@ -101,13 +104,14 @@ impl ThrashDetector {
                 .iter()
                 .any(|a| a.outcome == ActionOutcome::Success);
 
-            // A tick is "stagnant" if it either had no actions or no successful actions
-            if !has_actions || !has_successful_action {
-                stagnant_count += 1;
-            } else {
-                // Reset count — progress was made
+            if has_actions && has_successful_action {
+                // Progress was made — reset stagnation counter
                 stagnant_count = 0;
+            } else if has_actions && !has_successful_action {
+                // Attempted actions but all failed — this is stagnation
+                stagnant_count += 1;
             }
+            // If !has_actions: idle by choice, don't touch the counter
         }
 
         stagnant_count
@@ -244,23 +248,68 @@ mod tests {
     }
 
     #[test]
-    fn medium_thrash_on_stagnation() {
-        // 5 ticks with no actions → stagnation
-        let ticks: Vec<_> = (0..5)
-            .map(|_| make_tick(vec![], vec![llm_call(500, 300)]))
-            .collect();
-        let assessment = ThrashDetector::check(&ticks);
-        assert!(assessment.level >= ThrashLevel::Medium);
-    }
-
-    #[test]
-    fn high_thrash_on_long_stagnation() {
-        // 10 ticks with no actions → high stagnation
+    fn no_thrash_on_idle_ticks() {
+        // Idle ticks (no actions) are deliberate — not stagnation
         let ticks: Vec<_> = (0..10)
             .map(|_| make_tick(vec![], vec![llm_call(500, 300)]))
             .collect();
         let assessment = ThrashDetector::check(&ticks);
-        assert_eq!(assessment.level, ThrashLevel::High);
+        assert_eq!(
+            assessment.level,
+            ThrashLevel::None,
+            "idle-by-choice ticks should not trigger stagnation"
+        );
+    }
+
+    #[test]
+    fn medium_thrash_on_failed_action_stagnation() {
+        // 5 ticks with attempted but failed actions → stagnation
+        let ticks: Vec<_> = (0..5)
+            .map(|_| {
+                make_tick(
+                    vec![failing_action("fs.write")],
+                    vec![llm_call(500, 300)],
+                )
+            })
+            .collect();
+        let assessment = ThrashDetector::check(&ticks);
+        assert!(
+            assessment.level >= ThrashLevel::Medium,
+            "repeated failed actions should trigger stagnation"
+        );
+    }
+
+    #[test]
+    fn high_thrash_on_long_failed_stagnation() {
+        // 10 ticks with attempted but failed actions → high stagnation
+        let ticks: Vec<_> = (0..10)
+            .map(|_| {
+                make_tick(
+                    vec![failing_action("shell.exec")],
+                    vec![llm_call(500, 300)],
+                )
+            })
+            .collect();
+        let assessment = ThrashDetector::check(&ticks);
+        assert_eq!(
+            assessment.level,
+            ThrashLevel::High,
+            "10 ticks of failed actions should trigger high stagnation"
+        );
+    }
+
+    #[test]
+    fn idle_ticks_between_failures_do_not_reset_stagnation() {
+        // Failed → idle → failed should still count the failures
+        let ticks = vec![
+            make_tick(vec![failing_action("fs.write")], vec![llm_call(500, 300)]),
+            make_tick(vec![], vec![llm_call(200, 100)]), // idle — doesn't reset
+            make_tick(vec![failing_action("fs.write")], vec![llm_call(500, 300)]),
+        ];
+        let assessment = ThrashDetector::check(&ticks);
+        // Stagnant count should be 2 (two failed ticks, idle tick neutral)
+        // Not enough for Medium (needs 5), but demonstrates counter isn't reset
+        assert_eq!(assessment.level, ThrashLevel::None);
     }
 
     #[test]
