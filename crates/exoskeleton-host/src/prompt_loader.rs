@@ -116,7 +116,7 @@ mod tests {
             "Custom decide prompt from data_dir"
         );
         // Other prompts should still be defaults
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 13);
     }
 
     // ── E0-T13: project-level override takes precedence over compiled-in ──
@@ -181,8 +181,8 @@ mod tests {
         // Should still have the compiled-in default (or project-level if accessible)
         let after = registry.get("decide-system").unwrap();
         assert!(!after.is_empty());
-        // All 10 prompts should still be present
-        assert_eq!(registry.len(), 11);
+        // All 13 prompts should still be present
+        assert_eq!(registry.len(), 13);
         // If no project-level files found, should match the compiled-in
         if !Path::new("prompts/decide-system.md").exists() {
             assert_eq!(after, &before);
