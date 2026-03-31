@@ -1,13 +1,15 @@
 //! Built-in cognitive thread definitions.
 //!
-//! Five foundational threads ship with every Exoskeleton vessel:
+//! Six foundational threads ship with every Exoskeleton vessel:
 //! - **Threat Monitor** (Critical, EveryTick): safety and alignment scanning
 //! - **Self-Critique** (High, EveryTick): decision quality evaluation
 //! - **Memory Consolidation** (Normal, EveryNTicks(5)): experience consolidation
 //! - **Meta-Cognition** (Normal, EveryNTicks(10)): cognitive pattern analysis
 //! - **Creative Synthesis** (Background, EveryNTicks(15)): cross-domain pattern discovery
+//! - **Initiative** (High, EveryNTicks(3)): self-directed behavior and engagement generation
 
 pub mod creative_synthesis;
+pub mod initiative;
 pub mod memory_consolidation;
 pub mod meta_cognition;
 pub mod self_critique;
@@ -53,6 +55,10 @@ pub struct ThreadConfigOverrides {
     pub creative_synthesis_schedule: Option<ThreadSchedule>,
     /// Creative Synthesis token budget override.
     pub creative_synthesis_token_budget: Option<u64>,
+    /// Initiative schedule override.
+    pub initiative_schedule: Option<ThreadSchedule>,
+    /// Initiative token budget override.
+    pub initiative_token_budget: Option<u64>,
 }
 
 /// Deterministic UUID for the Threat Monitor thread.
@@ -83,6 +89,11 @@ pub const CREATIVE_SYNTHESIS_ID: ThreadId = ThreadId::from_uuid(Uuid::from_bytes
     0xca, 0xe1, 0x00, 0x05, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
 ]));
 
+/// Deterministic UUID for the Initiative thread.
+pub const INITIATIVE_ID: ThreadId = ThreadId::from_uuid(Uuid::from_bytes([
+    0xca, 0xe1, 0x00, 0x06, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,
+]));
+
 /// Register all built-in threads if they are not already present.
 ///
 /// Checks each built-in thread by its deterministic ID. If a thread with
@@ -102,6 +113,7 @@ pub fn register_builtin_threads(
         memory_consolidation::spec(),
         meta_cognition::spec(),
         creative_synthesis::spec(),
+        initiative::spec(),
     ];
 
     // Override charters from prompt registry (Epoch 0)
@@ -111,6 +123,7 @@ pub fn register_builtin_threads(
         "charter-memory-consolidation",
         "charter-meta-cognition",
         "charter-creative-synthesis",
+        "charter-initiative",
     ];
     for (spec, key) in builtin_specs.iter_mut().zip(charter_keys.iter()) {
         if let Some(charter) = prompts.get(key) {
@@ -154,6 +167,13 @@ pub fn register_builtin_threads(
         }
         if let Some(budget) = o.creative_synthesis_token_budget {
             builtin_specs[4].token_budget = budget;
+        }
+        // Initiative (index 5)
+        if let Some(schedule) = o.initiative_schedule {
+            builtin_specs[5].schedule = schedule;
+        }
+        if let Some(budget) = o.initiative_token_budget {
+            builtin_specs[5].token_budget = budget;
         }
     }
 
@@ -200,6 +220,7 @@ mod tests {
         );
         assert_eq!(META_COGNITION_ID, meta_cognition::spec().thread_id);
         assert_eq!(CREATIVE_SYNTHESIS_ID, creative_synthesis::spec().thread_id);
+        assert_eq!(INITIATIVE_ID, initiative::spec().thread_id);
     }
 
     #[test]
@@ -210,6 +231,7 @@ mod tests {
             MEMORY_CONSOLIDATION_ID,
             META_COGNITION_ID,
             CREATIVE_SYNTHESIS_ID,
+            INITIATIVE_ID,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -219,20 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn register_builtin_threads_creates_all_five() {
+    fn register_builtin_threads_creates_all_six() {
         let store = Arc::new(InMemoryThreadStore::new());
         let registry = ThreadRegistry::new(store);
 
         register_builtin_threads(&registry, &PromptRegistry::with_defaults(), None).unwrap();
 
         let all = registry.list().unwrap();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         let names: Vec<&str> = all.iter().map(|(s, _)| s.name.as_str()).collect();
         assert!(names.contains(&"Threat Monitor"));
         assert!(names.contains(&"Self-Critique"));
         assert!(names.contains(&"Memory Consolidation"));
         assert!(names.contains(&"Meta-Cognition"));
         assert!(names.contains(&"Creative-Synthesis"));
+        assert!(names.contains(&"Initiative"));
     }
 
     #[test]
@@ -246,7 +269,7 @@ mod tests {
         let all = registry.list().unwrap();
         assert_eq!(
             all.len(),
-            5,
+            6,
             "should not duplicate threads on re-registration"
         );
     }
@@ -271,7 +294,7 @@ mod tests {
         assert_eq!(status, ThreadStatus::Suspended);
 
         // Total count unchanged.
-        assert_eq!(registry.list().unwrap().len(), 5);
+        assert_eq!(registry.list().unwrap().len(), 6);
     }
 
     // ── DC-T11..DC-T13: Decoherence Fix — Thread Config Overrides ──
@@ -291,6 +314,8 @@ mod tests {
             meta_cognition_token_budget: None,
             creative_synthesis_schedule: None,
             creative_synthesis_token_budget: None,
+            initiative_schedule: None,
+            initiative_token_budget: None,
         };
 
         register_builtin_threads(
@@ -353,7 +378,7 @@ mod tests {
 
         assert_eq!(
             registry.list().unwrap().len(),
-            5,
+            6,
             "should not duplicate threads on re-registration with overrides"
         );
     }
