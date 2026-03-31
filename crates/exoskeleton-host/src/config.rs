@@ -562,6 +562,11 @@ impl VesselConfig {
                 .as_deref()
                 .and_then(parse_thread_schedule),
             creative_synthesis_token_budget: ts.creative_synthesis_token_budget,
+            initiative_schedule: ts
+                .initiative_schedule
+                .as_deref()
+                .and_then(parse_thread_schedule),
+            initiative_token_budget: ts.initiative_token_budget,
         })
     }
 }
@@ -776,6 +781,12 @@ pub struct ThreadsSection {
     /// Creative Synthesis token budget override. Default: 8192.
     #[serde(default)]
     pub creative_synthesis_token_budget: Option<u64>,
+    /// Initiative schedule override. Default: "every_10".
+    #[serde(default)]
+    pub initiative_schedule: Option<String>,
+    /// Initiative token budget override. Default: 8192.
+    #[serde(default)]
+    pub initiative_token_budget: Option<u64>,
 }
 
 /// Configuration for a source code repository to mount in the vessel container.

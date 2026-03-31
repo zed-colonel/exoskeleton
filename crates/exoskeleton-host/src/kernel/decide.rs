@@ -457,14 +457,20 @@ fn build_system_prompt(
 
 /// Generate the introspection tools section for the system prompt.
 fn build_introspection_description() -> String {
-    r#"## Introspection Tools (resolved immediately)
+    r#"---
 
-You can query your own internal state before making a decision. To do so,
-respond with a JSON object of type "query":
+## Internal State Queries (NOT tools — do NOT put these in the actions array)
+
+Before making your decision, you can query your own internal state. This uses a
+DIFFERENT format from tool actions. Respond with a JSON object of type "query":
 
 ```json
 {"type": "query", "queries": [{"query": "tick_history", "limit": 10}]}
 ```
+
+This is NOT a tool action. Do not use query names in the "actions" array.
+Queries are resolved immediately and the results are returned to you in the
+same conversation turn.
 
 Available queries:
 - tick_history(limit): Recent ticks with action counts, success rates, token usage
@@ -474,12 +480,12 @@ Available queries:
 - trust_history(principal_id, limit): Trust changes over time for one principal
 - budget_status: Current budget dimensions with consumed/remaining
 - thread_status: All threads with statuses and recent output summaries
-- memory_search(topic?, tags?): Search long-term memory
+- memory_search(topic?, tags?): Search long-term memory by topic or tags
 - connector_details(name): Full descriptor for a named connector
 - watch_list: Active watches
 
 After receiving results, continue reasoning and provide your final decision.
-When ready, respond with your decision JSON (same format as before).
+When ready, respond with your decision JSON (the format with "reasoning", "actions", etc.).
 You may issue up to 4 query rounds before your final decision."#
         .to_string()
 }
@@ -784,6 +790,8 @@ mod tests {
         assert!(prompt.contains("Available tools"));
         assert!(prompt.contains("fs.write: Write a file"));
         assert!(prompt.contains("test mission"));
+        assert!(prompt.contains("Internal State Queries"));
+        assert!(prompt.contains("NOT tools"));
     }
 
     // E5S1-T18: System prompt contains introspection tool descriptions
@@ -796,7 +804,7 @@ mod tests {
         let introspection = build_introspection_description();
         let prompt =
             build_system_prompt(&kernel_ctx, "- fs.write: Write a file", &introspection).unwrap();
-        assert!(prompt.contains("Introspection Tools"));
+        assert!(prompt.contains("Internal State Queries"));
         assert!(prompt.contains("tick_history"));
         assert!(prompt.contains("trust_scores"));
         assert!(prompt.contains("budget_status"));
