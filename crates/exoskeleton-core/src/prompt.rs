@@ -79,6 +79,14 @@ impl PromptRegistry {
             "bootstrap-preamble",
             include_str!("../../../prompts/bootstrap-preamble.md"),
         );
+        registry.insert(
+            "charter-creative-synthesis",
+            include_str!("../../../prompts/charters/creative-synthesis.md"),
+        );
+        registry.insert(
+            "charter-initiative",
+            include_str!("../../../prompts/charters/initiative.md"),
+        );
         registry
     }
 
@@ -203,9 +211,9 @@ mod tests {
     // ── E0-T9: with_defaults has all nine prompts ──
 
     #[test]
-    fn with_defaults_has_all_eleven_prompts() {
+    fn with_defaults_has_all_thirteen_prompts() {
         let registry = PromptRegistry::with_defaults();
-        assert_eq!(registry.len(), 11, "should have 11 compiled-in prompts");
+        assert_eq!(registry.len(), 13, "should have 13 compiled-in prompts");
 
         let expected_keys = [
             "decide-system",
@@ -219,6 +227,8 @@ mod tests {
             "bootstrap-first-contact",
             "bootstrap-identity-extraction",
             "bootstrap-preamble",
+            "charter-creative-synthesis",
+            "charter-initiative",
         ];
         for key in &expected_keys {
             assert!(
