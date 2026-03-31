@@ -39,7 +39,7 @@ The charter describes three modes the thread shifts between based on vessel stat
 - **Engagement** (ongoing, mission present): Nudges focus on mission advancement. What sub-goals can I pursue? What information should I gather? What experiments would advance my understanding?
 - **Reflection** (periodic, or when plan stalls): Nudges focus on consolidation. What have I learned? What patterns do I see? What should I remember?
 
-The thread determines emphasis by reading tick number, plan state, and working memory. All three modes can contribute in any tick; the emphasis shifts.
+The maturity curve is charter-driven, not code-driven. The charter instructs the LLM to check the tick number and plan state in its compiled context and adjust recommendations accordingly. There is no Rust-level mode switching — all three modes can contribute in any tick and the emphasis shifts based on the LLM's reading of the context.
 
 **Output Convention:**
 
@@ -117,37 +117,59 @@ Rather than adding new data structures or context sections, initiative flows thr
 - Mission sub-goals: medium TTL (10-15 ticks). Deserve more persistence.
 - The Decide step can remove entries explicitly when acted on or deemed irrelevant.
 
+**How initiative entries reach working memory:**
+
+Threads produce recommendation artifacts only — they cannot mutate state (sacred invariant). The Initiative Thread's recommendations are phrased as working memory suggestions, which appear in the `=== THREAD OUTPUTS ===` section of the Decide step's compiled context. The Decide step's LLM then chooses to emit `working_memory_ops` with the `initiative:` keys. This preserves the existing thread-produces-artifacts-only contract.
+
 **Flow Example:**
 ```
-Initiative Thread (tick 3) -> writes initiative:explore_fs to working memory
+Initiative Thread (tick 3) -> produces recommendation: "Set initiative:explore_fs = ..."
+  (recommendation appears in THREAD OUTPUTS section of compiled context)
+Decide (tick 3)            -> sees recommendation, emits working_memory_ops:
+                              [{op: "set", key: "initiative:explore_fs", value: "..."}]
+Amend (tick 3)             -> applies working_memory_ops, initiative:explore_fs now in state
 Orient (tick 4)            -> compiles working memory including initiative:explore_fs
-Decide (tick 4)            -> sees nudge, decides to act, queues fs.read action
-Amend (tick 4)             -> Decide removes initiative:explore_fs (acted on)
-Initiative Thread (tick 6) -> sees exploration happened, writes initiative:mission_subgoal
+Decide (tick 4)            -> sees nudge in working memory, queues fs.read action,
+                              emits remove op for initiative:explore_fs
+Initiative Thread (tick 6) -> sees exploration happened via events, recommends mission sub-goal
 ```
+
+Note: if the Decide LLM ignores Initiative Thread recommendations (fails to write the working memory ops), the nudges will reappear in subsequent thread outputs until acted on or until the Initiative Thread adjusts its recommendations based on updated context. This provides natural retry behavior without code-level enforcement.
+
+**Working memory entry cap:** The Amend step enforces a 50-entry cap on working memory. The short TTLs on initiative entries (3-5 ticks for exploration, 10-15 for mission sub-goals) ensure they expire before crowding out non-initiative entries. The Initiative Thread should limit itself to 2-3 recommendations per execution to avoid flooding.
 
 ## Introspection Query Clarity Fix
 
-The Decide prompt currently lists "Introspection Tools" alongside "Available tools." The LLM conflates the two invocation mechanisms, attempting to call introspection queries like `memory_search` as regular tool actions (`{"tool_name": "memory_search"}`).
+The Decide system prompt includes an "Introspection Tools" section (injected at runtime by `build_introspection_description()` in `decide.rs`, not present in the `decide-system.md` template itself). This section appears alongside "Available tools" in the assembled prompt. The LLM conflates the two invocation mechanisms, attempting to call introspection queries like `memory_search` as regular tool actions (`{"tool_name": "memory_search"}`).
 
-**Fix:** Rework the "Introspection Tools" section of `decide-system.md` to make the invocation mechanism visually and semantically distinct:
-- Rename the section to emphasize these are internal queries, not external tools
-- Add an explicit "these are NOT tool actions" callout
-- Show a clear contrast between tool invocation format and query format
-- Move the introspection section further from the tools section to reduce visual conflation
+**Fix:** Rework `build_introspection_description()` in `decide.rs` to make the invocation mechanism visually and semantically distinct:
+- Rename the section to emphasize these are internal state queries, not external tools
+- Add an explicit "these are NOT tool actions — do not use them in the actions array" callout
+- Show a clear contrast between tool invocation format (`actions` array) and query format (`{"type": "query"}`)
+- Add visual separation (e.g., a horizontal rule or distinct header style) between the tools and introspection sections
+
+## Budget Impact
+
+The Initiative Thread at `EveryNTicks(3)` with 4096 tokens adds ~10 executions per 30 ticks (~40K tokens). Combined with the two EveryTick threads (~245K tokens per 30 ticks), total thread overhead is substantial but within the Cognitive AQ budget model (I6). The `EveryNTicks(3)` default is tunable via `ThreadConfigOverrides`, allowing operators to reduce frequency if budget pressure is a concern. The thread's priority (High) means it competes with Self-Critique for context budget when resources are tight — this is intentional, as the two threads represent opposing forces that the Decide step mediates.
+
+## Thread Disagreement Resolution
+
+When the Initiative Thread recommends an action and Threat Monitor or Self-Critique flags concerns, there is no special arbitration mechanism. The Decide step sees all thread outputs in compiled context and weighs them. This is the existing resolution pattern for all thread disagreements. The Collaborator Stance prompt paragraph provides a tie-breaking frame: exploration is legitimate, so the Decide LLM should not reflexively defer to conservative threads when the concern is about initiative rather than actual danger.
 
 ## Files Touched
 
 | File | Change |
 |------|--------|
-| `prompts/decide-system.md` | Collaborator Stance paragraph; introspection query clarity rewrite |
+| `prompts/decide-system.md` | Collaborator Stance paragraph |
 | `prompts/charters/self-critique.md` | Progress/engagement rewrite |
 | `prompts/charters/threat-monitor.md` | Curiosity carve-out |
 | `prompts/charters/creative-synthesis.md` | New charter file (externalized from Rust) with experiment suggestions |
 | `prompts/charters/initiative.md` | New charter file |
-| `crates/exoskeleton-threads/src/builtin/mod.rs` | Register Initiative Thread |
+| `crates/exoskeleton-threads/src/builtin/mod.rs` | Register Initiative Thread; add fields to `ThreadConfigOverrides` |
 | `crates/exoskeleton-threads/src/builtin/initiative.rs` | New thread definition |
-| Tests across `exoskeleton-threads` and `exoskeleton-host` | |
+| `crates/exoskeleton-core/src/prompt.rs` | Add `charter-initiative` and `charter-creative-synthesis` to `PromptRegistry::with_defaults()` |
+| `crates/exoskeleton-host/src/kernel/decide.rs` | Rewrite `build_introspection_description()` for clarity |
+| Tests across `exoskeleton-threads` and `exoskeleton-host` | Update thread count assertions (5 → 6), template count assertions, add Initiative Thread tests |
 
 ## What's Out of Scope
 
@@ -172,10 +194,13 @@ The Decide prompt currently lists "Introspection Tools" alongside "Available too
 
 ### Integration Tests
 
-- Idle tick with Initiative Thread nudge produces non-empty actions from Decide step
-- Working memory contains `initiative:` entries after Initiative Thread runs
+All integration tests use mock LLM backends for determinism (consistent with existing test patterns in the codebase).
+
+- Idle tick with Initiative Thread recommendation in context: mock Decide backend returns actions referencing the nudge
+- Working memory contains `initiative:` entries after Decide step processes Initiative Thread recommendations
 - Initiative entries expire via TTL
-- Decide step can reference and act on initiative entries
+- Existing thread count assertions updated from 5 to 6
+- Existing template count assertions updated to include new charter entries
 
 ### Observability
 
