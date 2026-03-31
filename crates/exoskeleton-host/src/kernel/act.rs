@@ -120,7 +120,24 @@ pub fn act(
                     error = %e,
                     "tool invocation failed"
                 );
-                (ActionOutcome::Failure, Err(e.to_string()), None)
+                // Store error as receipt artifact so Observatory can display it
+                let error_json = serde_json::json!({
+                    "error": e.to_string(),
+                    "tool": action.tool_name,
+                    "params": action.params,
+                });
+                let receipt_ref = match Artifact::from_json(ArtifactKind::Receipt, &error_json)
+                {
+                    Ok(artifact) => match kernel.artifact_store.put(&artifact) {
+                        Ok(id) => Some(id),
+                        Err(store_err) => {
+                            tracing::warn!(error = %store_err, "failed to store error receipt");
+                            None
+                        }
+                    },
+                    Err(_) => None,
+                };
+                (ActionOutcome::Failure, Err(e.to_string()), receipt_ref)
             }
         };
 
