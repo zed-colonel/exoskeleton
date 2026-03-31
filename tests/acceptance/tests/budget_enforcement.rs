@@ -267,12 +267,12 @@ async fn cognitive_budget_tracks_consumption() {
 #[tokio::test]
 async fn cognitive_budget_exhaustion_reflected_in_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    // Small budget: 250 tokens. With 5 built-in threads consuming ~54
+    // Small budget: 300 tokens. With 6 built-in threads consuming ~60
     // tokens/tick, exhausted during tick 5. We wait for 5 ticks; the budget
     // is consumed by the end and the BudgetGate blocks further dispatch.
     // frontier_cost_budget_cents must be > 0 because AQ allocates CostCents dimension.
     let cognitive = CognitiveBudgetConfig {
-        local_token_budget: 250,
+        local_token_budget: 300,
         frontier_token_budget: 0,
         frontier_cost_budget_cents: 1,
         time_window_secs: 3600,
@@ -421,15 +421,19 @@ async fn budget_window_timer_resets_counters() {
     // Add margin for timer scheduling (window timer skips first tick).
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    // After window reset, budget should be replenished
+    // After window reset, budget should be replenished. Because the vessel
+    // keeps ticking after the reset (consuming tokens), we check that the
+    // budget was restored to at least 50% of the original — proving the
+    // reset fired — rather than comparing against the pre-reset snapshot
+    // (which is a race between reset and ongoing consumption).
     let post_reset_remaining = {
         let guard = tracker.lock().await;
         guard.remaining_local_tokens()
     };
     assert!(
-        post_reset_remaining > pre_reset_remaining,
-        "tokens should be replenished after window reset \
-         (before={pre_reset_remaining}, after={post_reset_remaining})"
+        post_reset_remaining >= 250,
+        "tokens should be substantially replenished after window reset \
+         (got {post_reset_remaining}, expected >= 250 of 500)"
     );
 
     support::shutdown_and_verify(vessel).await;
