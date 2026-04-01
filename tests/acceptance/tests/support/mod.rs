@@ -54,6 +54,7 @@ pub fn test_config(dir: &Path) -> VesselConfig {
         max_decide_turns: 5,
         max_watches: 20,
         extra_destructive_tools: vec![],
+        connectors_dir: None,
     }
 }
 

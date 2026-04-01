@@ -40,6 +40,16 @@ pub enum FrontierProvider {
     /// OpenAI Chat Completions API.
     #[serde(rename = "openai")]
     OpenAI,
+    /// Google Gemini (OpenAI-compatible endpoint).
+    Gemini,
+    /// xAI Grok (OpenAI-compatible endpoint).
+    Grok,
+    /// OpenRouter (OpenAI-compatible multi-model proxy).
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+    /// DeepSeek (OpenAI-compatible endpoint).
+    #[serde(rename = "deepseek")]
+    DeepSeek,
 }
 
 /// Configuration for a local LLM backend.
@@ -246,6 +256,12 @@ pub struct VesselConfig {
     /// Additional tools classified as destructive beyond the AlignConfig defaults.
     /// Loaded from [connectors.destructive] in vessel.toml.
     pub extra_destructive_tools: Vec<String>,
+
+    // ── WASM connector settings ──
+    /// Directory containing pre-compiled WASM connectors (.wasm + .connector.toml).
+    /// `None` disables WASM connector loading.
+    /// Default: None (env override: EXO_CONNECTORS_DIR).
+    pub connectors_dir: Option<PathBuf>,
 }
 
 impl Default for VesselConfig {
@@ -278,6 +294,7 @@ impl Default for VesselConfig {
             max_decide_turns: 5,
             max_watches: exoskeleton_core::watch::DEFAULT_MAX_WATCHES,
             extra_destructive_tools: vec![],
+            connectors_dir: None,
         }
     }
 }
@@ -413,10 +430,12 @@ impl VesselConfig {
                 })
             },
             sandbox: Some(self.sandbox.clone()),
-            connectors: if self.extra_destructive_tools.is_empty() {
+            connectors: if self.extra_destructive_tools.is_empty() && self.connectors_dir.is_none()
+            {
                 None
             } else {
                 Some(ConnectorsSection {
+                    dir: self.connectors_dir.clone(),
                     destructive: self.extra_destructive_tools.clone(),
                 })
             },
@@ -449,6 +468,7 @@ impl VesselConfig {
     /// - `EXO_DAEMON_LISTEN` -> `daemon_listen` (host:port)
     /// - `EXO_CORS_ORIGINS` -> `cors_allowed_origins` (comma-separated origins)
     /// - `EXO_OBSERVATORY_URL` -> `observatory_url`
+    /// - `EXO_CONNECTORS_DIR` -> `connectors_dir` (path to WASM connectors)
     pub fn from_file(path: &Path) -> Result<Self, ExoError> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|e| ExoError::Config(format!("failed to read config file: {e}")))?;
@@ -527,6 +547,9 @@ impl VesselConfig {
         }
         if let Ok(val) = std::env::var("EXO_OBSERVATORY_URL") {
             self.observatory_url = Some(val);
+        }
+        if let Ok(val) = std::env::var("EXO_CONNECTORS_DIR") {
+            self.connectors_dir = Some(PathBuf::from(val));
         }
         Ok(())
     }
@@ -877,6 +900,10 @@ impl Default for SandboxConfig {
 /// The `[connectors]` section of the TOML config file.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectorsSection {
+    /// Directory containing pre-compiled WASM connectors (.wasm + .connector.toml).
+    /// Scanned at boot; supports hot-reload via daemon API.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
     /// Additional tool names classified as destructive beyond AlignConfig defaults.
     #[serde(default)]
     pub destructive: Vec<String>,
@@ -963,7 +990,12 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
             observatory_token_env: file.vessel.observatory_token_env,
             max_decide_turns: file.vessel.max_decide_turns.max(1),
             max_watches: file.vessel.max_watches.min(100),
-            extra_destructive_tools: file.connectors.map(|c| c.destructive).unwrap_or_default(),
+            extra_destructive_tools: file
+                .connectors
+                .as_ref()
+                .map(|c| c.destructive.clone())
+                .unwrap_or_default(),
+            connectors_dir: file.connectors.as_ref().and_then(|c| c.dir.clone()),
         })
     }
 }

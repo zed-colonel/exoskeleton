@@ -141,8 +141,8 @@ async fn threads_endpoint_lists_builtin_threads() {
     let body = body_string(resp.into_body()).await;
     let json: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
 
-    // E5-S3 added Creative Synthesis as the 5th built-in thread.
-    assert_eq!(json.len(), 5, "should have 5 built-in threads");
+    // Initiative thread added as 6th built-in thread.
+    assert_eq!(json.len(), 6, "should have 6 built-in threads");
 
     let names: Vec<&str> = json.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Threat Monitor"));

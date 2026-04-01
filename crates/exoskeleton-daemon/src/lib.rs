@@ -97,7 +97,7 @@ impl ExoDaemon {
             watch_store,
             thread_registry,
             wi_host_slot,
-            connectors_dir: None,
+            connectors_dir: self.vessel.config().connectors_dir.clone(),
             align_config: None,
         });
 

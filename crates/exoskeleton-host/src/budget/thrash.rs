@@ -265,12 +265,7 @@ mod tests {
     fn medium_thrash_on_failed_action_stagnation() {
         // 5 ticks with attempted but failed actions → stagnation
         let ticks: Vec<_> = (0..5)
-            .map(|_| {
-                make_tick(
-                    vec![failing_action("fs.write")],
-                    vec![llm_call(500, 300)],
-                )
-            })
+            .map(|_| make_tick(vec![failing_action("fs.write")], vec![llm_call(500, 300)]))
             .collect();
         let assessment = ThrashDetector::check(&ticks);
         assert!(
@@ -283,12 +278,7 @@ mod tests {
     fn high_thrash_on_long_failed_stagnation() {
         // 10 ticks with attempted but failed actions → high stagnation
         let ticks: Vec<_> = (0..10)
-            .map(|_| {
-                make_tick(
-                    vec![failing_action("shell.exec")],
-                    vec![llm_call(500, 300)],
-                )
-            })
+            .map(|_| make_tick(vec![failing_action("shell.exec")], vec![llm_call(500, 300)]))
             .collect();
         let assessment = ThrashDetector::check(&ticks);
         assert_eq!(

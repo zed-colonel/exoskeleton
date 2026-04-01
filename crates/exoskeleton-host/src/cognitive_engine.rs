@@ -199,6 +199,12 @@ impl CognitiveHandler {
                 .unwrap_or_else(|| match frontier_config.provider {
                     FrontierProvider::Anthropic => "https://api.anthropic.com".into(),
                     FrontierProvider::OpenAI => "https://api.openai.com".into(),
+                    FrontierProvider::Gemini => {
+                        "https://generativelanguage.googleapis.com/v1beta/openai".into()
+                    }
+                    FrontierProvider::Grok => "https://api.x.ai".into(),
+                    FrontierProvider::OpenRouter => "https://openrouter.ai/api".into(),
+                    FrontierProvider::DeepSeek => "https://api.deepseek.com".into(),
                 });
 
         let backend: Arc<dyn LlmHttpBackend> = match frontier_config.provider {
@@ -207,7 +213,11 @@ impl CognitiveHandler {
                 frontier_config.model.clone(),
                 api_key,
             )),
-            FrontierProvider::OpenAI => Arc::new(OpenAiCompatBackend::new(
+            FrontierProvider::OpenAI
+            | FrontierProvider::Gemini
+            | FrontierProvider::Grok
+            | FrontierProvider::OpenRouter
+            | FrontierProvider::DeepSeek => Arc::new(OpenAiCompatBackend::new(
                 base_url,
                 frontier_config.model.clone(),
                 Some(api_key),

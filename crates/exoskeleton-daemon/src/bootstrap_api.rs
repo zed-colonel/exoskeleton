@@ -86,6 +86,9 @@ pub struct FrontierConfigRequest {
     pub provider: String,
     pub model: String,
     pub api_key_env: String,
+    /// Custom endpoint URL override. If `None`, uses provider default.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,13 +129,17 @@ pub async fn configure(
     let frontier = req.frontier.map(|fc| {
         let provider = match fc.provider.as_str() {
             "openai" => FrontierProvider::OpenAI,
+            "gemini" => FrontierProvider::Gemini,
+            "grok" => FrontierProvider::Grok,
+            "openrouter" => FrontierProvider::OpenRouter,
+            "deepseek" => FrontierProvider::DeepSeek,
             _ => FrontierProvider::Anthropic, // default to Anthropic
         };
         FrontierModelConfig {
             provider,
             model: fc.model,
             api_key_env: fc.api_key_env,
-            endpoint: None,
+            endpoint: fc.endpoint,
         }
     });
 
@@ -587,13 +594,21 @@ fn write_vessel_config(
         let provider_str = match fc.provider {
             FrontierProvider::Anthropic => "anthropic",
             FrontierProvider::OpenAI => "openai",
+            FrontierProvider::Gemini => "gemini",
+            FrontierProvider::Grok => "grok",
+            FrontierProvider::OpenRouter => "openrouter",
+            FrontierProvider::DeepSeek => "deepseek",
         };
         toml.push_str(&format!("provider = \"{provider_str}\"\n"));
         toml.push_str(&format!("model = {}\n", toml_string_escape(&fc.model)));
         toml.push_str(&format!(
-            "api_key_env = {}\n\n",
+            "api_key_env = {}\n",
             toml_string_escape(&fc.api_key_env)
         ));
+        if let Some(ref endpoint) = fc.endpoint {
+            toml.push_str(&format!("endpoint = {}\n", toml_string_escape(endpoint)));
+        }
+        toml.push('\n');
     }
 
     // [daemon] section

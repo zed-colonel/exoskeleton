@@ -93,7 +93,14 @@ pub fn run_wizard(data_dir_override: Option<String>) -> Result<WizardResult, Cli
 fn configure_frontier() -> Result<FrontierConfig, CliError> {
     println!();
 
-    let provider_options = vec!["Anthropic", "OpenAI"];
+    let provider_options = vec![
+        "Anthropic",
+        "OpenAI",
+        "Gemini",
+        "Grok (xAI)",
+        "OpenRouter",
+        "DeepSeek",
+    ];
     let provider_choice = Select::new()
         .with_prompt("  Provider")
         .items(&provider_options)
@@ -104,12 +111,20 @@ fn configure_frontier() -> Result<FrontierConfig, CliError> {
     let provider = match provider_choice {
         0 => FrontierProvider::Anthropic,
         1 => FrontierProvider::OpenAI,
+        2 => FrontierProvider::Gemini,
+        3 => FrontierProvider::Grok,
+        4 => FrontierProvider::OpenRouter,
+        5 => FrontierProvider::DeepSeek,
         _ => unreachable!(),
     };
 
     let default_model = match provider {
         FrontierProvider::Anthropic => "claude-sonnet-4-20250514",
         FrontierProvider::OpenAI => "gpt-4o",
+        FrontierProvider::Gemini => "gemini-2.5-flash",
+        FrontierProvider::Grok => "grok-3-mini",
+        FrontierProvider::OpenRouter => "anthropic/claude-sonnet-4",
+        FrontierProvider::DeepSeek => "deepseek-chat",
     };
     let model: String = Input::new()
         .with_prompt("  Model")
@@ -120,6 +135,10 @@ fn configure_frontier() -> Result<FrontierConfig, CliError> {
     let default_env = match provider {
         FrontierProvider::Anthropic => "ANTHROPIC_API_KEY",
         FrontierProvider::OpenAI => "OPENAI_API_KEY",
+        FrontierProvider::Gemini => "GEMINI_API_KEY",
+        FrontierProvider::Grok => "XAI_API_KEY",
+        FrontierProvider::OpenRouter => "OPENROUTER_API_KEY",
+        FrontierProvider::DeepSeek => "DEEPSEEK_API_KEY",
     };
     let api_key_env: String = Input::new()
         .with_prompt("  API key env var")

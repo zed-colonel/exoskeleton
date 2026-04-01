@@ -728,8 +728,10 @@ mod tests {
         let output = super::render_conversations(&[conv], None);
         // Should show "5 msgs" but only last 3 message lines (unresolved fallback)
         assert!(output.contains("5 msgs"));
-        let msg_lines: Vec<&str> =
-            output.lines().filter(|l| l.contains("unresolved envelope:")).collect();
+        let msg_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| l.contains("unresolved envelope:"))
+            .collect();
         assert_eq!(msg_lines.len(), 3, "should show last 3 messages only");
     }
 
@@ -745,7 +747,8 @@ mod tests {
         let now = Utc::now();
         let payload1 = ArtifactId::from_content(b"msg1");
         let payload2 = ArtifactId::from_content(b"msg2");
-        let mut conv = Conversation::from_first_message(p1, EnvelopeId::new(), payload1.clone(), now);
+        let mut conv =
+            Conversation::from_first_message(p1, EnvelopeId::new(), payload1.clone(), now);
         conv.add_message(
             p1,
             EnvelopeId::new(),

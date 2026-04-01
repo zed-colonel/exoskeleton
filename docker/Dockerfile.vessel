@@ -67,6 +67,14 @@ COPY --from=builder /build/target/release/exo /usr/local/bin/exo
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Pre-compiled WASM connectors
+COPY --from=worldinterface examples/wasm-connectors/compiled/json-validate.connector.toml /opt/connectors/
+COPY --from=worldinterface examples/wasm-connectors/compiled/json-validate.wasm /opt/connectors/
+COPY --from=worldinterface examples/wasm-connectors/compiled/web-search.connector.toml /opt/connectors/
+COPY --from=worldinterface examples/wasm-connectors/compiled/web-search.wasm /opt/connectors/
+COPY --from=worldinterface examples/wasm-connectors/compiled/webhook-send.connector.toml /opt/connectors/
+COPY --from=worldinterface examples/wasm-connectors/compiled/webhook-send.wasm /opt/connectors/
+
 # Data volume
 RUN mkdir -p /data
 VOLUME /data
@@ -77,6 +85,7 @@ RUN mkdir -p /sandbox && chmod 1777 /sandbox
 # Default environment
 ENV EXO_DATA_DIR=/data
 ENV EXO_DAEMON_LISTEN=0.0.0.0:7600
+ENV EXO_CONNECTORS_DIR=/opt/connectors
 ENV RUST_LOG=info
 
 EXPOSE 7600

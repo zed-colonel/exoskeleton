@@ -589,6 +589,7 @@ impl Vessel {
             context_store_path: config.data_dir.join("wi").join("context.db"),
             tick_interval: config.tool_tick_interval,
             dispatch_concurrency: config.tool_dispatch_concurrency,
+            connectors_dir: config.connectors_dir.clone(),
             ..Default::default()
         }
     }

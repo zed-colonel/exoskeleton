@@ -126,8 +126,7 @@ pub fn act(
                     "tool": action.tool_name,
                     "params": action.params,
                 });
-                let receipt_ref = match Artifact::from_json(ArtifactKind::Receipt, &error_json)
-                {
+                let receipt_ref = match Artifact::from_json(ArtifactKind::Receipt, &error_json) {
                     Ok(artifact) => match kernel.artifact_store.put(&artifact) {
                         Ok(id) => Some(id),
                         Err(store_err) => {

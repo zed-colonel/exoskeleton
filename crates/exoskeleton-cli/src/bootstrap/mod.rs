@@ -309,6 +309,10 @@ fn write_vessel_config(
         let provider_str = match fc.provider {
             FrontierProvider::Anthropic => "anthropic",
             FrontierProvider::OpenAI => "openai",
+            FrontierProvider::Gemini => "gemini",
+            FrontierProvider::Grok => "grok",
+            FrontierProvider::OpenRouter => "openrouter",
+            FrontierProvider::DeepSeek => "deepseek",
         };
         toml.push_str(&format!("provider = \"{provider_str}\"\n"));
         toml.push_str(&format!("model = {}\n", toml_string_escape(&fc.model)));
