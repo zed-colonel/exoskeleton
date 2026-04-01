@@ -36,12 +36,10 @@ jobs:
         with:
           repository: zed-colonel/worldinterface
           path: worldinterface
-          ssh-key: ${{ secrets.DEPLOY_KEY_WI }}
       - uses: actions/checkout@v4
         with:
           repository: zed-colonel/actionqueue
           path: actionqueue
-          ssh-key: ${{ secrets.DEPLOY_KEY_AQ }}
       - uses: actions/checkout@v4
         with:
           repository: zed-colonel/observatory

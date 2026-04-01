@@ -1,4 +1,27 @@
-# ── Stage 1: Rust builder ───────────────────────────────────────
+# ── Stage 1: WASM connector builder ─────────────────────────────
+FROM rust:1.89-bookworm AS wasm-builder
+
+RUN rustup target add wasm32-wasip2
+
+WORKDIR /wi
+
+# Copy only what the WASM connectors need from worldinterface:
+# the WIT definitions and the connector source directories.
+COPY --from=worldinterface crates/worldinterface-wasm/wit/ crates/worldinterface-wasm/wit/
+COPY --from=worldinterface examples/wasm-connectors/json-validate/ examples/wasm-connectors/json-validate/
+COPY --from=worldinterface examples/wasm-connectors/web-search/ examples/wasm-connectors/web-search/
+COPY --from=worldinterface examples/wasm-connectors/webhook-send/ examples/wasm-connectors/webhook-send/
+COPY --from=worldinterface examples/wasm-connectors/host-demo/ examples/wasm-connectors/host-demo/
+
+RUN for connector in json-validate web-search webhook-send host-demo; do \
+        echo "Building $connector..." && \
+        cargo build \
+            --manifest-path examples/wasm-connectors/$connector/Cargo.toml \
+            --target wasm32-wasip2 \
+            --release; \
+    done
+
+# ── Stage 2: Exoskeleton builder ────────────────────────────────
 FROM rust:1.89-bookworm AS builder
 
 WORKDIR /build
@@ -47,7 +70,7 @@ RUN find crates/ tests/ examples/ -name "*.rs" -exec touch {} +
 
 RUN cargo build --release --bin exo
 
-# ── Stage 2: Runtime ─────────────────────────────────────────────
+# ── Stage 3: Runtime ─────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && \
@@ -67,13 +90,15 @@ COPY --from=builder /build/target/release/exo /usr/local/bin/exo
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Pre-compiled WASM connectors
-COPY --from=worldinterface examples/wasm-connectors/compiled/json-validate.connector.toml /opt/connectors/
-COPY --from=worldinterface examples/wasm-connectors/compiled/json-validate.wasm /opt/connectors/
-COPY --from=worldinterface examples/wasm-connectors/compiled/web-search.connector.toml /opt/connectors/
-COPY --from=worldinterface examples/wasm-connectors/compiled/web-search.wasm /opt/connectors/
-COPY --from=worldinterface examples/wasm-connectors/compiled/webhook-send.connector.toml /opt/connectors/
-COPY --from=worldinterface examples/wasm-connectors/compiled/webhook-send.wasm /opt/connectors/
+# WASM connectors — manifests from source, binaries from wasm-builder stage
+COPY --from=worldinterface examples/wasm-connectors/json-validate/json-validate.connector.toml /opt/connectors/
+COPY --from=wasm-builder /wi/examples/wasm-connectors/json-validate/target/wasm32-wasip2/release/json_validate.wasm /opt/connectors/json-validate.wasm
+COPY --from=worldinterface examples/wasm-connectors/web-search/web-search.connector.toml /opt/connectors/
+COPY --from=wasm-builder /wi/examples/wasm-connectors/web-search/target/wasm32-wasip2/release/web_search.wasm /opt/connectors/web-search.wasm
+COPY --from=worldinterface examples/wasm-connectors/webhook-send/webhook-send.connector.toml /opt/connectors/
+COPY --from=wasm-builder /wi/examples/wasm-connectors/webhook-send/target/wasm32-wasip2/release/webhook_send.wasm /opt/connectors/webhook-send.wasm
+COPY --from=worldinterface examples/wasm-connectors/host-demo/host-demo.connector.toml /opt/connectors/
+COPY --from=wasm-builder /wi/examples/wasm-connectors/host-demo/target/wasm32-wasip2/release/host_demo.wasm /opt/connectors/host-demo.wasm
 
 # Data volume
 RUN mkdir -p /data
