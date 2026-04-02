@@ -63,6 +63,10 @@ pub enum DecideTurn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionProtocol {
     pub reasoning: String,
+    /// Whether the agent requests inner-loop execution for this tick (E8-S1).
+    /// Backward-compatible: old JSON without this field → false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inner_loop_requested: bool,
     /// Explicit reply to the user. When the vessel wants to respond to a
     /// message, it populates this field. None for idle ticks or internal-only
     /// decisions. Backward-compatible: old JSON without this field → None.
@@ -108,6 +112,10 @@ pub struct DecisionResult {
     pub response_artifact_id: ArtifactId,
     /// Watch proposals approved by Decide, awaiting Align approval.
     pub watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
+    /// Whether the agent requests inner-loop execution for this tick (E8-S1).
+    /// When true and inner_loop.enabled in config, the tick enters the
+    /// bounded inner loop instead of the single Decide→Act pass.
+    pub inner_loop_requested: bool,
 }
 
 /// Proposed changes to the StateSnapshot from the Decide step.
@@ -242,6 +250,11 @@ where
     }
 }
 
+/// Helper for `skip_serializing_if` on boolean fields.
+fn is_false(val: &bool) -> bool {
+    !val
+}
+
 /// Extract JSON content from a markdown code fence.
 ///
 /// Looks for ```json ... ``` and returns the content between the fences.
@@ -278,6 +291,7 @@ mod tests {
     fn decision_protocol_roundtrip_minimal() {
         let proto = DecisionProtocol {
             reasoning: "Nothing to do".into(),
+            inner_loop_requested: false,
             reply: None,
             plan_update: None,
             working_memory_ops: None,
@@ -298,6 +312,7 @@ mod tests {
     fn decision_protocol_optional_fields_omitted() {
         let proto = DecisionProtocol {
             reasoning: "Test".into(),
+            inner_loop_requested: false,
             reply: None,
             plan_update: None,
             working_memory_ops: None,
@@ -309,6 +324,7 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("plan_update"));
         assert!(!obj.contains_key("working_memory_ops"));
+        assert!(!obj.contains_key("inner_loop_requested"));
     }
 
     // ── E1-T17: PlannedAction with plan_task_id roundtrip ──
