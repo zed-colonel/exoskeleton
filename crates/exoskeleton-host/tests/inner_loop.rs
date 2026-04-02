@@ -89,6 +89,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_decide_turns: kernel.max_decide_turns,
         watch_store: kernel.watch_store.clone(),
         max_watches: kernel.max_watches,
+        read_paths_this_tick: kernel.read_paths_this_tick.clone(),
         inner_loop_config: kernel.inner_loop_config.clone(),
     }
 }
@@ -158,6 +159,7 @@ async fn setup_kernel_with_mock(
         max_decide_turns: 5,
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
+        read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         inner_loop_config,
     };
 
@@ -733,7 +735,7 @@ async fn inner_loop_budget_recorded() {
             Arc::new(exoskeleton_host::budget::tracker::InMemoryBudgetStore::new());
         let tracker =
             exoskeleton_host::budget::CognitiveBudgetTracker::new(budget_config, budget_store);
-        kernel.budget_tracker = Some(Arc::new(tokio::sync::Mutex::new(tracker)));
+        kernel.budget_tracker = Some(Arc::new(std::sync::Mutex::new(tracker)));
 
         let k = send_kernel(&kernel);
         let output = tokio::task::spawn_blocking(move || {
@@ -748,12 +750,14 @@ async fn inner_loop_budget_recorded() {
         ));
 
         // Verify budget was consumed
-        let guard = kernel.budget_tracker.as_ref().unwrap().try_lock().unwrap();
-        let consumption = guard.build_consumption();
-        assert!(
-            !consumption.is_empty(),
-            "budget should have been consumed during inner loop"
-        );
+        {
+            let guard = kernel.budget_tracker.as_ref().unwrap().lock().unwrap();
+            let consumption = guard.build_consumption();
+            assert!(
+                !consumption.is_empty(),
+                "budget should have been consumed during inner loop"
+            );
+        }
 
         shutdown_host(&kernel).await;
     })

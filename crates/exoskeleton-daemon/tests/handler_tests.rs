@@ -1748,6 +1748,10 @@ async fn connector_loaded_event_emitted() {
         output_schema: None,
         idempotent: true,
         side_effects: false,
+        is_read_only: true,
+        is_mutating: false,
+        is_concurrency_safe: true,
+        requires_read_before_write: false,
     };
     let payload = serde_json::to_vec(&descriptor).unwrap();
     let artifact = exoskeleton_core::Artifact::new(
@@ -1823,6 +1827,10 @@ async fn decide_sees_new_connector() {
                 output_schema: None,
                 idempotent: true,
                 side_effects: false,
+                is_read_only: true,
+                is_mutating: false,
+                is_concurrency_safe: true,
+                requires_read_before_write: false,
             }
         }
         fn invoke(

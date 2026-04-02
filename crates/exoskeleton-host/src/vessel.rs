@@ -74,9 +74,9 @@ pub struct Vessel {
     /// Relationship ledger (Sprint 10).
     relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger>,
     /// Cognitive budget tracker (Sprint 10).
-    budget_tracker: Option<Arc<Mutex<crate::budget::CognitiveBudgetTracker>>>,
+    budget_tracker: Option<Arc<std::sync::Mutex<crate::budget::CognitiveBudgetTracker>>>,
     /// Tool budget gate (Sprint 10).
-    tool_budget_gate: Option<Arc<Mutex<crate::budget::ToolBudgetGate>>>,
+    tool_budget_gate: Option<Arc<std::sync::Mutex<crate::budget::ToolBudgetGate>>>,
     /// Broadcast sender for real-time events (D2).
     event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
 }
@@ -152,12 +152,12 @@ impl Vessel {
             if let Err(e) = tracker.load_or_reset() {
                 tracing::warn!(error = %e, "failed to load budget state; starting fresh");
             }
-            Some(Arc::new(tokio::sync::Mutex::new(tracker)))
+            Some(Arc::new(std::sync::Mutex::new(tracker)))
         } else {
             None
         };
         let tool_budget_gate = config.tool_budget.as_ref().map(|tb| {
-            Arc::new(tokio::sync::Mutex::new(crate::budget::ToolBudgetGate::new(
+            Arc::new(std::sync::Mutex::new(crate::budget::ToolBudgetGate::new(
                 tb.clone(),
             )))
         });
@@ -197,6 +197,7 @@ impl Vessel {
             max_decide_turns: config.max_decide_turns,
             watch_store: storage.watch_store().clone() as Arc<dyn exoskeleton_core::WatchStore>,
             max_watches: config.max_watches,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: config.inner_loop.clone(),
         });
 
@@ -565,12 +566,12 @@ impl Vessel {
     }
 
     /// Access the budget tracker.
-    pub fn budget_tracker(&self) -> &Option<Arc<Mutex<CognitiveBudgetTracker>>> {
+    pub fn budget_tracker(&self) -> &Option<Arc<std::sync::Mutex<CognitiveBudgetTracker>>> {
         &self.budget_tracker
     }
 
     /// Access the tool budget gate.
-    pub fn tool_budget_gate(&self) -> &Option<Arc<Mutex<ToolBudgetGate>>> {
+    pub fn tool_budget_gate(&self) -> &Option<Arc<std::sync::Mutex<ToolBudgetGate>>> {
         &self.tool_budget_gate
     }
 
@@ -667,8 +668,8 @@ struct BudgetWindowTimerConfig {
     engine_slot: CognitiveEngineSlot,
     master_loop_task_id: TaskId,
     cognitive_budget: Option<exoskeleton_core::CognitiveBudgetConfig>,
-    budget_tracker: Option<Arc<Mutex<crate::budget::CognitiveBudgetTracker>>>,
-    tool_budget_gate: Option<Arc<Mutex<crate::budget::ToolBudgetGate>>>,
+    budget_tracker: Option<Arc<std::sync::Mutex<crate::budget::CognitiveBudgetTracker>>>,
+    tool_budget_gate: Option<Arc<std::sync::Mutex<crate::budget::ToolBudgetGate>>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     window_secs: u64,
 }
@@ -686,9 +687,15 @@ fn spawn_budget_window_timer(mut cfg: BudgetWindowTimerConfig) -> JoinHandle<()>
                 _ = interval.tick() => {
                     // 1. Reset Exoskeleton-layer cognitive budget
                     if let Some(ref tracker) = cfg.budget_tracker {
-                        let mut guard = tracker.lock().await;
-                        if let Err(e) = guard.reset_window() {
-                            tracing::error!(error = %e, "budget window reset failed");
+                        match tracker.lock() {
+                            Ok(mut guard) => {
+                                if let Err(e) = guard.reset_window() {
+                                    tracing::error!(error = %e, "budget window reset failed");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "budget tracker mutex poisoned");
+                            }
                         }
                     }
 
@@ -717,8 +724,14 @@ fn spawn_budget_window_timer(mut cfg: BudgetWindowTimerConfig) -> JoinHandle<()>
 
                     // 3. Reset tool budget gate
                     if let Some(ref gate) = cfg.tool_budget_gate {
-                        let mut guard = gate.lock().await;
-                        guard.reset_window();
+                        match gate.lock() {
+                            Ok(mut guard) => {
+                                guard.reset_window();
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "tool budget gate mutex poisoned");
+                            }
+                        }
                     }
 
                     tracing::info!("budget window reset complete");
@@ -779,16 +792,19 @@ async fn schedule_master_loop(
 mod tests {
     use super::*;
 
-    // ── E4S1-T17: WI default_registry has 6 connectors ──
+    // ── E4S1-T17: WI default_registry has built-in connectors ──
 
     #[test]
-    fn default_registry_has_six_connectors() {
+    fn default_registry_has_nine_connectors() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 6, "expected 6 built-in connectors");
+        assert_eq!(registry.len(), 9, "expected 9 built-in connectors");
         assert!(registry.get("delay").is_some());
         assert!(registry.get("http.request").is_some());
         assert!(registry.get("fs.read").is_some());
         assert!(registry.get("fs.write").is_some());
+        assert!(registry.get("code.read").is_some());
+        assert!(registry.get("code.edit").is_some());
+        assert!(registry.get("code.write").is_some());
         assert!(registry.get("shell.exec").is_some());
         assert!(registry.get("sandbox.exec").is_some());
     }
@@ -798,13 +814,13 @@ mod tests {
     #[test]
     fn peer_resolve_registered_when_observatory_url_set() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 6);
+        assert_eq!(registry.len(), 9);
 
         // Simulate the conditional registration from start_with_registry_and_backends
         let observatory_url = "http://observatory:3000".to_string();
         registry.register(Arc::new(PeerResolveConnector::new(observatory_url, None)));
 
-        assert_eq!(registry.len(), 7);
+        assert_eq!(registry.len(), 10);
         assert!(registry.get("peer.resolve").is_some());
     }
 }

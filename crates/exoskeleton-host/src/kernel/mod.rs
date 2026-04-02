@@ -63,9 +63,9 @@ pub struct KernelContext {
     /// Conversation store for multi-turn interaction tracking (E1-S2).
     pub conversation_store: Arc<dyn ConversationStore>,
     /// Cognitive budget tracker (Sprint 9). `None` if no budget configured.
-    pub budget_tracker: Option<Arc<tokio::sync::Mutex<CognitiveBudgetTracker>>>,
+    pub budget_tracker: Option<Arc<std::sync::Mutex<CognitiveBudgetTracker>>>,
     /// Tool budget gate (Sprint 9). `None` if no budget configured.
-    pub tool_budget_gate: Option<Arc<tokio::sync::Mutex<ToolBudgetGate>>>,
+    pub tool_budget_gate: Option<Arc<std::sync::Mutex<ToolBudgetGate>>>,
     /// Prometheus metrics (Sprint 10). `None` in unit tests without metrics.
     pub metrics: Option<Arc<ExoMetrics>>,
     /// Broadcast sender for real-time events (D2).
@@ -135,7 +135,7 @@ pub fn run_tick(
 
     // 2.5 Reset per-tick budget counters (Sprint 9)
     if let Some(ref tracker) = kernel.budget_tracker {
-        if let Ok(mut guard) = tracker.try_lock() {
+        if let Ok(mut guard) = tracker.lock() {
             guard.reset_tick_counters();
         }
     }
@@ -413,7 +413,7 @@ pub fn run_tick(
 
     // Record thrash level in budget tracker
     if let Some(ref tracker) = kernel.budget_tracker {
-        if let Ok(mut guard) = tracker.try_lock() {
+        if let Ok(mut guard) = tracker.lock() {
             guard.set_thrash_level(thrash_assessment.level);
         }
     }
@@ -456,7 +456,7 @@ pub fn run_tick(
 
         // Build consumption before suspending
         let consumption = if let Some(ref tracker) = kernel.budget_tracker {
-            if let Ok(guard) = tracker.try_lock() {
+            if let Ok(guard) = tracker.lock() {
                 guard.build_consumption()
             } else {
                 vec![]
@@ -509,7 +509,7 @@ pub fn run_tick(
         .iter()
         .any(|e| e.record.outcome == exoskeleton_core::ActionOutcome::Success);
     if let Some(ref tracker) = kernel.budget_tracker {
-        if let Ok(mut guard) = tracker.try_lock() {
+        if let Ok(mut guard) = tracker.lock() {
             if has_successful_actions {
                 guard.clear_failures();
             } else if !act_result.executions.is_empty() {
@@ -535,7 +535,7 @@ pub fn run_tick(
 
             // Replace consumption with budget-tracked consumption (Sprint 9)
             let consumption = if let Some(ref tracker) = kernel.budget_tracker {
-                if let Ok(guard) = tracker.try_lock() {
+                if let Ok(guard) = tracker.lock() {
                     guard.build_consumption()
                 } else {
                     vec![]

@@ -67,6 +67,8 @@ impl Default for AlignConfig {
                 "webhook.send".into(),
                 "web.search".into(),
                 "discord".into(),
+                "code.edit".into(),
+                "code.write".into(),
             ],
             dynamic_destructive_tools: Mutex::new(Vec::new()),
             block_on_broken_commitments: false,

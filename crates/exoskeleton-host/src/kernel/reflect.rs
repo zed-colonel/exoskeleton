@@ -446,6 +446,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
@@ -475,7 +476,7 @@ mod tests {
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
-            budget_tracker: Some(Arc::new(tokio::sync::Mutex::new(tracker))),
+            budget_tracker: Some(Arc::new(std::sync::Mutex::new(tracker))),
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
@@ -486,6 +487,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
@@ -775,7 +777,7 @@ mod tests {
 
         // Verify budget tracker recorded consumption
         let tracker = kernel.budget_tracker.as_ref().unwrap();
-        let guard = tracker.try_lock().unwrap();
+        let guard = tracker.lock().unwrap();
         let remaining = guard.remaining_local_tokens();
         let budget = exoskeleton_core::budget::CognitiveBudgetConfig::default().local_token_budget;
         // The mock returns tokens_in=100, tokens_out=50 → 150 total consumed

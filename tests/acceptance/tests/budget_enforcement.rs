@@ -238,7 +238,7 @@ async fn cognitive_budget_tracks_consumption() {
     // Check that the tracker has recorded some consumption
     let tracker = vessel.budget_tracker().as_ref().unwrap();
     let remaining = {
-        let guard = tracker.lock().await;
+        let guard = tracker.lock().unwrap();
         guard.remaining_local_tokens()
     };
 
@@ -264,12 +264,18 @@ async fn cognitive_budget_tracks_consumption() {
 
 /// With a very small cognitive budget, exhaustion is reached and reflected
 /// in the BudgetStatus snapshot.
+///
+/// History: This test was flaky when `budget_tracker` used `tokio::sync::Mutex`
+/// with `try_lock()`. On tick 1, 6 threads execute in parallel via
+/// `std::thread::scope`, causing lock contention — losers silently dropped
+/// their token recordings. The fix: migrate to `std::sync::Mutex` with
+/// blocking `lock()`, so all recordings succeed deterministically.
 #[tokio::test]
 async fn cognitive_budget_exhaustion_reflected_in_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    // Small budget: 300 tokens. With 6 built-in threads consuming ~60
-    // tokens/tick, exhausted during tick 5. We wait for 5 ticks; the budget
-    // is consumed by the end and the BudgetGate blocks further dispatch.
+    // Small budget: 300 tokens = exactly 20 LLM calls × 15 tokens/call.
+    // With 6 built-in threads on tick 1 + Decide + Reflect per tick,
+    // exhausted during tick 5. The AQ BudgetGate then blocks tick 6.
     // frontier_cost_budget_cents must be > 0 because AQ allocates CostCents dimension.
     let cognitive = CognitiveBudgetConfig {
         local_token_budget: 300,
@@ -284,9 +290,8 @@ async fn cognitive_budget_exhaustion_reflected_in_snapshot() {
     let vessel = support::boot_vessel_with_config(config).await;
 
     // Wait for enough ticks that budget should be exhausted.
-    // 250 tokens / ~54 per tick ≈ 4.6 ticks. Tick 5 runs but pushes
-    // cumulative consumption past the budget. The AQ BudgetGate then
-    // blocks tick 6.
+    // 300 tokens / ~60 per tick ≈ 5 ticks. Budget is consumed by the end
+    // of tick 5 and the AQ BudgetGate blocks tick 6.
     let _ticks = support::wait_for_ticks(vessel.storage(), 5, TICK_TIMEOUT).await;
 
     // Give a moment for the final tick's consumption to be recorded
@@ -295,7 +300,7 @@ async fn cognitive_budget_exhaustion_reflected_in_snapshot() {
     // Budget tracker should report exhausted
     let tracker = vessel.budget_tracker().as_ref().unwrap();
     let (remaining, check) = {
-        let guard = tracker.lock().await;
+        let guard = tracker.lock().unwrap();
         (
             guard.remaining_local_tokens(),
             guard.check_cognitive_budget(),
@@ -349,14 +354,14 @@ async fn tool_budget_gate_initialized_and_enforces() {
 
     // Initially, all 3 invocations should be allowed
     {
-        let guard = gate.lock().await;
+        let guard = gate.lock().unwrap();
         assert!(guard.check(), "gate should allow invocations initially");
         assert_eq!(guard.remaining(), 3, "should have 3 remaining");
     }
 
     // Simulate 3 tool invocations (as the Act step would)
     {
-        let mut guard = gate.lock().await;
+        let mut guard = gate.lock().unwrap();
         guard.record_invocation();
         guard.record_invocation();
         guard.record_invocation();
@@ -364,7 +369,7 @@ async fn tool_budget_gate_initialized_and_enforces() {
 
     // Now the gate should block
     {
-        let guard = gate.lock().await;
+        let guard = gate.lock().unwrap();
         assert!(
             !guard.check(),
             "gate should block after max_invocations reached"
@@ -374,7 +379,7 @@ async fn tool_budget_gate_initialized_and_enforces() {
 
     // After reset, invocations should be allowed again
     {
-        let mut guard = gate.lock().await;
+        let mut guard = gate.lock().unwrap();
         guard.reset_window();
         assert!(guard.check(), "gate should allow invocations after reset");
         assert_eq!(guard.remaining(), 3, "should have 3 remaining after reset");
@@ -409,7 +414,7 @@ async fn budget_window_timer_resets_counters() {
     // Verify some consumption happened
     let tracker = vessel.budget_tracker().as_ref().unwrap();
     let pre_reset_remaining = {
-        let guard = tracker.lock().await;
+        let guard = tracker.lock().unwrap();
         guard.remaining_local_tokens()
     };
     assert!(
@@ -427,7 +432,7 @@ async fn budget_window_timer_resets_counters() {
     // reset fired — rather than comparing against the pre-reset snapshot
     // (which is a race between reset and ongoing consumption).
     let post_reset_remaining = {
-        let guard = tracker.lock().await;
+        let guard = tracker.lock().unwrap();
         guard.remaining_local_tokens()
     };
     assert!(

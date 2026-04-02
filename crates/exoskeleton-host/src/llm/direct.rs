@@ -163,7 +163,7 @@ pub fn handler_direct_llm_call(
 
     // 3. Record budget consumption
     if let Some(ref tracker) = kernel.budget_tracker {
-        if let Ok(mut guard) = tracker.try_lock() {
+        if let Ok(mut guard) = tracker.lock() {
             guard.record_llm_call(
                 backend_type,
                 response.tokens_in,
@@ -407,6 +407,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         };
 
@@ -426,7 +427,7 @@ mod tests {
         let budget_store: Arc<dyn exoskeleton_core::BudgetStore> =
             Arc::new(crate::budget::tracker::InMemoryBudgetStore::new());
         let tracker = crate::budget::CognitiveBudgetTracker::new(budget_config, budget_store);
-        kernel.budget_tracker = Some(Arc::new(tokio::sync::Mutex::new(tracker)));
+        kernel.budget_tracker = Some(Arc::new(std::sync::Mutex::new(tracker)));
 
         let token = CancellationToken::new();
         let result = handler_direct_llm_call(&handler, &kernel, &test_request(), &token).unwrap();
@@ -436,7 +437,7 @@ mod tests {
         assert_eq!(result.llm_call_record.tokens_out, 50);
 
         // Verify budget tracker was updated
-        let guard = kernel.budget_tracker.as_ref().unwrap().try_lock().unwrap();
+        let guard = kernel.budget_tracker.as_ref().unwrap().lock().unwrap();
         let consumption = guard.build_consumption();
         assert!(
             !consumption.is_empty(),
@@ -536,6 +537,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         };
 
@@ -590,6 +592,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         };
 

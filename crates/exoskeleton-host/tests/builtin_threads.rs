@@ -207,6 +207,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_decide_turns: kernel.max_decide_turns,
         watch_store: kernel.watch_store.clone(),
         max_watches: kernel.max_watches,
+        read_paths_this_tick: kernel.read_paths_this_tick.clone(),
         inner_loop_config: kernel.inner_loop_config.clone(),
     }
 }
@@ -285,6 +286,7 @@ async fn setup_builtin_threads(
         max_decide_turns: 5,
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
+        read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
     };
 
@@ -355,6 +357,7 @@ async fn setup_builtin_threads_custom(
         max_decide_turns: 5,
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
+        read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
     };
 

@@ -58,7 +58,7 @@ pub fn act(
 
         // Tool budget gate check (Sprint 9, I6/I9)
         if let Some(ref gate) = kernel.tool_budget_gate {
-            if let Ok(gate_guard) = gate.try_lock() {
+            if let Ok(gate_guard) = gate.lock() {
                 if !gate_guard.check() {
                     tracing::warn!(
                         action = %action.tool_name,

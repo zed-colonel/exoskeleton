@@ -78,7 +78,7 @@ pub fn decide(
         // Check budget before each turn (except the first)
         if turn > 0 {
             if let Some(ref tracker) = kernel.budget_tracker {
-                if let Ok(guard) = tracker.try_lock() {
+                if let Ok(guard) = tracker.lock() {
                     if guard.budget_status(u64::MAX).local_tokens_remaining == 0 {
                         tracing::info!(turn, "budget exhausted, ending Decide loop");
                         break;
@@ -230,8 +230,8 @@ fn resolve_backend(
         None => return handler.default_backend,
     };
 
-    // Try to lock tracker; if contended (window timer resetting), use default (H-1)
-    let guard = match tracker.try_lock() {
+    // Lock tracker; if poisoned, use default backend (poison recovery)
+    let guard = match tracker.lock() {
         Ok(g) => g,
         Err(_) => return handler.default_backend,
     };
@@ -525,6 +525,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
@@ -813,7 +814,7 @@ mod tests {
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
-            budget_tracker: Some(Arc::new(tokio::sync::Mutex::new(tracker))),
+            budget_tracker: Some(Arc::new(std::sync::Mutex::new(tracker))),
             tool_budget_gate: None,
             metrics: None,
             event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
@@ -824,6 +825,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
@@ -873,7 +875,7 @@ mod tests {
         // Record 3 failures to trigger escalation
         {
             let tracker = kernel.budget_tracker.as_ref().unwrap();
-            let mut guard = tracker.try_lock().unwrap();
+            let mut guard = tracker.lock().unwrap();
             guard.record_failure();
             guard.record_failure();
             guard.record_failure();
@@ -908,7 +910,7 @@ mod tests {
         // Record failures to trigger escalation
         {
             let tracker = kernel.budget_tracker.as_ref().unwrap();
-            let mut guard = tracker.try_lock().unwrap();
+            let mut guard = tracker.lock().unwrap();
             guard.record_failure();
             guard.record_failure();
         }
@@ -939,7 +941,7 @@ mod tests {
         // Record failures — but no frontier backend so should stay default
         {
             let tracker = kernel.budget_tracker.as_ref().unwrap();
-            let mut guard = tracker.try_lock().unwrap();
+            let mut guard = tracker.lock().unwrap();
             guard.record_failure();
         }
 

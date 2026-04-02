@@ -52,8 +52,8 @@ pub struct VesselInspector {
     storage: StorageManager,
     thread_registry: Arc<ThreadRegistry>,
     relationship_ledger: Arc<dyn RelationshipLedger>,
-    budget_tracker: Option<Arc<tokio::sync::Mutex<CognitiveBudgetTracker>>>,
-    tool_budget_gate: Option<Arc<tokio::sync::Mutex<ToolBudgetGate>>>,
+    budget_tracker: Option<Arc<std::sync::Mutex<CognitiveBudgetTracker>>>,
+    tool_budget_gate: Option<Arc<std::sync::Mutex<ToolBudgetGate>>>,
     wi_host_slot: WiHostSlot,
     config: VesselConfig,
 }
@@ -137,8 +137,8 @@ impl VesselInspector {
         storage: StorageManager,
         thread_registry: Arc<ThreadRegistry>,
         relationship_ledger: Arc<dyn RelationshipLedger>,
-        budget_tracker: Option<Arc<tokio::sync::Mutex<CognitiveBudgetTracker>>>,
-        tool_budget_gate: Option<Arc<tokio::sync::Mutex<ToolBudgetGate>>>,
+        budget_tracker: Option<Arc<std::sync::Mutex<CognitiveBudgetTracker>>>,
+        tool_budget_gate: Option<Arc<std::sync::Mutex<ToolBudgetGate>>>,
         wi_host_slot: WiHostSlot,
         config: VesselConfig,
     ) -> Self {
@@ -232,7 +232,7 @@ impl VesselInspector {
     /// Current budget state (cognitive + tool).
     pub async fn budget_status(&self) -> Result<InspectionBudgetStatus, ExoError> {
         let cognitive = if let Some(ref tracker) = self.budget_tracker {
-            match tracker.try_lock() {
+            match tracker.lock() {
                 Ok(guard) => Some(CognitiveBudgetDetail {
                     local_tokens_remaining: guard.remaining_local_tokens(),
                     frontier_tokens_remaining: guard.remaining_frontier_tokens(),
@@ -243,20 +243,20 @@ impl VesselInspector {
                     window_start: guard.window_start(),
                     window_duration_secs: guard.config().time_window_secs,
                 }),
-                Err(_) => None,
+                Err(_) => None, // poison recovery
             }
         } else {
             None
         };
 
         let tool = if let Some(ref gate) = self.tool_budget_gate {
-            match gate.try_lock() {
+            match gate.lock() {
                 Ok(guard) => Some(ToolBudgetDetail {
                     invocations_remaining: guard.remaining(),
                     invocations_this_window: guard.invocations_this_window(),
                     window_start: guard.window_start(),
                 }),
-                Err(_) => None,
+                Err(_) => None, // poison recovery
             }
         } else {
             None
