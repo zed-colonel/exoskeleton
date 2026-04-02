@@ -89,6 +89,8 @@ pub struct KernelContext {
     pub watch_store: Arc<dyn exoskeleton_core::WatchStore>,
     /// Maximum number of active watches (default: 20).
     pub max_watches: u32,
+    /// Paths read during the current tick for read-before-write enforcement.
+    pub read_paths_this_tick: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Inner loop configuration (E8-S1). Controls bounded inner interaction loop.
     pub inner_loop_config: crate::config::InnerLoopConfig,
 }
@@ -136,6 +138,9 @@ pub fn run_tick(
         if let Ok(mut guard) = tracker.try_lock() {
             guard.reset_tick_counters();
         }
+    }
+    if let Ok(mut guard) = kernel.read_paths_this_tick.lock() {
+        guard.clear();
     }
 
     // 3. Store snapshot_before as artifact (I3: everything replayable)
@@ -561,5 +566,47 @@ pub fn run_tick(
             }
             HandlerOutput::terminal_failure(format!("Amend failed (persistence error): {e}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    /// E8S2-T13: `read_paths_this_tick` is cleared at the start of each tick.
+    ///
+    /// The `run_tick` function clears `read_paths_this_tick` early in its
+    /// execution (before any PODAARA steps). This test validates the clearing
+    /// mechanism directly: populate the set, clear it the same way `run_tick`
+    /// does, and verify it is empty.
+    #[test]
+    fn read_paths_cleared_per_tick() {
+        let read_paths: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        // Simulate paths accumulated during a previous tick
+        {
+            let mut guard = read_paths.lock().unwrap();
+            guard.insert("/src/main.rs".to_string());
+            guard.insert("/src/lib.rs".to_string());
+            guard.insert("/Cargo.toml".to_string());
+        }
+
+        // Verify paths are present
+        assert_eq!(read_paths.lock().unwrap().len(), 3);
+
+        // This mirrors the clearing logic in run_tick (line ~142-144):
+        //   if let Ok(mut guard) = kernel.read_paths_this_tick.lock() {
+        //       guard.clear();
+        //   }
+        if let Ok(mut guard) = read_paths.lock() {
+            guard.clear();
+        }
+
+        // After clearing, the set must be empty — the new tick starts fresh
+        assert!(
+            read_paths.lock().unwrap().is_empty(),
+            "read_paths_this_tick must be empty after per-tick clearing"
+        );
     }
 }

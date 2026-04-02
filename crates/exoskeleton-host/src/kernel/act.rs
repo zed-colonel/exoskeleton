@@ -54,6 +54,8 @@ pub fn act(
     let mut executions = Vec::new();
 
     for (i, action) in alignment.approved_actions.iter().enumerate() {
+        let descriptor = host.describe_connector(&action.tool_name);
+
         // Tool budget gate check (Sprint 9, I6/I9)
         if let Some(ref gate) = kernel.tool_budget_gate {
             if let Ok(gate_guard) = gate.try_lock() {
@@ -86,6 +88,81 @@ pub fn act(
                         record,
                     });
                     continue;
+                }
+            }
+        }
+
+        if let Some(ref desc) = descriptor {
+            if desc.requires_read_before_write {
+                if let Some(target_path) = extract_action_path(&action.params) {
+                    let path_exists = std::path::Path::new(target_path).exists();
+                    let was_read = kernel
+                        .read_paths_this_tick
+                        .lock()
+                        .map(|guard| guard.contains(target_path))
+                        .unwrap_or(false);
+
+                    if path_exists && !was_read {
+                        let error_json = serde_json::json!({
+                            "error": format!(
+                                "read-before-write required: {target_path} must be read earlier in this tick before invoking {}",
+                                action.tool_name
+                            ),
+                            "tool": action.tool_name,
+                            "params": action.params,
+                            "safety_check": "requires_read_before_write",
+                        });
+                        let receipt_ref =
+                            match Artifact::from_json(ArtifactKind::Receipt, &error_json) {
+                                Ok(artifact) => match kernel.artifact_store.put(&artifact) {
+                                    Ok(id) => Some(id),
+                                    Err(store_err) => {
+                                        tracing::warn!(
+                                            error = %store_err,
+                                            "failed to store read-before-write receipt"
+                                        );
+                                        None
+                                    }
+                                },
+                                Err(_) => None,
+                            };
+
+                        let record = ActionRecord {
+                            action_type: action.tool_name.clone(),
+                            target: action.params.to_string(),
+                            receipt_ref,
+                            outcome: ActionOutcome::Failure,
+                        };
+                        let event = EventEntry {
+                            id: LedgerEntryId::new(),
+                            tick_id: Some(tick_id),
+                            event_type: EventType::ActionExecuted,
+                            payload_ref: record.receipt_ref.clone(),
+                            summary: format!(
+                                "Action {}: failed: read-before-write required for {} ({})",
+                                action.tool_name, target_path, action.rationale,
+                            ),
+                            timestamp: Utc::now(),
+                        };
+                        if let Err(e) = kernel.event_ledger.append(&event) {
+                            tracing::warn!(error = %e, "failed to log ActionExecuted event");
+                        }
+                        let _ = kernel.event_tx.send(LiveEvent {
+                            event_type: EventType::ActionExecuted,
+                            tick_number: None,
+                            summary: event.summary.clone(),
+                            timestamp: event.timestamp,
+                            snapshot: None,
+                            inner_loop_detail: None,
+                        });
+
+                        executions.push(ActionExecution {
+                            action: action.clone(),
+                            result: Err("read_before_write_required".into()),
+                            record,
+                        });
+                        continue;
+                    }
                 }
             }
         }
@@ -208,11 +285,25 @@ pub fn act(
                 .inc();
         }
 
+        let track_read_path = result_value.is_ok();
+
         executions.push(ActionExecution {
             action: action.clone(),
             result: result_value,
             record,
         });
+
+        if track_read_path {
+            if let (Some(desc), Some(path)) =
+                (descriptor.as_ref(), extract_action_path(&action.params))
+            {
+                if desc.is_read_only {
+                    if let Ok(mut guard) = kernel.read_paths_this_tick.lock() {
+                        guard.insert(path.to_string());
+                    }
+                }
+            }
+        }
 
         // Cancellation check between actions (I9: governable execution).
         // After each action completes, check if we've been cancelled.
@@ -254,6 +345,13 @@ pub fn act(
     Ok(ActResult { executions })
 }
 
+fn extract_action_path(params: &serde_json::Value) -> Option<&str> {
+    params
+        .get("file_path")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| params.get("path").and_then(serde_json::Value::as_str))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -266,7 +364,9 @@ mod tests {
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
-    use worldinterface_connector::connectors::DelayConnector;
+    use worldinterface_connector::connectors::{
+        CodeReadConnector, CodeWriteConnector, DelayConnector,
+    };
     use worldinterface_connector::registry::ConnectorRegistry;
     use worldinterface_host::config::HostConfig;
     use worldinterface_host::host::EmbeddedHost;
@@ -310,6 +410,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
@@ -321,6 +422,8 @@ mod tests {
         // Boot a real WI Host with the delay connector
         let registry = ConnectorRegistry::new();
         registry.register(Arc::new(DelayConnector));
+        registry.register(Arc::new(CodeReadConnector));
+        registry.register(Arc::new(CodeWriteConnector));
         let host_config = HostConfig {
             aq_data_dir: dir.join("wi").join("aq"),
             context_store_path: dir.join("wi").join("context.db"),
@@ -363,6 +466,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
@@ -389,6 +493,24 @@ mod tests {
             tool_name: "nonexistent.tool".into(),
             params: serde_json::json!({"key": "value"}),
             rationale: "test unknown tool".into(),
+            plan_task_id: None,
+        }
+    }
+
+    fn code_read_action(path: &std::path::Path) -> PlannedAction {
+        PlannedAction {
+            tool_name: "code.read".into(),
+            params: serde_json::json!({"file_path": path.to_str().unwrap()}),
+            rationale: "read file".into(),
+            plan_task_id: None,
+        }
+    }
+
+    fn code_write_action(path: &std::path::Path, content: &str) -> PlannedAction {
+        PlannedAction {
+            tool_name: "code.write".into(),
+            params: serde_json::json!({"file_path": path.to_str().unwrap(), "content": content}),
+            rationale: "write file".into(),
             plan_task_id: None,
         }
     }
@@ -679,6 +801,144 @@ mod tests {
         shutdown_host(kernel).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![code_write_action(&file, "new\n")]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions.len(), 1);
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Failure);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "old\n");
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![
+            code_read_action(&file),
+            code_write_action(&file, "new\n"),
+        ]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions.len(), 2);
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Success);
+        assert_eq!(result.executions[1].record.outcome, ActionOutcome::Success);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_different_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let read_file = dir.path().join("read.rs");
+        let write_file = dir.path().join("write.rs");
+        std::fs::write(&read_file, "read\n").unwrap();
+        std::fs::write(&write_file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![
+            code_read_action(&read_file),
+            code_write_action(&write_file, "new\n"),
+        ]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions[1].record.outcome, ActionOutcome::Failure);
+        assert_eq!(std::fs::read_to_string(&write_file).unwrap(), "old\n");
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_not_required() {
+        // E8S2-T12: Tools WITHOUT requires_read_before_write execute
+        // successfully even when read_paths_this_tick is empty.
+        // The delay connector has requires_read_before_write: false.
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![delay_action(10)]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        // Verify read_paths_this_tick is empty (no prior reads)
+        assert!(
+            kernel.read_paths_this_tick.lock().unwrap().is_empty(),
+            "read_paths_this_tick should be empty before act"
+        );
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions.len(), 1);
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Success);
+        assert!(result.executions[0].result.is_ok());
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_new_file_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("new.rs");
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![code_write_action(&file, "new\n")]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Success);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+
+        shutdown_host(kernel).await;
+    }
+
     #[test]
     fn act_does_not_call_wi_host_from_other_steps() {
         // Code audit verification: the Act step (act.rs) is the ONLY kernel module
@@ -770,6 +1030,7 @@ mod tests {
             max_decide_turns: kernel.max_decide_turns,
             watch_store: kernel.watch_store.clone(),
             max_watches: kernel.max_watches,
+            read_paths_this_tick: kernel.read_paths_this_tick.clone(),
             inner_loop_config: kernel.inner_loop_config.clone(),
         }
     }
