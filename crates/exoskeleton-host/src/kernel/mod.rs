@@ -6,6 +6,7 @@ pub mod act;
 pub mod align;
 pub mod amend;
 pub mod decide;
+pub mod inner_loop;
 pub mod orient;
 pub mod perceive;
 pub mod reflect;
@@ -88,6 +89,8 @@ pub struct KernelContext {
     pub watch_store: Arc<dyn exoskeleton_core::WatchStore>,
     /// Maximum number of active watches (default: 20).
     pub max_watches: u32,
+    /// Inner loop configuration (E8-S1). Controls bounded inner interaction loop.
+    pub inner_loop_config: crate::config::InnerLoopConfig,
 }
 
 /// Run one complete PODAARA tick.
@@ -177,6 +180,7 @@ pub fn run_tick(
         summary: format!("Tick {tick_number} started"),
         timestamp: started_at,
         snapshot: None,
+        inner_loop_detail: None,
     });
 
     // 6. Get previous_tick_id from tick_store
@@ -213,6 +217,7 @@ pub fn run_tick(
             summary: msg_event.summary.clone(),
             timestamp: msg.timestamp,
             snapshot: None,
+            inner_loop_detail: None,
         });
     }
 
@@ -291,22 +296,67 @@ pub fn run_tick(
         return HandlerOutput::retryable_failure("cancelled after Decide");
     }
 
-    // 13. Align
-    tracing::info!(tick_number, "Align");
-    let alignment = align::align(kernel, &decision, &perception, tick_id, tick_number);
+    // 12.5 Inner loop activation check (E8-S1)
+    let inner_loop_active = kernel.inner_loop_config.enabled && decision.inner_loop_requested;
 
-    // 13.5 Merge poll watch actions (E5-S2) — bypass Align (already approved at watch creation)
-    let alignment = {
-        let mut merged = alignment;
-        merged.approved_actions.extend(watch_result.poll_actions);
-        merged
-    };
+    let (decision, alignment, act_result) = if inner_loop_active {
+        // Inner loop: iterative DecideLite→Align→Act cycle.
+        // The agent explicitly requested this — the task needs
+        // iterative tool-feedback (e.g., multi-step coding).
+        tracing::info!(tick_number, "Inner Loop (activated by agent request)");
+        match inner_loop::run_inner_loop(
+            handler,
+            kernel,
+            &orientation,
+            &perception,
+            decision,
+            cancellation,
+            tick_number,
+            tick_id,
+        ) {
+            Ok(inner_result) => {
+                tracing::info!(
+                    tick_number,
+                    steps = inner_result.steps_taken,
+                    reason = %inner_result.completion_reason,
+                    "Inner loop completed"
+                );
+                // Build a summary alignment for Amend with accumulated relationship data (I8)
+                let summary_alignment = AlignmentResult {
+                    approved_actions: vec![],
+                    blocked_actions: vec![],
+                    relationship_updates: inner_result.relationship_updates,
+                    relationship_snapshot: inner_result.relationship_snapshot,
+                };
+                (
+                    inner_result.final_decision,
+                    summary_alignment,
+                    ActResult {
+                        executions: inner_result.executions,
+                    },
+                )
+            }
+            Err(e) => return HandlerOutput::retryable_failure(format!("Inner loop failed: {e}")),
+        }
+    } else {
+        // Classic path: single Align→Act pass.
+        // Either the inner loop is disabled in config, or the agent
+        // determined this tick doesn't need iterative tool use.
+        tracing::info!(tick_number, "Align");
+        let alignment = align::align(kernel, &decision, &perception, tick_id, tick_number);
 
-    // 14. Act
-    tracing::info!(tick_number, "Act");
-    let act_result = match act::act(kernel, &alignment, tick_id, cancellation) {
-        Ok(a) => a,
-        Err(e) => return HandlerOutput::retryable_failure(format!("Act failed: {e}")),
+        // Merge poll watch actions (E5-S2) — bypass Align (already approved at watch creation)
+        let alignment = {
+            let mut merged = alignment;
+            merged.approved_actions.extend(watch_result.poll_actions);
+            merged
+        };
+
+        tracing::info!(tick_number, "Act");
+        match act::act(kernel, &alignment, tick_id, cancellation) {
+            Ok(a) => (decision, alignment, a),
+            Err(e) => return HandlerOutput::retryable_failure(format!("Act failed: {e}")),
+        }
     };
 
     // 15. Reflect
@@ -354,6 +404,7 @@ pub fn run_tick(
             ),
             timestamp: Utc::now(),
             snapshot: None,
+            inner_loop_detail: None,
         });
     }
 

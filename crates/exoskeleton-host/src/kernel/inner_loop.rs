@@ -1,0 +1,447 @@
+//! Bounded inner interaction loop (E8-S1).
+//!
+//! Runs within the Decide→Act section of a PODAARA tick, replacing the single
+//! Decide→Act pass with an iterative DecideLite→Align→Act→Observe cycle:
+//!
+//! ```text
+//! Perceive → Orient → [Inner Loop: DecideLite → Align → Act(1 tool) → Observe] × N → Reflect → Amend
+//! ```
+//!
+//! The inner loop activates when BOTH conditions are true:
+//! 1. `inner_loop.enabled = true` in VesselConfig (capability gate)
+//! 2. The initial Decide response includes `inner_loop_requested: true` (agent decision)
+//!
+//! Every inner-loop action passes through the Align gate (I8) and budget enforcement (I6).
+//! Every LLM response is stored as a content-addressed artifact (I3).
+
+use actionqueue_executor_local::CancellationToken;
+use chrono::Utc;
+use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
+use exoskeleton_core::tick::LlmCallRecord;
+use exoskeleton_core::{EventType, ExoError, LiveEvent, RelationshipRecord};
+
+use super::types::{
+    extract_json_from_code_fence, ActionExecution, DecisionProtocol, DecisionResult,
+    OrientationResult, PerceptionResult, SnapshotDelta,
+};
+use super::{act, align, KernelContext};
+use crate::budget::session::{SessionBudget, SessionBudgetCheck, SessionCompletionReason};
+use crate::cognitive_engine::CognitiveHandler;
+use crate::llm::direct::handler_direct_llm_call;
+use exoskeleton_core::event::InnerLoopStepDetail;
+use exoskeleton_core::RelationshipSnapshot;
+
+/// Result of the inner loop, consumed by the outer tick for Reflect and Amend.
+pub struct InnerLoopResult {
+    /// All actions executed across all steps.
+    pub executions: Vec<ActionExecution>,
+    /// Aggregated LLM call records from all inner-loop Decide calls.
+    pub llm_call_records: Vec<LlmCallRecord>,
+    /// Final decision result (from last DecideLite iteration).
+    pub final_decision: DecisionResult,
+    /// Why the inner loop ended.
+    pub completion_reason: SessionCompletionReason,
+    /// Total steps executed.
+    pub steps_taken: u32,
+    /// Accumulated relationship updates from all per-step Align calls (I8).
+    pub relationship_updates: Vec<RelationshipRecord>,
+    /// Relationship snapshot from the last Align call (most recent compilation).
+    pub relationship_snapshot: Option<RelationshipSnapshot>,
+}
+
+/// Run the bounded inner interaction loop.
+///
+/// Called from run_tick() after Orient, replacing the single Decide→Act pass.
+/// Returns an aggregated result that the outer tick uses for Reflect and Amend.
+#[allow(clippy::too_many_arguments)]
+pub fn run_inner_loop(
+    handler: &CognitiveHandler,
+    kernel: &KernelContext,
+    orientation: &OrientationResult,
+    perception: &PerceptionResult,
+    initial_decision: DecisionResult,
+    cancellation: &CancellationToken,
+    tick_number: u64,
+    tick_id: exoskeleton_core::TickId,
+) -> Result<InnerLoopResult, ExoError> {
+    let config = &kernel.inner_loop_config;
+    let mut session = SessionBudget::new(config);
+    let mut all_executions = Vec::new();
+    let mut all_llm_records = Vec::new();
+    let mut all_relationship_updates: Vec<RelationshipRecord> = Vec::new();
+    let mut last_relationship_snapshot: Option<RelationshipSnapshot> = None;
+    let mut current_decision = initial_decision;
+    let mut step = 0u32;
+
+    // Broadcast InnerLoopStarted
+    broadcast_inner_loop_event(
+        kernel,
+        tick_number,
+        EventType::InnerLoopStarted,
+        format!(
+            "Inner loop started (max {} steps, {} token budget)",
+            config.max_steps_per_tick, config.max_tokens_per_session
+        ),
+        None,
+    );
+
+    loop {
+        // ── Check session budget ──
+        if let SessionBudgetCheck::Stop(reason) = session.can_continue() {
+            let completion = SessionCompletionReason::from(reason);
+            broadcast_inner_loop_completed(kernel, tick_number, step, &session, &completion);
+            return Ok(InnerLoopResult {
+                executions: all_executions,
+                llm_call_records: all_llm_records,
+                final_decision: current_decision,
+                completion_reason: completion,
+                steps_taken: step,
+                relationship_updates: all_relationship_updates,
+                relationship_snapshot: last_relationship_snapshot,
+            });
+        }
+
+        // ── Check cancellation ──
+        if cancellation.is_cancelled() {
+            broadcast_inner_loop_completed(
+                kernel,
+                tick_number,
+                step,
+                &session,
+                &SessionCompletionReason::Cancelled,
+            );
+            return Ok(InnerLoopResult {
+                executions: all_executions,
+                llm_call_records: all_llm_records,
+                final_decision: current_decision,
+                completion_reason: SessionCompletionReason::Cancelled,
+                steps_taken: step,
+                relationship_updates: all_relationship_updates,
+                relationship_snapshot: last_relationship_snapshot,
+            });
+        }
+
+        // ── Check if agent decided it's done ──
+        if current_decision.actions.is_empty() {
+            broadcast_inner_loop_completed(
+                kernel,
+                tick_number,
+                step,
+                &session,
+                &SessionCompletionReason::AgentComplete,
+            );
+            return Ok(InnerLoopResult {
+                executions: all_executions,
+                llm_call_records: all_llm_records,
+                final_decision: current_decision,
+                completion_reason: SessionCompletionReason::AgentComplete,
+                steps_taken: step,
+                relationship_updates: all_relationship_updates,
+                relationship_snapshot: last_relationship_snapshot,
+            });
+        }
+
+        step += 1;
+
+        // ── Align ── (trust gate, same as outer tick)
+        let alignment = align::align(kernel, &current_decision, perception, tick_id, tick_number);
+
+        // Accumulate relationship data from this Align step (I8)
+        all_relationship_updates.extend(alignment.relationship_updates.clone());
+        if alignment.relationship_snapshot.is_some() {
+            last_relationship_snapshot = alignment.relationship_snapshot.clone();
+        }
+
+        // ── Act (execute approved actions) ──
+        let act_result = act::act(kernel, &alignment, tick_id, cancellation)?;
+
+        // Record tool calls for doom-loop detection
+        for exec in &act_result.executions {
+            session.record_tool_call(&exec.action.tool_name, &exec.action.params);
+        }
+
+        // Broadcast InnerLoopStep
+        let tool_summary = act_result.executions.first().map(|e| {
+            let outcome = if e.result.is_ok() {
+                "success"
+            } else {
+                "failed"
+            };
+            (e.action.tool_name.clone(), outcome.to_string())
+        });
+
+        broadcast_inner_loop_event(
+            kernel,
+            tick_number,
+            EventType::InnerLoopStep,
+            format!(
+                "Step {}/{}: {}",
+                step,
+                config.max_steps_per_tick,
+                tool_summary
+                    .as_ref()
+                    .map(|(name, outcome)| format!("{name} ({outcome})"))
+                    .unwrap_or_else(|| "no actions".into()),
+            ),
+            Some(InnerLoopStepDetail {
+                step_number: step,
+                max_steps: config.max_steps_per_tick,
+                tool_name: tool_summary.as_ref().map(|(name, _)| name.clone()),
+                tool_outcome: tool_summary.as_ref().map(|(_, outcome)| outcome.clone()),
+                tokens_this_step: 0, // updated after DecideLite
+                tokens_total: session.tokens_consumed(),
+                completion_reason: None,
+            }),
+        );
+
+        all_executions.extend(act_result.executions.clone());
+
+        // ── DecideLite ── (next iteration)
+        let decide_result = decide_lite(
+            handler,
+            kernel,
+            orientation,
+            &all_executions,
+            &current_decision,
+            cancellation,
+        )?;
+
+        // Record tokens
+        let _tokens_this_step =
+            decide_result.llm_call_record.tokens_in + decide_result.llm_call_record.tokens_out;
+        session.record_llm_tokens(
+            decide_result.llm_call_record.tokens_in,
+            decide_result.llm_call_record.tokens_out,
+        );
+        all_llm_records.push(decide_result.llm_call_record.clone());
+
+        current_decision = decide_result;
+    }
+}
+
+/// Lightweight Decide for inner-loop iterations.
+///
+/// Reuses the Orient context from the tick's initial Decide, supplemented
+/// with tool results from previous inner-loop steps. Does not support
+/// multi-turn introspection queries — those are for the full Decide step.
+#[allow(clippy::too_many_arguments)]
+fn decide_lite(
+    handler: &CognitiveHandler,
+    kernel: &KernelContext,
+    orientation: &OrientationResult,
+    previous_executions: &[ActionExecution],
+    previous_decision: &DecisionResult,
+    cancellation: &CancellationToken,
+) -> Result<DecisionResult, ExoError> {
+    // Build system prompt from inner-loop template
+    let tools_description = build_tools_description(kernel);
+    let system_prompt = kernel
+        .prompt_registry
+        .resolve("inner-loop-system", &[("tools", &tools_description)])?;
+
+    // Build messages: original context + decision summary + tool results
+    let mut messages = vec![LlmMessage {
+        role: LlmRole::User,
+        content: orientation.compiled_context.prompt.clone(),
+    }];
+
+    // Append previous decision's reasoning as assistant message
+    messages.push(LlmMessage {
+        role: LlmRole::Assistant,
+        content: format_decision_summary(previous_decision),
+    });
+
+    // Append tool results as user message
+    messages.push(LlmMessage {
+        role: LlmRole::User,
+        content: format_tool_results(previous_executions),
+    });
+
+    let request = LlmRequest {
+        backend: None,
+        system_prompt: Some(system_prompt),
+        messages,
+        max_output_tokens: kernel.max_output_tokens,
+        temperature: Some(0.3),
+        stop_sequences: vec![],
+    };
+
+    // Use unified handler_direct_llm_call
+    let result = handler_direct_llm_call(handler, kernel, &request, cancellation)?;
+
+    // Parse response into DecisionResult
+    parse_decide_lite_response(
+        &result.response.content,
+        result.llm_call_record,
+        result.artifact_id,
+    )
+}
+
+/// Build a tools description string for the inner-loop prompt.
+fn build_tools_description(kernel: &KernelContext) -> String {
+    // Try to get the WI Host for tool descriptions
+    let host_guard = kernel.wi_host_slot.blocking_lock();
+    match host_guard.as_ref() {
+        Some(host) => {
+            let descriptors = host.list_capabilities();
+            let mut desc = String::new();
+            for d in descriptors {
+                desc.push_str(&format!(
+                    "- **{}**: {}\n  Input: {}\n",
+                    d.name,
+                    d.description,
+                    serde_json::to_string(&d.input_schema).unwrap_or_default(),
+                ));
+            }
+            desc
+        }
+        None => "(no tools available)".into(),
+    }
+}
+
+/// Format the previous decision as an assistant message summary.
+fn format_decision_summary(decision: &DecisionResult) -> String {
+    let mut summary = format!("Reasoning: {}\n", decision.reasoning);
+    if !decision.actions.is_empty() {
+        summary.push_str("\nActions taken:\n");
+        for action in &decision.actions {
+            summary.push_str(&format!("- {}: {}\n", action.tool_name, action.rationale));
+        }
+    }
+    if let Some(ref reply) = decision.reply {
+        summary.push_str(&format!("\nReply: {reply}\n"));
+    }
+    summary
+}
+
+/// Format tool execution results as a user message.
+fn format_tool_results(executions: &[ActionExecution]) -> String {
+    if executions.is_empty() {
+        return "No tool results yet.".into();
+    }
+
+    let mut msg = String::from("## Tool Results\n\n");
+    for exec in executions {
+        let status = if exec.result.is_ok() {
+            "SUCCESS"
+        } else {
+            "FAILED"
+        };
+        msg.push_str(&format!("### {} [{}]\n", exec.action.tool_name, status));
+        match &exec.result {
+            Ok(val) => {
+                let json_str = val.to_string();
+                if json_str.len() > 2000 {
+                    msg.push_str(&format!("Output: {}...\n\n", &json_str[..1997]));
+                } else {
+                    msg.push_str(&format!("Output: {json_str}\n\n"));
+                }
+            }
+            Err(e) => {
+                msg.push_str(&format!("Error: {e}\n\n"));
+            }
+        }
+    }
+    msg
+}
+
+/// Parse a DecideLite response into a DecisionResult.
+fn parse_decide_lite_response(
+    response_text: &str,
+    llm_call_record: LlmCallRecord,
+    artifact_id: exoskeleton_core::ArtifactId,
+) -> Result<DecisionResult, ExoError> {
+    // Try direct JSON parse
+    let protocol = if let Ok(p) = serde_json::from_str::<DecisionProtocol>(response_text) {
+        p
+    } else if let Some(json_str) = extract_json_from_code_fence(response_text) {
+        serde_json::from_str::<DecisionProtocol>(json_str).unwrap_or_else(|_| {
+            // Fallback: treat as completion (empty actions)
+            DecisionProtocol {
+                reasoning: response_text.to_string(),
+                inner_loop_requested: false,
+                reply: None,
+                plan_update: None,
+                working_memory_ops: None,
+                actions: vec![],
+                memory_notes: vec![],
+                watch_proposals: vec![],
+            }
+        })
+    } else {
+        // Unparseable → treat as completion
+        DecisionProtocol {
+            reasoning: response_text.to_string(),
+            inner_loop_requested: false,
+            reply: None,
+            plan_update: None,
+            working_memory_ops: None,
+            actions: vec![],
+            memory_notes: vec![],
+            watch_proposals: vec![],
+        }
+    };
+
+    Ok(DecisionResult {
+        reasoning: protocol.reasoning,
+        reply: protocol.reply,
+        actions: protocol.actions,
+        snapshot_delta: SnapshotDelta {
+            plan_update: protocol.plan_update,
+            working_memory_ops: protocol.working_memory_ops,
+        },
+        memory_notes: protocol.memory_notes,
+        llm_call_record,
+        response_artifact_id: artifact_id,
+        watch_proposals: protocol.watch_proposals,
+        inner_loop_requested: false, // Not relevant for inner-loop iterations
+    })
+}
+
+/// Broadcast an inner-loop event via the event channel.
+fn broadcast_inner_loop_event(
+    kernel: &KernelContext,
+    tick_number: u64,
+    event_type: EventType,
+    summary: String,
+    detail: Option<InnerLoopStepDetail>,
+) {
+    let _ = kernel.event_tx.send(LiveEvent {
+        event_type,
+        tick_number: Some(tick_number),
+        summary,
+        timestamp: Utc::now(),
+        snapshot: None,
+        inner_loop_detail: detail,
+    });
+}
+
+/// Broadcast InnerLoopCompleted event.
+fn broadcast_inner_loop_completed(
+    kernel: &KernelContext,
+    tick_number: u64,
+    steps: u32,
+    session: &SessionBudget,
+    reason: &SessionCompletionReason,
+) {
+    broadcast_inner_loop_event(
+        kernel,
+        tick_number,
+        EventType::InnerLoopCompleted,
+        format!(
+            "Inner loop completed after {} steps ({} tokens): {}",
+            steps,
+            session.tokens_consumed(),
+            reason,
+        ),
+        Some(InnerLoopStepDetail {
+            step_number: steps,
+            max_steps: session.max_steps(),
+            tool_name: None,
+            tool_outcome: None,
+            tokens_this_step: 0,
+            tokens_total: session.tokens_consumed(),
+            completion_reason: Some(reason.to_string()),
+        }),
+    );
+}
