@@ -184,6 +184,7 @@ pub fn act(
             summary: event.summary.clone(),
             timestamp: event.timestamp,
             snapshot: None,
+            inner_loop_detail: None,
         });
 
         // Record tool invocation in budget gate (Sprint 9)
@@ -309,6 +310,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
@@ -361,6 +363,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
@@ -767,6 +770,7 @@ mod tests {
             max_decide_turns: kernel.max_decide_turns,
             watch_store: kernel.watch_store.clone(),
             max_watches: kernel.max_watches,
+            inner_loop_config: kernel.inner_loop_config.clone(),
         }
     }
 }

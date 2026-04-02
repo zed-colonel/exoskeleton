@@ -35,6 +35,7 @@ fn broadcast_send_succeeds_with_no_receivers() {
         summary: "test".into(),
         timestamp: chrono::Utc::now(),
         snapshot: None,
+        inner_loop_detail: None,
     };
     // send() returns Err(SendError) when no receivers, but it must not panic
     let _ = tx.send(event);
@@ -54,6 +55,7 @@ fn broadcast_multiple_receivers_get_same_events() {
         summary: "Tick 1 started".into(),
         timestamp: chrono::Utc::now(),
         snapshot: None,
+        inner_loop_detail: None,
     };
     tx.send(event.clone()).unwrap();
 
@@ -77,6 +79,7 @@ fn broadcast_slow_receiver_gets_lagged() {
             summary: format!("event {i}"),
             timestamp: chrono::Utc::now(),
             snapshot: None,
+            inner_loop_detail: None,
         };
         let _ = tx.send(event);
     }
@@ -102,6 +105,7 @@ fn broadcast_no_receivers_send_succeeds() {
             summary: "test".into(),
             timestamp: chrono::Utc::now(),
             snapshot: None,
+            inner_loop_detail: None,
         };
         let _ = tx.send(event);
     }

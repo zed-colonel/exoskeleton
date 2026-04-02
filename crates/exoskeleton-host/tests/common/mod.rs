@@ -49,6 +49,7 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         observatory_token_env: None,
         extra_destructive_tools: vec![],
         connectors_dir: None,
+        inner_loop: exoskeleton_host::config::InnerLoopConfig::default(),
     }
 }
 

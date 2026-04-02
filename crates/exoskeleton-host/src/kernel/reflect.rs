@@ -2,8 +2,8 @@
 
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
-use exoskeleton_core::tick::{ActionOutcome, LlmCallRecord};
-use exoskeleton_core::{Artifact, ArtifactKind, ExoError, StateSnapshot};
+use exoskeleton_core::tick::ActionOutcome;
+use exoskeleton_core::{ExoError, StateSnapshot};
 
 use super::types::{
     extract_json_from_code_fence, ActResult, DecisionResult, ReflectProtocol, ReflectionResult,
@@ -137,50 +137,17 @@ fn llm_reflect(
         stop_sequences: vec![],
     };
 
-    // 4. Use default backend (no escalation for Reflect)
-    let backend = handler
-        .local_backend
-        .as_ref()
-        .or(handler.frontier_backend.as_ref())
-        .ok_or_else(|| ExoError::LlmInvocation("no LLM backend configured".into()))?;
+    // 4. Unified LLM call (H-1 pattern, E8-S1)
+    let result =
+        crate::llm::direct::handler_direct_llm_call(handler, kernel, &request, cancellation)?;
+    let response = result.response;
+    let llm_call_record = result.llm_call_record;
 
-    // 5. Direct backend call (H-1 pattern)
-    let start = std::time::Instant::now();
-    let mut response = backend.call(&handler.http_client, &request, cancellation)?;
-    response.latency_ms = start.elapsed().as_millis() as u64;
-
-    // 6. Record budget consumption
-    if let Some(ref tracker) = kernel.budget_tracker {
-        if let Ok(mut guard) = tracker.try_lock() {
-            guard.record_llm_call(
-                handler.default_backend,
-                response.tokens_in,
-                response.tokens_out,
-                response.cost_estimate_cents.unwrap_or(0.0),
-            );
-        }
-    }
-
-    // 7. Store response as artifact (I3)
-    let response_artifact = Artifact::from_json(ArtifactKind::LlmResponse, &response)?;
-    let response_artifact_id = handler.artifact_store.put(&response_artifact)?;
-
-    // 8. Parse ReflectProtocol
+    // 5. Parse ReflectProtocol
     let protocol = parse_reflect_protocol(&response.content);
 
-    // 9. Compute heuristic for action_success_rate
+    // 6. Compute heuristic for action_success_rate
     let heuristic = heuristic_reflect(act_result);
-
-    // 10. Build LLM call record
-    let llm_call_record = LlmCallRecord {
-        model: response.model,
-        tokens_in: response.tokens_in,
-        tokens_out: response.tokens_out,
-        cost_cents: response.cost_estimate_cents.unwrap_or(0.0),
-        latency_ms: response.latency_ms,
-        response_artifact_ref: Some(response_artifact_id),
-        turns: 1,
-    };
 
     Ok(ReflectionResult {
         action_success_rate: heuristic.action_success_rate,
@@ -479,6 +446,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
@@ -518,6 +486,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
@@ -557,6 +526,7 @@ mod tests {
             },
             response_artifact_id: exoskeleton_core::ArtifactId::from_content(b"test"),
             watch_proposals: vec![],
+            inner_loop_requested: false,
         }
     }
 

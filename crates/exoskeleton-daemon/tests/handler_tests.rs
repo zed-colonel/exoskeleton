@@ -1782,6 +1782,7 @@ async fn connector_loaded_event_emitted() {
         summary: "Connector 'test.loaded' loaded".into(),
         timestamp: event.timestamp,
         snapshot: None,
+        inner_loop_detail: None,
     };
     let _ = state.event_tx.send(live_event);
 

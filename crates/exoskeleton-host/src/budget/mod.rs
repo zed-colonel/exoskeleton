@@ -4,6 +4,7 @@
 //! - **Cognitive AQ**: `CognitiveBudgetTracker` (Exo layer) + AQ `BudgetGate` (hard stop)
 //! - **Tool AQ**: `ToolBudgetGate` (Act step boundary) + WI Host `dispatch_concurrency`
 
+pub mod session;
 pub mod thrash;
 pub mod tracker;
 

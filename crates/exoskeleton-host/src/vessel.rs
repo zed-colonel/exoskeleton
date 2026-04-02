@@ -197,6 +197,7 @@ impl Vessel {
             max_decide_turns: config.max_decide_turns,
             watch_store: storage.watch_store().clone() as Arc<dyn exoskeleton_core::WatchStore>,
             max_watches: config.max_watches,
+            inner_loop_config: config.inner_loop.clone(),
         });
 
         // 7.8 Seed episodic memory for first boot (Decoherence Fix)
@@ -371,6 +372,7 @@ impl Vessel {
             summary: format!("Vessel {} started", config.vessel_id),
             timestamp: chrono::Utc::now(),
             snapshot: Some(initial_snapshot),
+            inner_loop_detail: None,
         });
 
         Ok(Self {

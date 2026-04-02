@@ -16,8 +16,10 @@
 
 use actionqueue_executor_local::CancellationToken;
 use chrono::Utc;
+use exoskeleton_core::event::InnerLoopStepDetail;
 use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::LlmCallRecord;
+use exoskeleton_core::RelationshipSnapshot;
 use exoskeleton_core::{EventType, ExoError, LiveEvent, RelationshipRecord};
 
 use super::types::{
@@ -28,8 +30,6 @@ use super::{act, align, KernelContext};
 use crate::budget::session::{SessionBudget, SessionBudgetCheck, SessionCompletionReason};
 use crate::cognitive_engine::CognitiveHandler;
 use crate::llm::direct::handler_direct_llm_call;
-use exoskeleton_core::event::InnerLoopStepDetail;
-use exoskeleton_core::RelationshipSnapshot;
 
 /// Result of the inner loop, consumed by the outer tick for Reflect and Amend.
 pub struct InnerLoopResult {

@@ -120,6 +120,7 @@ pub fn align(
             summary: event.summary.clone(),
             timestamp: event.timestamp,
             snapshot: None,
+            inner_loop_detail: None,
         };
         let _ = kernel.event_tx.send(live_event);
     }
@@ -223,6 +224,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
@@ -244,6 +246,7 @@ mod tests {
             },
             response_artifact_id: ArtifactId::from_content(b"test"),
             watch_proposals: vec![],
+            inner_loop_requested: false,
         }
     }
 

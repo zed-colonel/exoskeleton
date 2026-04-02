@@ -1135,6 +1135,7 @@ fn emit_connector_event(state: &AppState, event_type: EventType, descriptor: &De
         summary,
         timestamp: event.timestamp,
         snapshot: None,
+        inner_loop_detail: None,
     });
 }
 
@@ -1156,6 +1157,7 @@ fn emit_connector_event_by_name(state: &AppState, event_type: EventType, name: &
         summary,
         timestamp: event.timestamp,
         snapshot: None,
+        inner_loop_detail: None,
     });
 }
 

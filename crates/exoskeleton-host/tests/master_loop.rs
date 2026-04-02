@@ -87,6 +87,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_decide_turns: kernel.max_decide_turns,
         watch_store: kernel.watch_store.clone(),
         max_watches: kernel.max_watches,
+        inner_loop_config: kernel.inner_loop_config.clone(),
     }
 }
 
@@ -161,6 +162,7 @@ async fn setup_kernel_with_host(
         max_decide_turns: 5,
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
+        inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
     };
 
     (kernel, handler, mock_backend)
@@ -219,6 +221,7 @@ fn setup_kernel_no_host(
         max_decide_turns: 5,
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
+        inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
     };
 
     (kernel, handler, mock_backend)
@@ -1030,6 +1033,7 @@ mod proptest_tests {
             }]);
             let proto = DecisionProtocol {
                 reasoning,
+                inner_loop_requested: false,
                 reply: None,
                 plan_update,
                 working_memory_ops,

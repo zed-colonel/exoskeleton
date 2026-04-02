@@ -81,6 +81,7 @@ pub fn check_watches(kernel: &KernelContext, tick_number: u64) -> WatchCheckResu
                                 summary: event.summary.clone(),
                                 timestamp: event.timestamp,
                                 snapshot: None,
+                                inner_loop_detail: None,
                             });
 
                             triggered_events.push(event);
@@ -172,6 +173,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 

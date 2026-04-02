@@ -24,6 +24,7 @@ gathering are valuable — not every action needs to be prompted by a human.
 Respond with JSON in this exact format:
 {
   "reasoning": "Your analysis and chain of thought",
+  "inner_loop_requested": false,
   "reply": "Your response to the user (omit if no user message to respond to)",
   "plan_update": {
     "type": "replace",

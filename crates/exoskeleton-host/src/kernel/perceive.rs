@@ -171,6 +171,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 

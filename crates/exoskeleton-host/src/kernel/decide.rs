@@ -13,8 +13,6 @@
 //! dispatch loop — calling run_until_idle() from within a handler would
 //! deadlock. Instead, the Decide step calls the HTTP backend directly.
 
-use std::time::Instant;
-
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::LlmCallRecord;
@@ -54,30 +52,9 @@ pub fn decide(
     // 3. Build user message from compiled context
     let user_message = orientation.compiled_context.prompt.clone();
 
-    // 4. Resolve backend — with escalation logic (Sprint 9)
+    // 4. Resolve backend type — with escalation logic (Sprint 9)
+    // handler_direct_llm_call handles the actual backend resolution and fallback.
     let backend_type = resolve_backend(handler, kernel, orientation);
-    let backend = match backend_type {
-        LlmBackend::Local => handler.local_backend.as_ref(),
-        LlmBackend::Frontier => handler.frontier_backend.as_ref(),
-    };
-    let (backend, backend_type) = match backend {
-        Some(b) => (b, backend_type),
-        None => {
-            let fallback = match backend_type {
-                LlmBackend::Local => LlmBackend::Frontier,
-                LlmBackend::Frontier => LlmBackend::Local,
-            };
-            match match fallback {
-                LlmBackend::Local => handler.local_backend.as_ref(),
-                LlmBackend::Frontier => handler.frontier_backend.as_ref(),
-            } {
-                Some(b) => (b, fallback),
-                None => {
-                    return Err(ExoError::LlmInvocation("no LLM backend configured".into()));
-                }
-            }
-        }
-    };
 
     // 5. Multi-turn Decide loop
     let introspection = IntrospectionService::new(kernel);
@@ -112,7 +89,7 @@ pub fn decide(
 
         // Build LLM request for this turn
         let request = LlmRequest {
-            backend: None,
+            backend: Some(backend_type),
             system_prompt: Some(system_prompt.clone()),
             messages: messages.clone(),
             max_output_tokens: kernel.max_output_tokens,
@@ -120,56 +97,11 @@ pub fn decide(
             stop_sequences: vec![],
         };
 
-        // Direct backend call (same deadlock prevention as before)
-        let start = Instant::now();
-        let mut llm_response = backend.call(&handler.http_client, &request, cancellation)?;
-        let latency_ms = start.elapsed().as_millis() as u64;
-        llm_response.latency_ms = latency_ms;
-
-        // Record LLM consumption in budget tracker (Sprint 9)
-        if let Some(ref tracker) = kernel.budget_tracker {
-            if let Ok(mut guard) = tracker.try_lock() {
-                guard.record_llm_call(
-                    backend_type,
-                    llm_response.tokens_in,
-                    llm_response.tokens_out,
-                    llm_response.cost_estimate_cents.unwrap_or(0.0),
-                );
-            }
-        }
-
-        // Record LLM metrics (Sprint 10)
-        if let Some(ref m) = kernel.metrics {
-            let backend_label = match backend_type {
-                LlmBackend::Local => "local",
-                LlmBackend::Frontier => "frontier",
-            };
-            m.llm_calls_total.with_label_values(&[backend_label]).inc();
-            m.llm_tokens_total
-                .with_label_values(&[backend_label, "input"])
-                .inc_by(llm_response.tokens_in);
-            m.llm_tokens_total
-                .with_label_values(&[backend_label, "output"])
-                .inc_by(llm_response.tokens_out);
-            m.llm_cost_cents_total
-                .with_label_values(&[backend_label])
-                .inc_by(llm_response.cost_estimate_cents.unwrap_or(0.0));
-            m.llm_latency_seconds
-                .with_label_values(&[backend_label])
-                .observe(latency_ms as f64 / 1000.0);
-        }
-
-        // Record token usage
-        let call_record = LlmCallRecord {
-            model: llm_response.model.clone(),
-            tokens_in: llm_response.tokens_in,
-            tokens_out: llm_response.tokens_out,
-            cost_cents: llm_response.cost_estimate_cents.unwrap_or(0.0),
-            latency_ms,
-            response_artifact_ref: None, // set later for the final response
-            turns: 1,
-        };
-        llm_records.push(call_record);
+        // Unified LLM call (H-1 pattern, E8-S1)
+        let result =
+            crate::llm::direct::handler_direct_llm_call(handler, kernel, &request, cancellation)?;
+        let llm_response = result.response;
+        llm_records.push(result.llm_call_record);
         all_response_text.push_str(&llm_response.content);
         all_response_text.push('\n');
 
@@ -231,6 +163,7 @@ pub fn decide(
     tracing::warn!(max_turns, "Decide loop reached max turns, forcing decision");
     let fallback = DecisionProtocol {
         reasoning: all_response_text.clone(),
+        inner_loop_requested: false,
         reply: None,
         plan_update: None,
         working_memory_ops: None,
@@ -277,6 +210,7 @@ fn build_decision_result(
         llm_call_record: merged_record,
         response_artifact_id,
         watch_proposals: protocol.watch_proposals,
+        inner_loop_requested: protocol.inner_loop_requested,
     })
 }
 
@@ -444,6 +378,21 @@ fn build_system_prompt(
     tools: &str,
     introspection: &str,
 ) -> Result<String, ExoError> {
+    // Conditionally include inner loop guidance (E8-S1)
+    let inner_loop_guidance = if kernel.inner_loop_config.enabled {
+        "\n## Interactive Tool Loop\n\n\
+         You have access to an interactive tool loop. When your task requires multiple \
+         sequential tool calls where each step depends on the result of the previous \
+         one (e.g., reading a file, editing it, then verifying the change), set \
+         `inner_loop_requested: true` in your response. This activates a rapid \
+         tool-feedback cycle where you can call tools iteratively within this tick.\n\n\
+         Set `inner_loop_requested: false` (or omit it) for single-shot actions that \
+         don't need iterative feedback — routine actions, sending messages, writing \
+         memory notes, etc.\n"
+    } else {
+        ""
+    };
+
     let base = kernel.prompt_registry.resolve(
         "decide-system",
         &[
@@ -452,7 +401,7 @@ fn build_system_prompt(
             ("tools", tools),
         ],
     )?;
-    Ok(format!("{base}\n\n{introspection}"))
+    Ok(format!("{base}{inner_loop_guidance}\n\n{introspection}"))
 }
 
 /// Generate the introspection tools section for the system prompt.
@@ -512,6 +461,7 @@ fn parse_decide_turn(response_text: &str) -> DecideTurn {
     tracing::warn!("LLM returned unparseable response, treating as no-action tick");
     DecideTurn::Decide(DecisionProtocol {
         reasoning: response_text.to_string(),
+        inner_loop_requested: false,
         reply: None,
         plan_update: None,
         working_memory_ops: None,
@@ -575,6 +525,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
@@ -873,6 +824,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 

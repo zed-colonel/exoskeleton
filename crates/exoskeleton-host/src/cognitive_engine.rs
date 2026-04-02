@@ -294,68 +294,72 @@ impl CognitiveHandler {
         };
 
         // 2. Check cancellation before starting HTTP call
-        if ctx.input.cancellation_context.token().is_cancelled() {
+        let cancellation = ctx.input.cancellation_context.token();
+        if cancellation.is_cancelled() {
             return HandlerOutput::retryable_failure("cancelled before LLM call");
         }
 
-        // 3. Resolve backend
-        let backend_type = request.backend.unwrap_or(self.default_backend);
-        let backend = match backend_type {
-            LlmBackend::Local => self.local_backend.as_ref(),
-            LlmBackend::Frontier => self.frontier_backend.as_ref(),
-        };
-        let backend = match backend {
-            Some(b) => b,
-            None => {
-                return HandlerOutput::terminal_failure(format!(
-                    "{backend_type:?} backend not configured"
-                ))
-            }
-        };
-
-        // 4. Make the HTTP call
-        let start = std::time::Instant::now();
-        let response = backend.call(
-            &self.http_client,
-            &request,
-            ctx.input.cancellation_context.token(),
-        );
-        let latency_ms = start.elapsed().as_millis() as u64;
-
-        // 5. Handle result
-        match response {
-            Ok(mut llm_response) => {
-                llm_response.latency_ms = latency_ms;
-
-                // 6. Store response as artifact (I3: replay)
-                let artifact = match Artifact::from_json(ArtifactKind::LlmResponse, &llm_response) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        return HandlerOutput::terminal_failure(format!(
-                            "failed to serialize LLM response artifact: {e}"
-                        ))
-                    }
-                };
-
-                if let Err(e) = self.artifact_store.put(&artifact) {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to store LLM response artifact (I3 violation)"
-                    );
-                    // Non-fatal: we still return the response, but log the I3 issue
-                }
-
-                // 7. Return success with serialized response
-                match serde_json::to_vec(&llm_response) {
+        // 3. Use unified handler_direct_llm_call when kernel is available (E8-S1)
+        if let Some(ref kernel) = self.kernel {
+            match crate::llm::direct::handler_direct_llm_call(self, kernel, &request, cancellation)
+            {
+                Ok(result) => match serde_json::to_vec(&result.response) {
                     Ok(bytes) => HandlerOutput::success_with_output(bytes),
                     Err(e) => HandlerOutput::terminal_failure(format!(
                         "failed to serialize LLM response: {e}"
                     )),
-                }
+                },
+                Err(e) => classify_llm_error(e),
             }
-            Err(e) => {
-                // 8. Classify error as retryable or terminal
-                classify_llm_error(e)
+        } else {
+            // Fallback for pre-boot calls (no kernel context yet)
+            let backend_type = request.backend.unwrap_or(self.default_backend);
+            let backend = match backend_type {
+                LlmBackend::Local => self.local_backend.as_ref(),
+                LlmBackend::Frontier => self.frontier_backend.as_ref(),
+            };
+            let backend = match backend {
+                Some(b) => b,
+                None => {
+                    return HandlerOutput::terminal_failure(format!(
+                        "{backend_type:?} backend not configured"
+                    ))
+                }
+            };
+
+            let start = std::time::Instant::now();
+            let response = backend.call(&self.http_client, &request, cancellation);
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            match response {
+                Ok(mut llm_response) => {
+                    llm_response.latency_ms = latency_ms;
+
+                    let artifact =
+                        match Artifact::from_json(ArtifactKind::LlmResponse, &llm_response) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                return HandlerOutput::terminal_failure(format!(
+                                    "failed to serialize LLM response artifact: {e}"
+                                ))
+                            }
+                        };
+
+                    if let Err(e) = self.artifact_store.put(&artifact) {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to store LLM response artifact (I3 violation)"
+                        );
+                    }
+
+                    match serde_json::to_vec(&llm_response) {
+                        Ok(bytes) => HandlerOutput::success_with_output(bytes),
+                        Err(e) => HandlerOutput::terminal_failure(format!(
+                            "failed to serialize LLM response: {e}"
+                        )),
+                    }
+                }
+                Err(e) => classify_llm_error(e),
             }
         }
     }

@@ -87,6 +87,10 @@ impl PromptRegistry {
             "charter-initiative",
             include_str!("../../../prompts/charters/initiative.md"),
         );
+        registry.insert(
+            "inner-loop-system",
+            include_str!("../../../prompts/inner-loop-system.md"),
+        );
         registry
     }
 
@@ -213,7 +217,7 @@ mod tests {
     #[test]
     fn with_defaults_has_all_thirteen_prompts() {
         let registry = PromptRegistry::with_defaults();
-        assert_eq!(registry.len(), 13, "should have 13 compiled-in prompts");
+        assert_eq!(registry.len(), 14, "should have 14 compiled-in prompts");
 
         let expected_keys = [
             "decide-system",

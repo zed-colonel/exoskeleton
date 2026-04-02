@@ -206,6 +206,7 @@ pub fn amend(
                     summary: reply_event.summary.clone(),
                     timestamp: reply_event.timestamp,
                     snapshot: None,
+                    inner_loop_detail: None,
                 });
             }
             Err(e) => {
@@ -260,6 +261,7 @@ pub fn amend(
             summary: rel_event.summary.clone(),
             timestamp: rel_event.timestamp,
             snapshot: None,
+            inner_loop_detail: None,
         });
     }
 
@@ -371,6 +373,7 @@ pub fn amend(
         summary: event.summary.clone(),
         timestamp: event.timestamp,
         snapshot: Some(new_snapshot.clone()),
+        inner_loop_detail: None,
     });
 
     // 7. Acknowledge consumed inbox messages
@@ -625,6 +628,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         };
         (kernel, inbox)
     }
@@ -657,6 +661,7 @@ mod tests {
             },
             response_artifact_id: ArtifactId::from_content(b"test-resp"),
             watch_proposals: vec![],
+            inner_loop_requested: false,
         };
         let perception = PerceptionResult {
             new_messages: vec![],

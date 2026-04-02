@@ -17,7 +17,9 @@ use exoskeleton_core::budget::{
 use exoskeleton_core::conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
 };
-use exoskeleton_core::event::{CapabilityRequestPayload, EventEntry, EventType, LiveEvent};
+use exoskeleton_core::event::{
+    CapabilityRequestPayload, EventEntry, EventType, InnerLoopStepDetail, LiveEvent,
+};
 use exoskeleton_core::memory::{EpisodicSummary, LongTermNote};
 use exoskeleton_core::plan::{Plan, PlanTask, PlanTaskStatus};
 use exoskeleton_core::relationship::{
@@ -105,6 +107,7 @@ fn generate() -> String {
     emit!(output, &cfg, EventEntry);
     emit!(output, &cfg, LiveEvent);
     emit!(output, &cfg, CapabilityRequestPayload);
+    emit!(output, &cfg, InnerLoopStepDetail);
     emit!(output, &cfg, Artifact);
     emit!(output, &cfg, ArtifactRef);
     emit!(output, &cfg, PrincipalSummary);

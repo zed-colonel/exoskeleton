@@ -8,10 +8,8 @@
 //! Threads NEVER invoke tools (IBP §3.4) and NEVER cross to the Tool AQ.
 //! Thread outputs are artifacts only (IBP §4.3).
 
-use std::time::Instant;
-
 use actionqueue_executor_local::CancellationToken;
-use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole};
+use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::ThreadContribution;
 use exoskeleton_core::{
     Artifact, ArtifactId, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent,
@@ -73,14 +71,7 @@ pub fn execute_thread(
         return Err(ExoError::Engine("thread execution cancelled".into()));
     }
 
-    // 4. Resolve LLM backend (use handler's default_backend)
-    let backend = match handler.default_backend {
-        LlmBackend::Local => handler.local_backend.as_ref(),
-        LlmBackend::Frontier => handler.frontier_backend.as_ref(),
-    }
-    .ok_or_else(|| ExoError::Engine("no LLM backend configured for threads".into()))?;
-
-    // 5. Build LLM request
+    // 4. Build LLM request
     let request = LlmRequest {
         backend: Some(handler.default_backend),
         system_prompt: Some(compiled_context.prompt),
@@ -97,30 +88,20 @@ pub fn execute_thread(
         stop_sequences: vec![],
     };
 
-    // 6. Call LLM backend directly (H-1: NOT via LlmClient)
-    let start = Instant::now();
-    let llm_response = backend.call(&handler.http_client, &request, cancellation)?;
-    let _latency_ms = start.elapsed().as_millis() as u64;
+    // 5. Unified LLM call (H-1 pattern, E8-S1)
+    let result =
+        crate::llm::direct::handler_direct_llm_call(handler, kernel, &request, cancellation)?;
+    let llm_response = result.response;
 
-    // 6.5 Record LLM consumption in budget tracker (Sprint 9)
+    // 5.5 Record thread-specific consumption (Sprint 9)
     if let Some(ref tracker) = kernel.budget_tracker {
         if let Ok(mut guard) = tracker.try_lock() {
-            guard.record_llm_call(
-                handler.default_backend,
-                llm_response.tokens_in,
-                llm_response.tokens_out,
-                llm_response.cost_estimate_cents.unwrap_or(0.0),
-            );
             guard.record_thread_consumption(
                 thread.thread_id,
                 llm_response.tokens_in + llm_response.tokens_out,
             );
         }
     }
-
-    // 7. Store LLM response as artifact (I3)
-    let response_artifact = Artifact::from_json(ArtifactKind::LlmResponse, &llm_response)?;
-    kernel.artifact_store.put(&response_artifact)?;
 
     // 8. Parse thread response -- try JSON first, fallback to raw text
     let thread_response = serde_json::from_str::<ThreadResponse>(&llm_response.content)
@@ -216,6 +197,7 @@ pub fn process_meta_cognition_output(
             summary: event.summary.clone(),
             timestamp: event.timestamp,
             snapshot: None,
+            inner_loop_detail: None,
         });
 
         tracing::info!(
@@ -386,6 +368,7 @@ pub fn execute_due_threads(
                     summary: format!("Thread '{}' completed", thread.name),
                     timestamp: chrono::Utc::now(),
                     snapshot: None,
+                    inner_loop_detail: None,
                 });
 
                 // Process Meta-Cognition output for charter proposals (E5-S2)
@@ -552,6 +535,7 @@ mod tests {
             max_decide_turns: 5,
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
         }
     }
 
