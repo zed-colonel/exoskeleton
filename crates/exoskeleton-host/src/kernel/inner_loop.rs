@@ -160,7 +160,7 @@ pub fn run_inner_loop(
             session.record_tool_call(&exec.action.tool_name, &exec.action.params);
         }
 
-        // Broadcast InnerLoopStep
+        // Capture tool summary before extending all_executions
         let tool_summary = act_result.executions.first().map(|e| {
             let outcome = if e.result.is_ok() {
                 "success"
@@ -170,6 +170,28 @@ pub fn run_inner_loop(
             (e.action.tool_name.clone(), outcome.to_string())
         });
 
+        all_executions.extend(act_result.executions.clone());
+
+        // ── DecideLite ── (next iteration)
+        let decide_result = decide_lite(
+            handler,
+            kernel,
+            orientation,
+            &all_executions,
+            &current_decision,
+            cancellation,
+        )?;
+
+        // Record tokens
+        let tokens_this_step =
+            decide_result.llm_call_record.tokens_in + decide_result.llm_call_record.tokens_out;
+        session.record_llm_tokens(
+            decide_result.llm_call_record.tokens_in,
+            decide_result.llm_call_record.tokens_out,
+        );
+        all_llm_records.push(decide_result.llm_call_record.clone());
+
+        // Broadcast InnerLoopStep AFTER DecideLite so tokens_this_step is accurate
         broadcast_inner_loop_event(
             kernel,
             tick_number,
@@ -188,32 +210,11 @@ pub fn run_inner_loop(
                 max_steps: config.max_steps_per_tick,
                 tool_name: tool_summary.as_ref().map(|(name, _)| name.clone()),
                 tool_outcome: tool_summary.as_ref().map(|(_, outcome)| outcome.clone()),
-                tokens_this_step: 0, // updated after DecideLite
+                tokens_this_step,
                 tokens_total: session.tokens_consumed(),
                 completion_reason: None,
             }),
         );
-
-        all_executions.extend(act_result.executions.clone());
-
-        // ── DecideLite ── (next iteration)
-        let decide_result = decide_lite(
-            handler,
-            kernel,
-            orientation,
-            &all_executions,
-            &current_decision,
-            cancellation,
-        )?;
-
-        // Record tokens
-        let _tokens_this_step =
-            decide_result.llm_call_record.tokens_in + decide_result.llm_call_record.tokens_out;
-        session.record_llm_tokens(
-            decide_result.llm_call_record.tokens_in,
-            decide_result.llm_call_record.tokens_out,
-        );
-        all_llm_records.push(decide_result.llm_call_record.clone());
 
         current_decision = decide_result;
     }
