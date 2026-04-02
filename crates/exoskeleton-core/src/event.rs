@@ -92,6 +92,12 @@ pub enum EventType {
     ConnectorLoaded,
     /// A connector was unloaded from the registry at runtime.
     ConnectorUnloaded,
+    /// Inner loop started within a tick. Summary includes step limit and token budget.
+    InnerLoopStarted,
+    /// One inner-loop step completed. Summary includes step number, tool used, outcome.
+    InnerLoopStep,
+    /// Inner loop completed. Summary includes total steps, tokens, completion reason.
+    InnerLoopCompleted,
     /// An error occurred.
     Error,
 }
@@ -116,6 +122,31 @@ pub struct LiveEvent {
     /// and vessel_started events to avoid a follow-up REST call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<StateSnapshot>,
+    /// Inner-loop step detail. Present only for InnerLoopStep and InnerLoopCompleted events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_loop_detail: Option<InnerLoopStepDetail>,
+}
+
+/// Inner-loop step detail, included in LiveEvent for InnerLoopStep events (E8-S1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct InnerLoopStepDetail {
+    /// Current step number (1-based).
+    pub step_number: u32,
+    /// Maximum steps allowed in this session.
+    pub max_steps: u32,
+    /// Tool name called in this step (None for completion events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Brief outcome of the tool call (None for completion events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_outcome: Option<String>,
+    /// Tokens consumed in this step (input + output).
+    pub tokens_this_step: u64,
+    /// Total tokens consumed across all steps so far.
+    pub tokens_total: u64,
+    /// Completion reason (only set for InnerLoopCompleted events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_reason: Option<String>,
 }
 
 /// Payload stored as a JSON artifact for CapabilityRequest events.
@@ -188,6 +219,9 @@ mod tests {
             EventType::CharterProposal,
             EventType::ConnectorLoaded,
             EventType::ConnectorUnloaded,
+            EventType::InnerLoopStarted,
+            EventType::InnerLoopStep,
+            EventType::InnerLoopCompleted,
             EventType::Error,
         ];
         for event_type in &variants {
@@ -263,6 +297,7 @@ mod tests {
             summary: "Tick 42 started".into(),
             timestamp: Utc::now(),
             snapshot: None,
+            inner_loop_detail: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
@@ -294,6 +329,7 @@ mod tests {
             summary: "Tick 42 completed".into(),
             timestamp: Utc::now(),
             snapshot: Some(snapshot),
+            inner_loop_detail: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
@@ -309,6 +345,7 @@ mod tests {
             summary: "Action executed".into(),
             timestamp: Utc::now(),
             snapshot: None,
+            inner_loop_detail: None,
         };
         let value: serde_json::Value = serde_json::to_value(&event).unwrap();
         let obj = value.as_object().unwrap();
@@ -324,6 +361,7 @@ mod tests {
             summary: "Vessel started".into(),
             timestamp: Utc::now(),
             snapshot: None,
+            inner_loop_detail: None,
         };
         let value: serde_json::Value = serde_json::to_value(&event).unwrap();
         let obj = value.as_object().unwrap();
@@ -393,5 +431,94 @@ mod tests {
         let without_ack = r#"{"capability":"test","reason":"r","context":"c"}"#;
         let parsed: CapabilityRequestPayload = serde_json::from_str(without_ack).unwrap();
         assert!(!parsed.acknowledged);
+    }
+
+    // ── E8S1-T20: inner_loop_step_detail_serialize ──
+
+    #[test]
+    fn inner_loop_step_detail_serialize() {
+        let detail = InnerLoopStepDetail {
+            step_number: 3,
+            max_steps: 25,
+            tool_name: Some("fs.write".into()),
+            tool_outcome: Some("success".into()),
+            tokens_this_step: 1500,
+            tokens_total: 4500,
+            completion_reason: None,
+        };
+        let json = serde_json::to_string(&detail).unwrap();
+        let parsed: InnerLoopStepDetail = serde_json::from_str(&json).unwrap();
+        assert_eq!(detail, parsed);
+        assert_eq!(parsed.step_number, 3);
+        assert_eq!(parsed.max_steps, 25);
+        assert_eq!(parsed.tokens_this_step, 1500);
+        assert_eq!(parsed.tokens_total, 4500);
+        assert_eq!(parsed.tool_name.as_deref(), Some("fs.write"));
+        assert_eq!(parsed.tool_outcome.as_deref(), Some("success"));
+        assert!(parsed.completion_reason.is_none());
+
+        // Optional fields omitted when None
+        let value: serde_json::Value = serde_json::to_value(&detail).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(!obj.contains_key("completion_reason"));
+
+        // Completed event with completion_reason
+        let completed_detail = InnerLoopStepDetail {
+            step_number: 5,
+            max_steps: 25,
+            tool_name: None,
+            tool_outcome: None,
+            tokens_this_step: 0,
+            tokens_total: 8000,
+            completion_reason: Some("agent_complete".into()),
+        };
+        let json2 = serde_json::to_string(&completed_detail).unwrap();
+        let parsed2: InnerLoopStepDetail = serde_json::from_str(&json2).unwrap();
+        assert_eq!(completed_detail, parsed2);
+        assert_eq!(parsed2.completion_reason.as_deref(), Some("agent_complete"));
+    }
+
+    // ── E8S1-T21: live_event_with_inner_loop_detail ──
+
+    #[test]
+    fn live_event_with_inner_loop_detail() {
+        let detail = InnerLoopStepDetail {
+            step_number: 2,
+            max_steps: 10,
+            tool_name: Some("shell.exec".into()),
+            tool_outcome: Some("success".into()),
+            tokens_this_step: 800,
+            tokens_total: 2400,
+            completion_reason: None,
+        };
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopStep,
+            tick_number: Some(7),
+            summary: "Step 2/10: shell.exec (success)".into(),
+            timestamp: Utc::now(),
+            snapshot: None,
+            inner_loop_detail: Some(detail),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+        assert!(parsed.inner_loop_detail.is_some());
+        let d = parsed.inner_loop_detail.unwrap();
+        assert_eq!(d.step_number, 2);
+        assert_eq!(d.tokens_this_step, 800);
+        assert_eq!(d.tool_name.as_deref(), Some("shell.exec"));
+
+        // Verify inner_loop_detail omitted when None
+        let event_without = LiveEvent {
+            event_type: EventType::TickStarted,
+            tick_number: Some(1),
+            summary: "Tick 1 started".into(),
+            timestamp: Utc::now(),
+            snapshot: None,
+            inner_loop_detail: None,
+        };
+        let value: serde_json::Value = serde_json::to_value(&event_without).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(!obj.contains_key("inner_loop_detail"));
     }
 }

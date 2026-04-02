@@ -137,6 +137,59 @@ impl Default for LlmConfig {
     }
 }
 
+/// Inner loop configuration for interactive coding sessions (E8-S1).
+///
+/// Controls the bounded inner interaction loop within PODAARA ticks.
+/// When `enabled = false` (default), the master loop behaves exactly as
+/// before (one Decide+Act per tick). When enabled, the agent can request
+/// iterative DecideLite→Act→Observe cycles within a single tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InnerLoopConfig {
+    /// Enable the bounded inner interaction loop within PODAARA ticks.
+    /// When false, the master loop behaves exactly as before.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum inner-loop steps (Decide→Act iterations) per tick.
+    #[serde(default = "default_inner_loop_max_steps")]
+    pub max_steps_per_tick: u32,
+    /// Maximum total tokens (input + output) consumed by inner-loop
+    /// LLM calls within one tick. Independent of the window budget.
+    #[serde(default = "default_inner_loop_max_tokens")]
+    pub max_tokens_per_session: u64,
+    /// Maximum wall-clock time (seconds) for the inner loop within one tick.
+    #[serde(default = "default_inner_loop_timeout")]
+    pub timeout_secs: u64,
+    /// Number of identical consecutive tool calls (same tool + same args)
+    /// before doom-loop detection triggers and aborts the inner loop.
+    #[serde(default = "default_inner_loop_doom_threshold")]
+    pub doom_loop_threshold: u32,
+}
+
+fn default_inner_loop_max_steps() -> u32 {
+    25
+}
+fn default_inner_loop_max_tokens() -> u64 {
+    500_000
+}
+fn default_inner_loop_timeout() -> u64 {
+    300
+}
+fn default_inner_loop_doom_threshold() -> u32 {
+    3
+}
+
+impl Default for InnerLoopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_steps_per_tick: 25,
+            max_tokens_per_session: 500_000,
+            timeout_secs: 300,
+            doom_loop_threshold: 3,
+        }
+    }
+}
+
 /// Top-level configuration for an Exoskeleton Vessel.
 ///
 /// Each engine has independent configuration (I9: cognitive and tool execution
@@ -262,6 +315,10 @@ pub struct VesselConfig {
     /// `None` disables WASM connector loading.
     /// Default: None (env override: EXO_CONNECTORS_DIR).
     pub connectors_dir: Option<PathBuf>,
+
+    // ── Inner loop settings (E8-S1) ──
+    /// Inner loop configuration for interactive coding sessions.
+    pub inner_loop: InnerLoopConfig,
 }
 
 impl Default for VesselConfig {
@@ -295,6 +352,7 @@ impl Default for VesselConfig {
             max_watches: exoskeleton_core::watch::DEFAULT_MAX_WATCHES,
             extra_destructive_tools: vec![],
             connectors_dir: None,
+            inner_loop: InnerLoopConfig::default(),
         }
     }
 }
@@ -439,6 +497,11 @@ impl VesselConfig {
                     destructive: self.extra_destructive_tools.clone(),
                 })
             },
+            inner_loop: if self.inner_loop.enabled {
+                Some(self.inner_loop.clone())
+            } else {
+                None
+            },
         };
 
         let toml_str = toml::to_string_pretty(&config_file)
@@ -551,6 +614,13 @@ impl VesselConfig {
         if let Ok(val) = std::env::var("EXO_CONNECTORS_DIR") {
             self.connectors_dir = Some(PathBuf::from(val));
         }
+        if let Ok(val) = std::env::var("EXO_INNER_LOOP_ENABLED") {
+            match val.to_lowercase().as_str() {
+                "true" | "1" | "yes" => self.inner_loop.enabled = true,
+                "false" | "0" | "no" => self.inner_loop.enabled = false,
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -657,6 +727,9 @@ pub struct VesselConfigFile {
     /// `[connectors]` section — runtime connector configuration.
     #[serde(default)]
     pub connectors: Option<ConnectorsSection>,
+    /// `[inner_loop]` section — inner loop for interactive coding sessions.
+    #[serde(default)]
+    pub inner_loop: Option<InnerLoopConfig>,
 }
 
 /// The `[daemon]` section of the TOML config file.
@@ -996,6 +1069,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
                 .map(|c| c.destructive.clone())
                 .unwrap_or_default(),
             connectors_dir: file.connectors.as_ref().and_then(|c| c.dir.clone()),
+            inner_loop: file.inner_loop.unwrap_or_default(),
         })
     }
 }
@@ -2117,5 +2191,86 @@ max_decide_turns = 0
         let file: VesselConfigFile = toml::from_str(toml_str).unwrap();
         let config = VesselConfig::try_from(file).unwrap();
         assert_eq!(config.max_decide_turns, 1);
+    }
+
+    // ── E8S1-T16: inner_loop_config_defaults ──
+
+    #[test]
+    fn inner_loop_config_defaults() {
+        let config = InnerLoopConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_steps_per_tick, 25);
+        assert_eq!(config.max_tokens_per_session, 500_000);
+        assert_eq!(config.timeout_secs, 300);
+        assert_eq!(config.doom_loop_threshold, 3);
+    }
+
+    // ── E8S1-T17: inner_loop_config_toml_roundtrip ──
+
+    #[test]
+    fn inner_loop_config_toml_roundtrip() {
+        let config = InnerLoopConfig {
+            enabled: true,
+            max_steps_per_tick: 50,
+            max_tokens_per_session: 1_000_000,
+            timeout_secs: 600,
+            doom_loop_threshold: 5,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: InnerLoopConfig = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_steps_per_tick, 50);
+        assert_eq!(parsed.max_tokens_per_session, 1_000_000);
+        assert_eq!(parsed.timeout_secs, 600);
+        assert_eq!(parsed.doom_loop_threshold, 5);
+
+        // Also verify full vessel config with inner_loop section
+        let vessel_toml = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[inner_loop]
+enabled = true
+max_steps_per_tick = 30
+max_tokens_per_session = 750000
+timeout_secs = 180
+doom_loop_threshold = 4
+"#;
+        let file: VesselConfigFile = toml::from_str(vessel_toml).unwrap();
+        let vessel_config = VesselConfig::try_from(file).unwrap();
+        assert!(vessel_config.inner_loop.enabled);
+        assert_eq!(vessel_config.inner_loop.max_steps_per_tick, 30);
+        assert_eq!(vessel_config.inner_loop.max_tokens_per_session, 750_000);
+        assert_eq!(vessel_config.inner_loop.timeout_secs, 180);
+        assert_eq!(vessel_config.inner_loop.doom_loop_threshold, 4);
+    }
+
+    // ── E8S1-T18: inner_loop_config_env_override ──
+
+    #[test]
+    fn inner_loop_config_env_override() {
+        // Test EXO_INNER_LOOP_ENABLED=true enables the inner loop
+        std::env::set_var("EXO_INNER_LOOP_ENABLED", "true");
+        let mut config = VesselConfig {
+            mission: "test".into(),
+            ..Default::default()
+        };
+        assert!(!config.inner_loop.enabled);
+        config.apply_env_overrides().unwrap();
+        assert!(config.inner_loop.enabled);
+
+        // Test EXO_INNER_LOOP_ENABLED=false disables it
+        std::env::set_var("EXO_INNER_LOOP_ENABLED", "false");
+        config.apply_env_overrides().unwrap();
+        assert!(!config.inner_loop.enabled);
+
+        // Test EXO_INNER_LOOP_ENABLED=1 also enables
+        std::env::set_var("EXO_INNER_LOOP_ENABLED", "1");
+        config.apply_env_overrides().unwrap();
+        assert!(config.inner_loop.enabled);
+
+        // Clean up
+        std::env::remove_var("EXO_INNER_LOOP_ENABLED");
     }
 }
