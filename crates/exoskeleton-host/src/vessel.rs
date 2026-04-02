@@ -795,9 +795,9 @@ mod tests {
     // ── E4S1-T17: WI default_registry has built-in connectors ──
 
     #[test]
-    fn default_registry_has_nine_connectors() {
+    fn default_registry_has_thirteen_connectors() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 9, "expected 9 built-in connectors");
+        assert_eq!(registry.len(), 13, "expected 13 built-in connectors");
         assert!(registry.get("delay").is_some());
         assert!(registry.get("http.request").is_some());
         assert!(registry.get("fs.read").is_some());
@@ -805,6 +805,10 @@ mod tests {
         assert!(registry.get("code.read").is_some());
         assert!(registry.get("code.edit").is_some());
         assert!(registry.get("code.write").is_some());
+        assert!(registry.get("code.grep").is_some());
+        assert!(registry.get("code.glob").is_some());
+        assert!(registry.get("code.ls").is_some());
+        assert!(registry.get("code.apply_patch").is_some());
         assert!(registry.get("shell.exec").is_some());
         assert!(registry.get("sandbox.exec").is_some());
     }
@@ -814,13 +818,13 @@ mod tests {
     #[test]
     fn peer_resolve_registered_when_observatory_url_set() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 13);
 
         // Simulate the conditional registration from start_with_registry_and_backends
         let observatory_url = "http://observatory:3000".to_string();
         registry.register(Arc::new(PeerResolveConnector::new(observatory_url, None)));
 
-        assert_eq!(registry.len(), 10);
+        assert_eq!(registry.len(), 14);
         assert!(registry.get("peer.resolve").is_some());
     }
 }

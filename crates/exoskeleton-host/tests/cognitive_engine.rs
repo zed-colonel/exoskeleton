@@ -329,7 +329,7 @@ async fn list_capabilities_returns_registered_connectors() {
         .unwrap();
 
     let caps = vessel.list_capabilities();
-    assert_eq!(caps.len(), 9);
+    assert_eq!(caps.len(), 13);
 
     let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"delay"));
@@ -338,6 +338,10 @@ async fn list_capabilities_returns_registered_connectors() {
     assert!(names.contains(&"code.read"));
     assert!(names.contains(&"code.edit"));
     assert!(names.contains(&"code.write"));
+    assert!(names.contains(&"code.grep"));
+    assert!(names.contains(&"code.glob"));
+    assert!(names.contains(&"code.ls"));
+    assert!(names.contains(&"code.apply_patch"));
     assert!(names.contains(&"http.request"));
     assert!(names.contains(&"shell.exec"));
     assert!(names.contains(&"sandbox.exec"));

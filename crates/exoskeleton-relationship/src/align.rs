@@ -69,6 +69,7 @@ impl Default for AlignConfig {
                 "discord".into(),
                 "code.edit".into(),
                 "code.write".into(),
+                "code.apply_patch".into(),
             ],
             dynamic_destructive_tools: Mutex::new(Vec::new()),
             block_on_broken_commitments: false,
@@ -395,6 +396,17 @@ mod tests {
         assert!(
             config.destructive_tools.contains(&"shell.exec".to_string()),
             "shell.exec should be in destructive_tools"
+        );
+    }
+
+    #[test]
+    fn align_config_default_includes_code_apply_patch() {
+        let config = AlignConfig::default();
+        assert!(
+            config
+                .destructive_tools
+                .contains(&"code.apply_patch".to_string()),
+            "code.apply_patch should be in destructive_tools"
         );
     }
 
