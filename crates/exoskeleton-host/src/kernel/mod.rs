@@ -304,6 +304,27 @@ pub fn run_tick(
         // The agent explicitly requested this — the task needs
         // iterative tool-feedback (e.g., multi-step coding).
         tracing::info!(tick_number, "Inner Loop (activated by agent request)");
+
+        // Merge watch poll actions into the initial decision so the inner loop's
+        // first Align+Act step includes them (E5-S2, bypass Align as already approved).
+        let decision = if watch_result.poll_actions.is_empty() {
+            decision
+        } else {
+            let mut d = decision;
+            d.actions.extend(
+                watch_result
+                    .poll_actions
+                    .into_iter()
+                    .map(|a| PlannedAction {
+                        tool_name: a.tool_name,
+                        params: a.params,
+                        rationale: a.rationale,
+                        plan_task_id: a.plan_task_id,
+                    }),
+            );
+            d
+        };
+
         match inner_loop::run_inner_loop(
             handler,
             kernel,
