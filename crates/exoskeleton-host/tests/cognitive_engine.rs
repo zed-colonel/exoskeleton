@@ -329,7 +329,7 @@ async fn list_capabilities_returns_registered_connectors() {
         .unwrap();
 
     let caps = vessel.list_capabilities();
-    assert_eq!(caps.len(), 13);
+    assert_eq!(caps.len(), 14);
 
     let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"delay"));
@@ -345,6 +345,7 @@ async fn list_capabilities_returns_registered_connectors() {
     assert!(names.contains(&"http.request"));
     assert!(names.contains(&"shell.exec"));
     assert!(names.contains(&"sandbox.exec"));
+    assert!(names.contains(&"agent.ask_user"));
 
     vessel.shutdown().await.unwrap();
 }
@@ -382,10 +383,11 @@ async fn capabilities_match_registry() {
     let dir = tempfile::tempdir().unwrap();
     let config = common::test_config(dir.path());
     let registry = common::test_registry();
-    let expected_count = registry.len();
+    let base_count = registry.len();
     let vessel = Vessel::start_with_registry(config, registry).await.unwrap();
 
-    assert_eq!(vessel.list_capabilities().len(), expected_count);
+    // Vessel boot registers agent.ask_user (+1 over the base registry)
+    assert_eq!(vessel.list_capabilities().len(), base_count + 1);
 
     vessel.shutdown().await.unwrap();
 }
@@ -615,6 +617,31 @@ async fn wi_dir_has_no_cognitive_files() {
         !wi_dir.join("cognitive-aq").exists(),
         "wi/ must not contain cognitive-aq directory"
     );
+
+    vessel.shutdown().await.unwrap();
+}
+
+// ── T48: vessel_has_agent_ask_user_connector ──
+#[tokio::test]
+async fn vessel_has_agent_ask_user_connector() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::test_config(dir.path());
+    let vessel = Vessel::start_with_registry(config, common::test_registry())
+        .await
+        .unwrap();
+
+    let caps = vessel.list_capabilities();
+    let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"agent.ask_user"),
+        "fully booted vessel must include agent.ask_user connector, got: {names:?}"
+    );
+
+    // Verify it's described correctly
+    let desc = vessel.describe("agent.ask_user");
+    assert!(desc.is_some(), "agent.ask_user must be describable");
+    let desc = desc.unwrap();
+    assert!(desc.is_read_only, "agent.ask_user must be marked read_only");
 
     vessel.shutdown().await.unwrap();
 }

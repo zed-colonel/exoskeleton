@@ -193,11 +193,8 @@ pub fn process_meta_cognition_output(
 
         let _ = kernel.event_tx.send(exoskeleton_core::LiveEvent {
             event_type: exoskeleton_core::EventType::CharterProposal,
-            tick_number: Some(tick_number),
             summary: event.summary.clone(),
-            timestamp: event.timestamp,
-            snapshot: None,
-            inner_loop_detail: None,
+            ..exoskeleton_core::LiveEvent::new(Some(tick_number))
         });
 
         tracing::info!(
@@ -364,11 +361,8 @@ pub fn execute_due_threads(
                 // D2: Broadcast ThreadRan LiveEvent
                 let _ = kernel.event_tx.send(LiveEvent {
                     event_type: EventType::ThreadRan,
-                    tick_number: Some(snapshot.tick_number + 1),
                     summary: format!("Thread '{}' completed", thread.name),
-                    timestamp: chrono::Utc::now(),
-                    snapshot: None,
-                    inner_loop_detail: None,
+                    ..LiveEvent::new(Some(snapshot.tick_number + 1))
                 });
 
                 // Process Meta-Cognition output for charter proposals (E5-S2)
@@ -537,6 +531,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         }
     }
 

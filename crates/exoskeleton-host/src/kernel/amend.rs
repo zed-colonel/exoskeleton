@@ -98,6 +98,7 @@ pub fn amend(
 
     // Update status back to Idle after completing the tick
     new_snapshot.status = VesselStatus::Idle;
+    new_snapshot.vessel_mode = *kernel.vessel_mode.lock().unwrap();
 
     // Build last_action_summary from act results
     new_snapshot.last_action_summary = if act_result.executions.is_empty() {
@@ -202,11 +203,8 @@ pub fn amend(
                 // Broadcast LiveEvent for real-time observers.
                 let _ = kernel.event_tx.send(LiveEvent {
                     event_type: EventType::VesselResponseSent,
-                    tick_number: Some(tick_number),
                     summary: reply_event.summary.clone(),
-                    timestamp: reply_event.timestamp,
-                    snapshot: None,
-                    inner_loop_detail: None,
+                    ..LiveEvent::new(Some(tick_number))
                 });
             }
             Err(e) => {
@@ -257,11 +255,8 @@ pub fn amend(
         // D2: Broadcast RelationshipUpdated LiveEvent
         let _ = kernel.event_tx.send(LiveEvent {
             event_type: EventType::RelationshipUpdated,
-            tick_number: Some(tick_number),
             summary: rel_event.summary.clone(),
-            timestamp: rel_event.timestamp,
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(tick_number))
         });
     }
 
@@ -369,11 +364,9 @@ pub fn amend(
     // D2: Broadcast TickCompleted LiveEvent with snapshot
     let _ = kernel.event_tx.send(LiveEvent {
         event_type: EventType::TickCompleted,
-        tick_number: Some(tick_number),
         summary: event.summary.clone(),
-        timestamp: event.timestamp,
         snapshot: Some(new_snapshot.clone()),
-        inner_loop_detail: None,
+        ..LiveEvent::new(Some(tick_number))
     });
 
     // 7. Acknowledge consumed inbox messages
@@ -630,6 +623,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         };
         (kernel, inbox)
     }
@@ -663,6 +660,7 @@ mod tests {
             response_artifact_id: ArtifactId::from_content(b"test-resp"),
             watch_proposals: vec![],
             inner_loop_requested: false,
+            vessel_mode_request: None,
         };
         let perception = PerceptionResult {
             new_messages: vec![],
@@ -1114,6 +1112,7 @@ mod tests {
                 receipt_ref: None,
                 outcome: exoskeleton_core::tick::ActionOutcome::Success,
             },
+            pending_question: false,
         };
         act_result.executions.push(exec);
         decision.snapshot_delta = SnapshotDelta::default();

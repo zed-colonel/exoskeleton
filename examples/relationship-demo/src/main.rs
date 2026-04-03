@@ -63,6 +63,7 @@ fn demo_config(dir: &Path) -> VesselConfig {
         extra_destructive_tools: vec![],
         connectors_dir: None,
         inner_loop: exoskeleton_host::config::InnerLoopConfig::default(),
+        tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
     }
 }
 

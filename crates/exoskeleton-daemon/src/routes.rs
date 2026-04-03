@@ -40,6 +40,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/capabilities", get(handlers::get_capabilities))
         .route("/api/v1/engines", get(handlers::get_engines))
         .route("/api/v1/inbox", post(handlers::post_inbox))
+        .route("/api/v1/plan/approve", post(handlers::post_plan_approve))
+        .route("/api/v1/plan/cancel", post(handlers::post_plan_cancel))
+        .route("/api/v1/plan/status", get(handlers::get_plan_status))
+        .route(
+            "/api/v1/questions/:question_id/answer",
+            post(handlers::post_question_answer),
+        )
         // Epoch 0: Charter hot-reload
         .route(
             "/api/v1/charters/reload",

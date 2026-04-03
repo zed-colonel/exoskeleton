@@ -15,7 +15,6 @@
 //! Every LLM response is stored as a content-addressed artifact (I3).
 
 use actionqueue_executor_local::CancellationToken;
-use chrono::Utc;
 use exoskeleton_core::event::InnerLoopStepDetail;
 use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::LlmCallRecord;
@@ -158,6 +157,32 @@ pub fn run_inner_loop(
         // Record tool calls for doom-loop detection
         for exec in &act_result.executions {
             session.record_tool_call(&exec.action.tool_name, &exec.action.params);
+        }
+
+        if act_result
+            .executions
+            .iter()
+            .any(|exec| exec.pending_question)
+        {
+            broadcast_inner_loop_completed(
+                kernel,
+                tick_number,
+                step,
+                &session,
+                &SessionCompletionReason::AwaitingInput,
+            );
+            return Ok(InnerLoopResult {
+                executions: {
+                    all_executions.extend(act_result.executions.clone());
+                    all_executions
+                },
+                llm_call_records: all_llm_records,
+                final_decision: current_decision,
+                completion_reason: SessionCompletionReason::AwaitingInput,
+                steps_taken: step,
+                relationship_updates: all_relationship_updates,
+                relationship_snapshot: last_relationship_snapshot,
+            });
         }
 
         // Capture tool summary before extending all_executions
@@ -364,6 +389,7 @@ fn parse_decide_lite_response(
                 reply: None,
                 plan_update: None,
                 working_memory_ops: None,
+                vessel_mode_request: None,
                 actions: vec![],
                 memory_notes: vec![],
                 watch_proposals: vec![],
@@ -377,6 +403,7 @@ fn parse_decide_lite_response(
             reply: None,
             plan_update: None,
             working_memory_ops: None,
+            vessel_mode_request: None,
             actions: vec![],
             memory_notes: vec![],
             watch_proposals: vec![],
@@ -396,6 +423,7 @@ fn parse_decide_lite_response(
         response_artifact_id: artifact_id,
         watch_proposals: protocol.watch_proposals,
         inner_loop_requested: false, // Not relevant for inner-loop iterations
+        vessel_mode_request: protocol.vessel_mode_request,
     })
 }
 
@@ -409,11 +437,9 @@ fn broadcast_inner_loop_event(
 ) {
     let _ = kernel.event_tx.send(LiveEvent {
         event_type,
-        tick_number: Some(tick_number),
         summary,
-        timestamp: Utc::now(),
-        snapshot: None,
         inner_loop_detail: detail,
+        ..LiveEvent::new(Some(tick_number))
     });
 }
 

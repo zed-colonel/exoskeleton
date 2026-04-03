@@ -18,7 +18,8 @@ use exoskeleton_core::conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
 };
 use exoskeleton_core::event::{
-    CapabilityRequestPayload, EventEntry, EventType, InnerLoopStepDetail, LiveEvent,
+    CapabilityRequestPayload, DiffSummary, EventEntry, EventType, InnerLoopStepDetail, LiveEvent,
+    PlanModeDetail, PolicyDetail, QuestionDetail,
 };
 use exoskeleton_core::memory::{EpisodicSummary, LongTermNote};
 use exoskeleton_core::plan::{Plan, PlanTask, PlanTaskStatus};
@@ -33,7 +34,7 @@ use exoskeleton_core::tick::{
 use exoskeleton_core::working_memory::{WorkingMemory, WorkingMemoryEntry};
 use exoskeleton_core::{
     ArtifactId, ConversationId, EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId,
-    TickId, VesselId,
+    TickId, VesselId, VesselMode,
 };
 // ── exoskeleton-daemon types ──
 use exoskeleton_daemon::handlers::{
@@ -89,6 +90,7 @@ fn generate() -> String {
     emit!(output, &cfg, ThrashLevel);
     emit!(output, &cfg, PlanTaskStatus);
     emit!(output, &cfg, ConversationState);
+    emit!(output, &cfg, VesselMode);
 
     // ── Plan & Working Memory types (E1-S1) ──
     emit!(output, &cfg, Plan);
@@ -108,6 +110,10 @@ fn generate() -> String {
     emit!(output, &cfg, LiveEvent);
     emit!(output, &cfg, CapabilityRequestPayload);
     emit!(output, &cfg, InnerLoopStepDetail);
+    emit!(output, &cfg, QuestionDetail);
+    emit!(output, &cfg, PolicyDetail);
+    emit!(output, &cfg, PlanModeDetail);
+    emit!(output, &cfg, DiffSummary);
     emit!(output, &cfg, Artifact);
     emit!(output, &cfg, ArtifactRef);
     emit!(output, &cfg, PrincipalSummary);

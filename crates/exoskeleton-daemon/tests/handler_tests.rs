@@ -12,7 +12,7 @@ use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
     ArtifactId, ArtifactStore, CapabilityRequestPayload, ConversationStore, EnvelopeKind,
     EventEntry, EventLedger, EventType, InMemoryWatchStore, LedgerEntryId, SnapshotStore,
-    StateSnapshot, TickStore, VesselId,
+    StateSnapshot, TickStore, VesselId, VesselMode,
 };
 use exoskeleton_daemon::routes::build_router;
 use exoskeleton_daemon::state::AppState;
@@ -64,6 +64,10 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
         wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
         connectors_dir: None,
         align_config: None,
+        cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
+        vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
+        questions_dir: dir.join("questions"),
+        answers_dir: dir.join("answers"),
     })
 }
 
@@ -107,6 +111,10 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
         wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
         connectors_dir: None,
         align_config: None,
+        cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
+        vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
+        questions_dir: dir.join("questions"),
+        answers_dir: dir.join("answers"),
     })
 }
 
@@ -1423,6 +1431,10 @@ async fn generic_webhook_hmac_valid() {
         wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
         connectors_dir: None,
         align_config: None,
+        cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
+        vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
+        questions_dir: dir.path().join("questions"),
+        answers_dir: dir.path().join("answers"),
     });
 
     let app = build_router(state);
@@ -1486,6 +1498,10 @@ async fn generic_webhook_hmac_invalid() {
         wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
         connectors_dir: None,
         align_config: None,
+        cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
+        vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
+        questions_dir: dir.path().join("questions"),
+        answers_dir: dir.path().join("answers"),
     });
 
     let app = build_router(state);
@@ -1782,11 +1798,8 @@ async fn connector_loaded_event_emitted() {
 
     let live_event = exoskeleton_core::LiveEvent {
         event_type: EventType::ConnectorLoaded,
-        tick_number: None,
         summary: "Connector 'test.loaded' loaded".into(),
-        timestamp: event.timestamp,
-        snapshot: None,
-        inner_loop_detail: None,
+        ..exoskeleton_core::LiveEvent::new(None)
     };
     let _ = state.event_tx.send(live_event);
 
@@ -1862,4 +1875,273 @@ async fn decide_sees_new_connector() {
     });
     let err = registry.register_runtime(dup).unwrap_err();
     assert!(matches!(err, RegistryError::DuplicateConnector(_)));
+}
+
+// ── T41: plan_approve_transitions_to_executing ──
+#[tokio::test]
+async fn plan_approve_transitions_to_executing() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Set mode to Planning
+    *state.vessel_mode.lock().unwrap() = VesselMode::Planning;
+
+    // Store a PlanDraft artifact so the approve endpoint can find it
+    let draft = exoskeleton_core::Artifact::from_json(
+        exoskeleton_core::ArtifactKind::PlanDraft,
+        &serde_json::json!({"objective": "test plan", "tasks": []}),
+    )
+    .unwrap();
+    let draft_id = state
+        .inspector
+        .storage()
+        .artifact_store()
+        .put(&draft)
+        .unwrap();
+
+    let app = build_router(state.clone());
+    let body = serde_json::json!({"plan_draft_id": draft_id});
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/plan/approve")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        *state.vessel_mode.lock().unwrap(),
+        VesselMode::Executing,
+        "mode should transition to Executing after plan approval"
+    );
+}
+
+// ── T42: plan_approve_without_planning_mode_400 ──
+#[tokio::test]
+async fn plan_approve_without_planning_mode_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Mode is Normal (not Planning)
+    assert_eq!(*state.vessel_mode.lock().unwrap(), VesselMode::Normal);
+
+    let app = build_router(state);
+    let body = serde_json::json!({
+        "plan_draft_id": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+    });
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/plan/approve")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── T43: plan_approve_missing_draft_404 ──
+#[tokio::test]
+async fn plan_approve_missing_draft_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Set mode to Planning
+    *state.vessel_mode.lock().unwrap() = VesselMode::Planning;
+
+    let app = build_router(state);
+    // Use a valid content-addressed hash that doesn't exist in the store
+    let body = serde_json::json!({
+        "plan_draft_id": "0000000000000000000000000000000000000000000000000000000000000000"
+    });
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/plan/approve")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── T44: plan_cancel_from_planning_transitions_to_normal ──
+#[tokio::test]
+async fn plan_cancel_from_planning_transitions_to_normal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    *state.vessel_mode.lock().unwrap() = VesselMode::Planning;
+
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/plan/cancel")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        *state.vessel_mode.lock().unwrap(),
+        VesselMode::Normal,
+        "mode should return to Normal after cancel from Planning"
+    );
+}
+
+// ── T44a: plan_cancel_from_executing_transitions_to_normal ──
+#[tokio::test]
+async fn plan_cancel_from_executing_transitions_to_normal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    *state.vessel_mode.lock().unwrap() = VesselMode::Executing;
+
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/plan/cancel")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        *state.vessel_mode.lock().unwrap(),
+        VesselMode::Normal,
+        "mode should return to Normal after cancel from Executing"
+    );
+}
+
+// ── T45: plan_status_returns_current_mode ──
+#[tokio::test]
+async fn plan_status_returns_current_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Default mode is Normal
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/plan/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["mode"], "normal");
+
+    // Switch to Planning
+    *state.vessel_mode.lock().unwrap() = VesselMode::Planning;
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/plan/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["mode"], "planning");
+}
+
+// ── T46: question_answer_writes_file ──
+#[tokio::test]
+async fn question_answer_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Create questions and answers directories
+    let questions_dir = dir.path().join("questions");
+    let answers_dir = dir.path().join("answers");
+    std::fs::create_dir_all(&questions_dir).unwrap();
+    std::fs::create_dir_all(&answers_dir).unwrap();
+
+    // Write a question file
+    let question_id = uuid::Uuid::new_v4().to_string();
+    let question_path = questions_dir.join(format!("{question_id}.json"));
+    std::fs::write(
+        &question_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "question": "What branch?",
+            "choices": ["main", "develop"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = build_router(state);
+    let body = serde_json::json!({"answer": "main", "source": "operator"});
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/v1/questions/{question_id}/answer"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify answer file was written
+    let answer_path = answers_dir.join(format!("{question_id}.json"));
+    assert!(answer_path.exists(), "answer file must be written");
+    let answer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&answer_path).unwrap()).unwrap();
+    assert_eq!(answer["answer"], "main");
+    assert_eq!(answer["answered_by"], "operator");
+}
+
+// ── T47: question_answer_nonexistent_404 ──
+#[tokio::test]
+async fn question_answer_nonexistent_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_app_state(dir.path());
+
+    // Create questions directory but don't put any question file
+    std::fs::create_dir_all(dir.path().join("questions")).unwrap();
+    std::fs::create_dir_all(dir.path().join("answers")).unwrap();
+
+    let question_id = uuid::Uuid::new_v4().to_string();
+    let app = build_router(state);
+    let body = serde_json::json!({"answer": "test", "source": "operator"});
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/v1/questions/{question_id}/answer"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

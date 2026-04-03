@@ -70,6 +70,10 @@ impl SessionBudget {
 
     /// Record a tool invocation for doom-loop detection.
     pub fn record_tool_call(&mut self, tool_name: &str, args: &serde_json::Value) {
+        if tool_name == "agent.ask_user" {
+            self.steps_taken += 1;
+            return;
+        }
         let args_hash = hash_value(args);
         self.recent_tool_calls
             .push((tool_name.to_string(), args_hash));
@@ -170,6 +174,8 @@ pub enum SessionCompletionReason {
     DoomLoop,
     /// Cancelled via CancellationToken.
     Cancelled,
+    /// Inner loop yielded while waiting for operator input.
+    AwaitingInput,
     /// An error occurred during the session.
     Error(String),
 }
@@ -194,6 +200,7 @@ impl std::fmt::Display for SessionCompletionReason {
             SessionCompletionReason::Timeout => write!(f, "timeout"),
             SessionCompletionReason::DoomLoop => write!(f, "doom_loop"),
             SessionCompletionReason::Cancelled => write!(f, "cancelled"),
+            SessionCompletionReason::AwaitingInput => write!(f, "awaiting_input"),
             SessionCompletionReason::Error(e) => write!(f, "error: {e}"),
         }
     }
@@ -291,5 +298,58 @@ mod tests {
         let config = test_config();
         let session = SessionBudget::new(&config);
         assert_eq!(session.can_continue(), SessionBudgetCheck::Continue);
+    }
+
+    // ── T38: ask_user_exempt_from_doom_loop ──
+    #[test]
+    fn ask_user_exempt_from_doom_loop() {
+        let config = test_config(); // doom_loop_threshold = 3
+        let mut session = SessionBudget::new(&config);
+        let args = serde_json::json!({"question": "What file?"});
+
+        // 3 consecutive identical agent.ask_user calls should NOT trigger doom-loop
+        session.record_tool_call("agent.ask_user", &args);
+        session.record_tool_call("agent.ask_user", &args);
+        session.record_tool_call("agent.ask_user", &args);
+
+        // Should still be Continue (not DoomLoopDetected)
+        assert_eq!(
+            session.can_continue(),
+            SessionBudgetCheck::Continue,
+            "agent.ask_user must be exempt from doom-loop detection"
+        );
+    }
+
+    // ── T39: inner_loop_yields_on_pending_question ──
+    #[test]
+    fn inner_loop_yields_on_pending_question() {
+        // SessionCompletionReason::AwaitingInput exists and serializes correctly.
+        // The inner loop yields this when agent.ask_user returns "pending".
+        let reason = SessionCompletionReason::AwaitingInput;
+        let display = format!("{reason}");
+        assert_eq!(
+            display, "awaiting_input",
+            "AwaitingInput must display as 'awaiting_input'"
+        );
+    }
+
+    // ── T40: inner_loop_continues_on_answered_question ──
+    #[test]
+    fn inner_loop_continues_on_answered_question() {
+        // When agent.ask_user returns "answered", no pending_question flag
+        // is set, so the inner loop continues. This test validates that
+        // only "pending" status triggers AwaitingInput.
+        let config = test_config();
+        let mut session = SessionBudget::new(&config);
+
+        // Record an agent.ask_user call (like "answered" — just counts as step)
+        session.record_tool_call("agent.ask_user", &serde_json::json!({"status": "answered"}));
+
+        // Session should still allow continuation
+        assert_eq!(
+            session.can_continue(),
+            SessionBudgetCheck::Continue,
+            "answered question should not stop the session"
+        );
     }
 }

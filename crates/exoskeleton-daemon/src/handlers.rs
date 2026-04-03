@@ -16,11 +16,13 @@ use exoskeleton_core::id::derive_external_principal_id;
 use exoskeleton_core::{
     Artifact, ArtifactId, ArtifactKind, ArtifactStore, CapabilityRequestPayload, CharterProposal,
     ConversationId, EnvelopeId, EnvelopeKind, EventLedger, EventType, ExoError, LedgerEntryId,
-    LlmBackend, MessageEnvelope, PrincipalId, ProposalStatus, TickId,
+    LiveEvent, LlmBackend, MessageEnvelope, PlanModeDetail, PrincipalId, ProposalStatus,
+    QuestionDetail, TickId, VesselMode,
 };
 use exoskeleton_host::config::LocalApiFormat;
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use worldinterface_core::descriptor::Descriptor;
 
 use crate::state::AppState;
@@ -53,6 +55,40 @@ pub struct InboxSubmitResponse {
 pub struct CapabilityInfo {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanApproveRequest {
+    pub plan_draft_id: ArtifactId,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlanApproveResponse {
+    pub artifact_id: ArtifactId,
+    pub mode: VesselMode,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlanStatusResponse {
+    pub mode: VesselMode,
+    pub plan_draft_id: Option<ArtifactId>,
+    pub plan_approved_id: Option<ArtifactId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestionAnswerRequest {
+    pub answer: String,
+    pub source: String,
+}
+
+fn fire_wake(state: &AppState) {
+    if let Ok(mut guard) = state.cognitive_engine.try_lock() {
+        if let Some(engine) = guard.as_mut() {
+            let _ = engine.fire_custom_event("caelum.wake".to_string());
+        }
+    }
 }
 
 // ── Handlers ──
@@ -215,13 +251,197 @@ pub async fn post_inbox(
     };
 
     match state.inbox.submit(&envelope) {
-        Ok(()) => (
-            StatusCode::CREATED,
-            Json(InboxSubmitResponse { envelope_id }),
-        )
-            .into_response(),
+        Ok(()) => {
+            fire_wake(&state);
+            (
+                StatusCode::CREATED,
+                Json(InboxSubmitResponse { envelope_id }),
+            )
+                .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// POST /api/v1/plan/approve
+pub async fn post_plan_approve(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlanApproveRequest>,
+) -> impl IntoResponse {
+    let mut mode = state.vessel_mode.lock().unwrap();
+    if *mode != VesselMode::Planning {
+        return (
+            StatusCode::BAD_REQUEST,
+            "plan approval requires planning mode".to_string(),
+        )
+            .into_response();
+    }
+
+    let artifact_store = state.inspector.storage().artifact_store();
+    match artifact_store.exists(&req.plan_draft_id) {
+        Ok(true) => {}
+        Ok(false) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    let artifact = match Artifact::from_json(
+        ArtifactKind::PlanApproved,
+        &serde_json::json!({
+            "plan_draft_id": req.plan_draft_id,
+            "approved_at": Utc::now(),
+            "notes": req.notes,
+        }),
+    ) {
+        Ok(artifact) => artifact,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let artifact_id = artifact.id.clone();
+    if let Err(e) = artifact_store.put(&artifact) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+
+    let from = *mode;
+    *mode = VesselMode::Executing;
+    drop(mode);
+
+    let _ = state.event_tx.send(LiveEvent {
+        event_type: EventType::PlanModeTransition,
+        summary: "Plan approved".into(),
+        plan_mode_detail: Some(PlanModeDetail {
+            from: format!("{from:?}").to_lowercase(),
+            to: "executing".into(),
+            plan_draft_id: Some(req.plan_draft_id.to_string()),
+        }),
+        ..LiveEvent::new(None)
+    });
+
+    fire_wake(&state);
+    (
+        StatusCode::OK,
+        Json(PlanApproveResponse {
+            artifact_id,
+            mode: VesselMode::Executing,
+        }),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/plan/cancel
+pub async fn post_plan_cancel(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut mode = state.vessel_mode.lock().unwrap();
+    if *mode == VesselMode::Normal {
+        return (
+            StatusCode::BAD_REQUEST,
+            "vessel is already in normal mode".to_string(),
+        )
+            .into_response();
+    }
+
+    let from = *mode;
+    *mode = VesselMode::Normal;
+    drop(mode);
+
+    let _ = state.event_tx.send(LiveEvent {
+        event_type: EventType::PlanModeTransition,
+        summary: "Plan cancelled".into(),
+        plan_mode_detail: Some(PlanModeDetail {
+            from: format!("{from:?}").to_lowercase(),
+            to: "normal".into(),
+            plan_draft_id: None,
+        }),
+        ..LiveEvent::new(None)
+    });
+
+    fire_wake(&state);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "mode": VesselMode::Normal })),
+    )
+        .into_response()
+}
+
+/// GET /api/v1/plan/status
+pub async fn get_plan_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let artifact_store = state.inspector.storage().artifact_store();
+    let plan_draft_id = artifact_store
+        .list_by_kind(ArtifactKind::PlanDraft, 1)
+        .ok()
+        .and_then(|items| items.into_iter().next().map(|item| item.id));
+    let plan_approved_id = artifact_store
+        .list_by_kind(ArtifactKind::PlanApproved, 1)
+        .ok()
+        .and_then(|items| items.into_iter().next().map(|item| item.id));
+
+    Json(PlanStatusResponse {
+        mode: *state.vessel_mode.lock().unwrap(),
+        plan_draft_id,
+        plan_approved_id,
+    })
+    .into_response()
+}
+
+/// POST /api/v1/questions/:question_id/answer
+pub async fn post_question_answer(
+    State(state): State<Arc<AppState>>,
+    Path(question_id): Path<String>,
+    Json(req): Json<QuestionAnswerRequest>,
+) -> impl IntoResponse {
+    if Uuid::parse_str(&question_id).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid question ID (expected UUID)".to_string(),
+        )
+            .into_response();
+    }
+
+    let question_path = state.questions_dir.join(format!("{question_id}.json"));
+    if !question_path.exists() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let answer_path = state.answers_dir.join(format!("{question_id}.json"));
+    let answer = serde_json::json!({
+        "answer": req.answer,
+        "answered_by": req.source,
+        "answered_at": Utc::now(),
+    });
+    if let Err(e) = std::fs::write(
+        &answer_path,
+        serde_json::to_vec_pretty(&answer).unwrap_or_default(),
+    ) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+
+    let question_text = std::fs::read_to_string(&question_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("question")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let choices = std::fs::read_to_string(&question_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("choices").cloned())
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok());
+
+    let _ = state.event_tx.send(LiveEvent {
+        event_type: EventType::QuestionAnswered,
+        summary: format!("Question answered: {question_id}"),
+        question_detail: Some(QuestionDetail {
+            question_id: question_id.clone(),
+            question: question_text,
+            choices,
+            status: "answered".into(),
+        }),
+        ..LiveEvent::new(None)
+    });
+
+    fire_wake(&state);
+    StatusCode::OK.into_response()
 }
 
 /// GET /healthz -> 200 OK always
@@ -1131,11 +1351,8 @@ fn emit_connector_event(state: &AppState, event_type: EventType, descriptor: &De
     let _ = state.inspector.storage().event_ledger().append(&event);
     let _ = state.event_tx.send(exoskeleton_core::LiveEvent {
         event_type,
-        tick_number: None,
         summary,
-        timestamp: event.timestamp,
-        snapshot: None,
-        inner_loop_detail: None,
+        ..exoskeleton_core::LiveEvent::new(None)
     });
 }
 
@@ -1153,11 +1370,8 @@ fn emit_connector_event_by_name(state: &AppState, event_type: EventType, name: &
     let _ = state.inspector.storage().event_ledger().append(&event);
     let _ = state.event_tx.send(exoskeleton_core::LiveEvent {
         event_type,
-        tick_number: None,
         summary,
-        timestamp: event.timestamp,
-        snapshot: None,
-        inner_loop_detail: None,
+        ..exoskeleton_core::LiveEvent::new(None)
     });
 }
 

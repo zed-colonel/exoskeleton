@@ -7,10 +7,13 @@ use std::sync::Arc;
 use axum::http::HeaderValue;
 use dashmap::{DashMap, DashSet};
 use exoskeleton_core::inbox::Inbox;
-use exoskeleton_core::{LedgerEntryId, LiveEvent, ProposalStatus, VesselId, WatchStore};
+use exoskeleton_core::{
+    LedgerEntryId, LiveEvent, ProposalStatus, VesselId, VesselMode, WatchStore,
+};
 use exoskeleton_host::inspect::VesselInspector;
 use exoskeleton_host::kernel::WiHostSlot;
 use exoskeleton_host::metrics::ExoMetrics;
+use exoskeleton_host::CognitiveEngineSlot;
 use exoskeleton_relationship::AlignConfig;
 use exoskeleton_threads::ThreadRegistry;
 
@@ -47,4 +50,12 @@ pub struct AppState {
     pub connectors_dir: Option<PathBuf>,
     /// AlignConfig for dynamic destructive tool classification.
     pub align_config: Option<Arc<AlignConfig>>,
+    /// Cognitive AQ engine slot for early-wake triggers.
+    pub cognitive_engine: CognitiveEngineSlot,
+    /// Shared vessel mode state.
+    pub vessel_mode: Arc<std::sync::Mutex<VesselMode>>,
+    /// Question storage directory.
+    pub questions_dir: PathBuf,
+    /// Answer storage directory.
+    pub answers_dir: PathBuf,
 }

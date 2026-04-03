@@ -10,9 +10,11 @@ use actionqueue_executor_local::CancellationToken;
 use chrono::Utc;
 use exoskeleton_core::tick::{ActionOutcome, ActionRecord};
 use exoskeleton_core::{
-    Artifact, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent, TickId,
+    Artifact, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent,
+    PolicyDetail, TickId,
 };
 
+use super::policy::{self, PolicyDecision};
 use super::types::{ActResult, ActionExecution, AlignmentResult};
 use super::KernelContext;
 
@@ -86,6 +88,7 @@ pub fn act(
                         action: action.clone(),
                         result: Err("rate_limited".into()),
                         record,
+                        pending_question: false,
                     });
                     continue;
                 }
@@ -149,21 +152,73 @@ pub fn act(
                         }
                         let _ = kernel.event_tx.send(LiveEvent {
                             event_type: EventType::ActionExecuted,
-                            tick_number: None,
                             summary: event.summary.clone(),
-                            timestamp: event.timestamp,
-                            snapshot: None,
-                            inner_loop_detail: None,
+                            ..LiveEvent::new(None)
                         });
 
                         executions.push(ActionExecution {
                             action: action.clone(),
                             result: Err("read_before_write_required".into()),
                             record,
+                            pending_question: false,
                         });
                         continue;
                     }
                 }
+            }
+        }
+
+        let descriptor_read_only = descriptor.as_ref().is_some_and(|d| d.is_read_only);
+        let current_mode = *kernel.vessel_mode.lock().unwrap();
+        let policy_decision = policy::evaluate_policy(
+            &action.tool_name,
+            descriptor_read_only,
+            current_mode,
+            &kernel.tool_policy,
+            &kernel.session_approvals,
+        );
+
+        match policy_decision {
+            PolicyDecision::Allowed => {}
+            PolicyDecision::Denied { reason } => {
+                let record = ActionRecord {
+                    action_type: action.tool_name.clone(),
+                    target: extract_action_path(&action.params)
+                        .unwrap_or_default()
+                        .to_string(),
+                    receipt_ref: None,
+                    outcome: ActionOutcome::PolicyDenied,
+                };
+                executions.push(ActionExecution {
+                    action: action.clone(),
+                    result: Err(reason.clone()),
+                    record,
+                    pending_question: false,
+                });
+                broadcast_policy_event(kernel, &action.tool_name, "deny", &reason, tick_id);
+                continue;
+            }
+            PolicyDecision::NeedsApproval => {
+                let reason = format!(
+                    "tool '{}' requires approval (policy: ask)",
+                    action.tool_name
+                );
+                let record = ActionRecord {
+                    action_type: action.tool_name.clone(),
+                    target: extract_action_path(&action.params)
+                        .unwrap_or_default()
+                        .to_string(),
+                    receipt_ref: None,
+                    outcome: ActionOutcome::PolicyDenied,
+                };
+                executions.push(ActionExecution {
+                    action: action.clone(),
+                    result: Err(reason.clone()),
+                    record,
+                    pending_question: false,
+                });
+                broadcast_policy_event(kernel, &action.tool_name, "ask", &reason, tick_id);
+                continue;
             }
         }
 
@@ -257,11 +312,8 @@ pub fn act(
         // D2: Broadcast ActionExecuted LiveEvent
         let _ = kernel.event_tx.send(LiveEvent {
             event_type: EventType::ActionExecuted,
-            tick_number: None,
             summary: event.summary.clone(),
-            timestamp: event.timestamp,
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(None)
         });
 
         // Record tool invocation in budget gate (Sprint 9)
@@ -277,6 +329,7 @@ pub fn act(
                 ActionOutcome::Success => "success",
                 ActionOutcome::Failure => "failure",
                 ActionOutcome::RateLimited => "rate_limited",
+                ActionOutcome::PolicyDenied => "policy_denied",
                 ActionOutcome::Skipped => "skipped",
                 ActionOutcome::Timeout => "timeout",
             };
@@ -287,10 +340,21 @@ pub fn act(
 
         let track_read_path = result_value.is_ok();
 
+        let pending_question = action.tool_name == "agent.ask_user"
+            && matches!(
+                result_value
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value.get("status"))
+                    .and_then(|value| value.as_str()),
+                Some("pending")
+            );
+
         executions.push(ActionExecution {
             action: action.clone(),
             result: result_value,
             record,
+            pending_question,
         });
 
         if track_read_path {
@@ -336,6 +400,7 @@ pub fn act(
                     action: remaining.clone(),
                     result: Err("cancelled".into()),
                     record,
+                    pending_question: false,
                 });
             }
             break;
@@ -343,6 +408,39 @@ pub fn act(
     }
 
     Ok(ActResult { executions })
+}
+
+fn broadcast_policy_event(
+    kernel: &KernelContext,
+    tool_name: &str,
+    rule: &str,
+    reason: &str,
+    tick_id: TickId,
+) {
+    let tick_number = kernel
+        .tick_store
+        .latest()
+        .ok()
+        .flatten()
+        .map(|t| t.tick_number + 1);
+    let _ = kernel.event_tx.send(LiveEvent {
+        event_type: EventType::PolicyApprovalRequired,
+        summary: reason.to_string(),
+        policy_detail: Some(PolicyDetail {
+            tool_name: tool_name.to_string(),
+            rule: rule.to_string(),
+        }),
+        ..LiveEvent::new(tick_number)
+    });
+
+    let _ = kernel.event_ledger.append(&EventEntry {
+        id: LedgerEntryId::new(),
+        tick_id: Some(tick_id),
+        event_type: EventType::PolicyApprovalRequired,
+        payload_ref: None,
+        summary: reason.to_string(),
+        timestamp: Utc::now(),
+    });
 }
 
 fn extract_action_path(params: &serde_json::Value) -> Option<&str> {
@@ -412,6 +510,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         }
     }
 
@@ -468,6 +570,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         }
     }
 
@@ -1032,6 +1138,10 @@ mod tests {
             max_watches: kernel.max_watches,
             read_paths_this_tick: kernel.read_paths_this_tick.clone(),
             inner_loop_config: kernel.inner_loop_config.clone(),
+            tool_policy: kernel.tool_policy.clone(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: kernel.vessel_mode.clone(),
+            wake_signal: kernel.wake_signal.clone(),
         }
     }
 }

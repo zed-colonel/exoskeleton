@@ -136,6 +136,8 @@ pub enum ActionOutcome {
     Skipped,
     /// Action was rate-limited by the tool budget gate.
     RateLimited,
+    /// Action was blocked by the tool policy gate.
+    PolicyDenied,
 }
 
 /// Record of one LLM invocation (dispatched via the Cognitive AQ).
@@ -316,12 +318,22 @@ mod tests {
             ActionOutcome::Failure,
             ActionOutcome::Timeout,
             ActionOutcome::Skipped,
+            ActionOutcome::RateLimited,
+            ActionOutcome::PolicyDenied,
         ];
         for outcome in &variants {
             let json = serde_json::to_string(outcome).unwrap();
             let parsed: ActionOutcome = serde_json::from_str(&json).unwrap();
             assert_eq!(*outcome, parsed);
         }
+    }
+
+    #[test]
+    fn action_outcome_policy_denied_serde() {
+        let json = serde_json::to_string(&ActionOutcome::PolicyDenied).unwrap();
+        assert_eq!(json, "\"policy_denied\"");
+        let parsed: ActionOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ActionOutcome::PolicyDenied);
     }
 
     #[test]

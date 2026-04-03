@@ -167,6 +167,7 @@ pub fn decide(
         reply: None,
         plan_update: None,
         working_memory_ops: None,
+        vessel_mode_request: None,
         actions: vec![],
         memory_notes: vec![],
         watch_proposals: vec![],
@@ -211,6 +212,7 @@ fn build_decision_result(
         response_artifact_id,
         watch_proposals: protocol.watch_proposals,
         inner_loop_requested: protocol.inner_loop_requested,
+        vessel_mode_request: protocol.vessel_mode_request,
     })
 }
 
@@ -465,6 +467,7 @@ fn parse_decide_turn(response_text: &str) -> DecideTurn {
         reply: None,
         plan_update: None,
         working_memory_ops: None,
+        vessel_mode_request: None,
         actions: vec![],
         memory_notes: vec![],
         watch_proposals: vec![],
@@ -527,6 +530,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         }
     }
 
@@ -827,6 +834,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         }
     }
 

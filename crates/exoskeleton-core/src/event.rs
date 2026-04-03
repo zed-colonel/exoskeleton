@@ -98,6 +98,16 @@ pub enum EventType {
     InnerLoopStep,
     /// Inner loop completed. Summary includes total steps, tokens, completion reason.
     InnerLoopCompleted,
+    /// Agent asked the operator a structured question.
+    QuestionAsked,
+    /// Operator answered a pending structured question.
+    QuestionAnswered,
+    /// Tool use requires policy approval or was blocked by policy.
+    PolicyApprovalRequired,
+    /// Operator granted policy approval for a tool in this session.
+    PolicyApprovalGranted,
+    /// Vessel mode transitioned between normal/planning/executing.
+    PlanModeTransition,
     /// An error occurred.
     Error,
 }
@@ -125,6 +135,36 @@ pub struct LiveEvent {
     /// Inner-loop step detail. Present only for InnerLoopStep and InnerLoopCompleted events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inner_loop_detail: Option<InnerLoopStepDetail>,
+    /// Question-specific detail for interactive coding sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_detail: Option<QuestionDetail>,
+    /// Tool policy detail for policy approval/deny events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_detail: Option<PolicyDetail>,
+    /// Vessel mode transition detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_mode_detail: Option<PlanModeDetail>,
+    /// Diff summary placeholder. Populated in E9-S2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<DiffSummary>,
+}
+
+impl LiveEvent {
+    /// Create a LiveEvent with all optional fields set to None.
+    pub fn new(tick_number: Option<u64>) -> Self {
+        Self {
+            event_type: EventType::Error,
+            tick_number,
+            summary: String::new(),
+            timestamp: Utc::now(),
+            snapshot: None,
+            inner_loop_detail: None,
+            question_detail: None,
+            policy_detail: None,
+            plan_mode_detail: None,
+            diff_summary: None,
+        }
+    }
 }
 
 /// Inner-loop step detail, included in LiveEvent for InnerLoopStep events (E8-S1).
@@ -147,6 +187,41 @@ pub struct InnerLoopStepDetail {
     /// Completion reason (only set for InnerLoopCompleted events).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_reason: Option<String>,
+}
+
+/// Detail for interactive questions emitted by `agent.ask_user`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct QuestionDetail {
+    pub question_id: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    pub status: String,
+}
+
+/// Detail for policy approval events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct PolicyDetail {
+    pub tool_name: String,
+    pub rule: String,
+}
+
+/// Detail for vessel mode transitions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct PlanModeDetail {
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_draft_id: Option<String>,
+}
+
+/// Placeholder diff summary for future inline diff event rendering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct DiffSummary {
+    pub files_modified: u32,
+    pub lines_added: i64,
+    pub lines_removed: i64,
+    pub net_delta: i64,
 }
 
 /// Payload stored as a JSON artifact for CapabilityRequest events.
@@ -222,6 +297,11 @@ mod tests {
             EventType::InnerLoopStarted,
             EventType::InnerLoopStep,
             EventType::InnerLoopCompleted,
+            EventType::QuestionAsked,
+            EventType::QuestionAnswered,
+            EventType::PolicyApprovalRequired,
+            EventType::PolicyApprovalGranted,
+            EventType::PlanModeTransition,
             EventType::Error,
         ];
         for event_type in &variants {
@@ -293,11 +373,8 @@ mod tests {
     fn live_event_serde_roundtrip() {
         let event = LiveEvent {
             event_type: EventType::TickStarted,
-            tick_number: Some(42),
             summary: "Tick 42 started".into(),
-            timestamp: Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(42))
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
@@ -315,6 +392,7 @@ mod tests {
             mission: "test".into(),
             plan: None,
             status: VesselStatus::Idle,
+            vessel_mode: crate::VesselMode::Normal,
             working_memory: crate::working_memory::WorkingMemory::new(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
@@ -325,11 +403,9 @@ mod tests {
         };
         let event = LiveEvent {
             event_type: EventType::TickCompleted,
-            tick_number: Some(42),
             summary: "Tick 42 completed".into(),
-            timestamp: Utc::now(),
             snapshot: Some(snapshot),
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(42))
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
@@ -341,11 +417,8 @@ mod tests {
     fn live_event_without_snapshot_omits_field() {
         let event = LiveEvent {
             event_type: EventType::ActionExecuted,
-            tick_number: Some(5),
             summary: "Action executed".into(),
-            timestamp: Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(5))
         };
         let value: serde_json::Value = serde_json::to_value(&event).unwrap();
         let obj = value.as_object().unwrap();
@@ -357,11 +430,8 @@ mod tests {
     fn live_event_without_tick_number_omits_field() {
         let event = LiveEvent {
             event_type: EventType::VesselStarted,
-            tick_number: None,
             summary: "Vessel started".into(),
-            timestamp: Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(None)
         };
         let value: serde_json::Value = serde_json::to_value(&event).unwrap();
         let obj = value.as_object().unwrap();
@@ -493,11 +563,9 @@ mod tests {
         };
         let event = LiveEvent {
             event_type: EventType::InnerLoopStep,
-            tick_number: Some(7),
             summary: "Step 2/10: shell.exec (success)".into(),
-            timestamp: Utc::now(),
-            snapshot: None,
             inner_loop_detail: Some(detail),
+            ..LiveEvent::new(Some(7))
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
@@ -511,14 +579,23 @@ mod tests {
         // Verify inner_loop_detail omitted when None
         let event_without = LiveEvent {
             event_type: EventType::TickStarted,
-            tick_number: Some(1),
             summary: "Tick 1 started".into(),
-            timestamp: Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(1))
         };
         let value: serde_json::Value = serde_json::to_value(&event_without).unwrap();
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("inner_loop_detail"));
+    }
+
+    #[test]
+    fn live_event_new_defaults_optional_fields() {
+        let event = LiveEvent::new(Some(9));
+        assert_eq!(event.tick_number, Some(9));
+        assert!(event.snapshot.is_none());
+        assert!(event.inner_loop_detail.is_none());
+        assert!(event.question_detail.is_none());
+        assert!(event.policy_detail.is_none());
+        assert!(event.plan_mode_detail.is_none());
+        assert!(event.diff_summary.is_none());
     }
 }

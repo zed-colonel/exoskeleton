@@ -9,7 +9,7 @@ use exoskeleton_core::tick::{ActionRecord, LlmCallRecord, ThreadContribution};
 use exoskeleton_core::working_memory::WorkingMemoryOp;
 use exoskeleton_core::{
     ArtifactId, EventEntry, MessageEnvelope, PlanTaskId, RelationshipRecord, RelationshipSnapshot,
-    ThreadId, TickId, VesselId,
+    ThreadId, TickId, VesselId, VesselMode,
 };
 use exoskeleton_memory::CompiledContext;
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,8 @@ pub struct DecisionProtocol {
     #[serde(alias = "working_context_update")]
     #[serde(deserialize_with = "deserialize_working_memory_ops_compat")]
     pub working_memory_ops: Option<Vec<WorkingMemoryOp>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vessel_mode_request: Option<VesselMode>,
     #[serde(default)]
     pub actions: Vec<PlannedAction>,
     #[serde(default)]
@@ -116,6 +118,8 @@ pub struct DecisionResult {
     /// When true and inner_loop.enabled in config, the tick enters the
     /// bounded inner loop instead of the single Decide→Act pass.
     pub inner_loop_requested: bool,
+    /// Optional vessel mode transition request from Decide.
+    pub vessel_mode_request: Option<VesselMode>,
 }
 
 /// Proposed changes to the StateSnapshot from the Decide step.
@@ -142,6 +146,7 @@ pub struct ActionExecution {
     pub action: PlannedAction,
     pub result: Result<serde_json::Value, String>,
     pub record: ActionRecord,
+    pub pending_question: bool,
 }
 
 /// Output of the Act step.
@@ -295,6 +300,7 @@ mod tests {
             reply: None,
             plan_update: None,
             working_memory_ops: None,
+            vessel_mode_request: None,
             actions: vec![],
             memory_notes: vec![],
             watch_proposals: vec![],
@@ -316,6 +322,7 @@ mod tests {
             reply: None,
             plan_update: None,
             working_memory_ops: None,
+            vessel_mode_request: None,
             actions: vec![],
             memory_notes: vec![],
             watch_proposals: vec![],

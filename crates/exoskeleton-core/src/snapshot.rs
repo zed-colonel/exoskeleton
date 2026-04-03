@@ -7,7 +7,7 @@ use crate::id::{ArtifactId, ThreadId, VesselId};
 use crate::plan::Plan;
 use crate::thread::ThreadStatus;
 use crate::working_memory::WorkingMemory;
-use crate::ExoError;
+use crate::{ExoError, VesselMode};
 
 /// The single authoritative view of a vessel's cognitive state (I7).
 ///
@@ -30,6 +30,9 @@ pub struct StateSnapshot {
     pub plan: Option<Plan>,
     /// Current operational status of the vessel.
     pub status: VesselStatus,
+    /// Current vessel mode governing plan/policy behavior.
+    #[serde(default)]
+    pub vessel_mode: VesselMode,
     /// Keyed working memory scratchpad — entries persist across ticks with TTL.
     #[serde(alias = "working_context")]
     #[serde(deserialize_with = "crate::working_memory::deserialize_working_memory_compat")]
@@ -65,6 +68,7 @@ impl StateSnapshot {
             mission,
             plan: None,
             status: VesselStatus::Idle,
+            vessel_mode: VesselMode::Normal,
             working_memory: WorkingMemory::new(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
@@ -217,6 +221,7 @@ mod tests {
                 "Execute plan A".into(),
             )),
             status: VesselStatus::Thinking,
+            vessel_mode: VesselMode::Planning,
             working_memory: crate::working_memory::WorkingMemory::from_legacy_string(
                 "Evaluating options".into(),
             ),
@@ -348,6 +353,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
             }),
             status: VesselStatus::Idle,
+            vessel_mode: VesselMode::Normal,
             working_memory: crate::working_memory::WorkingMemory {
                 entries: vec![crate::working_memory::WorkingMemoryEntry {
                     key: "k".into(),
@@ -367,6 +373,22 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let parsed: StateSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, parsed);
+    }
+
+    #[test]
+    fn snapshot_vessel_mode_defaults_to_normal() {
+        let json = r#"{
+            "vessel_id": "00000000-0000-0000-0000-000000000001",
+            "tick_number": 1,
+            "mission": "test",
+            "status": "idle",
+            "working_memory": {"entries": []},
+            "thread_summaries": [],
+            "budget_status": {"local_tokens_remaining":0,"frontier_tokens_remaining":0,"frontier_cost_cents_remaining":0,"time_secs_remaining":0,"thrash_level":"none","tool_invocations_remaining":0},
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snap: StateSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.vessel_mode, VesselMode::Normal);
     }
 
     // ── E1-T32: Deserialize legacy "working_context": "text" into WorkingMemory ──

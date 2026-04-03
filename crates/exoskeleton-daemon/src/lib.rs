@@ -72,6 +72,10 @@ impl ExoDaemon {
         let watch_store = self.vessel.watch_store();
         let thread_registry = self.vessel.thread_registry().clone();
         let wi_host_slot = self.vessel.wi_host_slot().clone();
+        let cognitive_engine = self.vessel.cognitive_engine_slot().clone();
+        let vessel_mode = self.vessel.vessel_mode().clone();
+        let questions_dir = self.vessel.config().data_dir.join("questions");
+        let answers_dir = self.vessel.config().data_dir.join("answers");
 
         let cors_origins: Vec<HeaderValue> = self
             .cors_allowed_origins
@@ -99,6 +103,10 @@ impl ExoDaemon {
             wi_host_slot,
             connectors_dir: self.vessel.config().connectors_dir.clone(),
             align_config: None,
+            cognitive_engine,
+            vessel_mode,
+            questions_dir,
+            answers_dir,
         });
 
         let router = routes::build_router(app_state);

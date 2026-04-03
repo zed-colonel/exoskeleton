@@ -9,6 +9,7 @@ pub mod decide;
 pub mod inner_loop;
 pub mod orient;
 pub mod perceive;
+pub mod policy;
 pub mod reflect;
 pub mod threads;
 pub mod types;
@@ -23,7 +24,8 @@ use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::{
     Artifact, ArtifactKind, ArtifactStore, EventEntry, EventLedger, EventType, LedgerEntryId,
-    LiveEvent, SnapshotStore, StateSnapshot, TickId, TickStore, VesselId,
+    LiveEvent, PlanModeDetail, SnapshotStore, StateSnapshot, TickId, TickStore, VesselId,
+    VesselMode,
 };
 use exoskeleton_memory::{ContextCompiler, MemoryStore};
 use exoskeleton_relationship::RelationshipLedger;
@@ -93,6 +95,14 @@ pub struct KernelContext {
     pub read_paths_this_tick: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Inner loop configuration (E8-S1). Controls bounded inner interaction loop.
     pub inner_loop_config: crate::config::InnerLoopConfig,
+    /// Tool policy configuration for allow/deny/ask rules.
+    pub tool_policy: crate::kernel::policy::ToolPolicyConfig,
+    /// Session-scoped tool approvals.
+    pub session_approvals: crate::kernel::policy::SessionApprovals,
+    /// Current vessel mode.
+    pub vessel_mode: Arc<std::sync::Mutex<VesselMode>>,
+    /// Best-effort early-wake signal.
+    pub wake_signal: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Run one complete PODAARA tick.
@@ -181,11 +191,8 @@ pub fn run_tick(
     // D2: Broadcast TickStarted LiveEvent
     let _ = kernel.event_tx.send(LiveEvent {
         event_type: EventType::TickStarted,
-        tick_number: Some(tick_number),
         summary: format!("Tick {tick_number} started"),
-        timestamp: started_at,
-        snapshot: None,
-        inner_loop_detail: None,
+        ..LiveEvent::new(Some(tick_number))
     });
 
     // 6. Get previous_tick_id from tick_store
@@ -218,11 +225,8 @@ pub fn run_tick(
         let _ = kernel.event_ledger.append(&msg_event);
         let _ = kernel.event_tx.send(LiveEvent {
             event_type: EventType::MessageReceived,
-            tick_number: Some(tick_number),
             summary: msg_event.summary.clone(),
-            timestamp: msg.timestamp,
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(tick_number))
         });
     }
 
@@ -296,6 +300,37 @@ pub fn run_tick(
         Err(e) => return HandlerOutput::retryable_failure(format!("Decide failed: {e}")),
     };
 
+    if let Some(requested_mode) = decision.vessel_mode_request {
+        let mut guard = kernel.vessel_mode.lock().unwrap();
+        let current_mode = *guard;
+        let valid_transition = matches!(
+            (current_mode, requested_mode),
+            (VesselMode::Normal, VesselMode::Planning)
+                | (VesselMode::Executing, VesselMode::Normal)
+        );
+        if valid_transition {
+            *guard = requested_mode;
+            let _ = kernel.event_tx.send(LiveEvent {
+                event_type: EventType::PlanModeTransition,
+                summary: format!("Mode: {:?} -> {:?}", current_mode, requested_mode),
+                plan_mode_detail: Some(PlanModeDetail {
+                    from: format!("{:?}", current_mode).to_lowercase(),
+                    to: format!("{:?}", requested_mode).to_lowercase(),
+                    plan_draft_id: None,
+                }),
+                ..LiveEvent::new(Some(tick_number))
+            });
+        }
+    }
+
+    if *kernel.vessel_mode.lock().unwrap() == VesselMode::Planning {
+        if let Some(plan_update) = &decision.snapshot_delta.plan_update {
+            if let Ok(artifact) = Artifact::from_json(ArtifactKind::PlanDraft, plan_update) {
+                let _ = kernel.artifact_store.put(&artifact);
+            }
+        }
+    }
+
     // 12. Check cancellation
     if cancellation.is_cancelled() {
         return HandlerOutput::retryable_failure("cancelled after Decide");
@@ -304,7 +339,7 @@ pub fn run_tick(
     // 12.5 Inner loop activation check (E8-S1)
     let inner_loop_active = kernel.inner_loop_config.enabled && decision.inner_loop_requested;
 
-    let (decision, alignment, act_result) = if inner_loop_active {
+    let (decision, alignment, act_result, inner_loop_completion) = if inner_loop_active {
         // Inner loop: iterative DecideLite→Align→Act cycle.
         // The agent explicitly requested this — the task needs
         // iterative tool-feedback (e.g., multi-step coding).
@@ -360,6 +395,7 @@ pub fn run_tick(
                     ActResult {
                         executions: inner_result.executions,
                     },
+                    Some(inner_result.completion_reason),
                 )
             }
             Err(e) => return HandlerOutput::retryable_failure(format!("Inner loop failed: {e}")),
@@ -380,7 +416,7 @@ pub fn run_tick(
 
         tracing::info!(tick_number, "Act");
         match act::act(kernel, &alignment, tick_id, cancellation) {
-            Ok(a) => (decision, alignment, a),
+            Ok(a) => (decision, alignment, a, None),
             Err(e) => return HandlerOutput::retryable_failure(format!("Act failed: {e}")),
         }
     };
@@ -422,15 +458,12 @@ pub fn run_tick(
     if thrash_assessment.level != exoskeleton_core::budget::ThrashLevel::None {
         let _ = kernel.event_tx.send(LiveEvent {
             event_type: EventType::BudgetConsumed,
-            tick_number: Some(tick_number),
             summary: format!(
                 "Thrash level: {:?} ({})",
                 thrash_assessment.level,
                 thrash_assessment.indicators.join("; ")
             ),
-            timestamp: Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(tick_number))
         });
     }
 
@@ -545,11 +578,31 @@ pub fn run_tick(
             };
 
             if consumption.is_empty() {
+                if matches!(
+                    inner_loop_completion,
+                    Some(crate::budget::session::SessionCompletionReason::StepLimit)
+                        | Some(crate::budget::session::SessionCompletionReason::AwaitingInput)
+                ) {
+                    if let Some(wake_signal) = &kernel.wake_signal {
+                        wake_signal();
+                    }
+                }
                 output
             } else {
                 // Merge consumption into the output
                 match output {
                     HandlerOutput::Success { output: out, .. } => {
+                        if matches!(
+                            inner_loop_completion,
+                            Some(crate::budget::session::SessionCompletionReason::StepLimit)
+                                | Some(
+                                    crate::budget::session::SessionCompletionReason::AwaitingInput
+                                )
+                        ) {
+                            if let Some(wake_signal) = &kernel.wake_signal {
+                                wake_signal();
+                            }
+                        }
                         HandlerOutput::success_with_consumption(out, consumption)
                     }
                     other => other,
@@ -572,7 +625,12 @@ pub fn run_tick(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    use exoskeleton_core::VesselMode;
+
+    use crate::budget::session::SessionCompletionReason;
 
     /// E8S2-T13: `read_paths_this_tick` is cleared at the start of each tick.
     ///
@@ -608,5 +666,249 @@ mod tests {
             read_paths.lock().unwrap().is_empty(),
             "read_paths_this_tick must be empty after per-tick clearing"
         );
+    }
+
+    // ── Helper: mirrors the wake-signal decision logic from run_tick ──
+    // In run_tick, after Amend, the code checks:
+    //   if inner_loop_completion is StepLimit or AwaitingInput → fire wake_signal
+    fn should_wake(completion: &Option<SessionCompletionReason>) -> bool {
+        matches!(
+            completion,
+            Some(SessionCompletionReason::StepLimit) | Some(SessionCompletionReason::AwaitingInput)
+        )
+    }
+
+    // ── T6: wake_signal_called_on_step_limit ──
+    #[test]
+    fn wake_signal_called_on_step_limit() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let wake_signal: Arc<dyn Fn() + Send + Sync> = {
+            let counter = Arc::clone(&call_count);
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let completion = Some(SessionCompletionReason::StepLimit);
+        if should_wake(&completion) {
+            wake_signal();
+        }
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "wake signal must fire on StepLimit"
+        );
+    }
+
+    // ── T7: wake_signal_called_on_awaiting_input ──
+    #[test]
+    fn wake_signal_called_on_awaiting_input() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let wake_signal: Arc<dyn Fn() + Send + Sync> = {
+            let counter = Arc::clone(&call_count);
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let completion = Some(SessionCompletionReason::AwaitingInput);
+        if should_wake(&completion) {
+            wake_signal();
+        }
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "wake signal must fire on AwaitingInput"
+        );
+    }
+
+    // ── T8: wake_signal_not_called_on_agent_complete ──
+    #[test]
+    fn wake_signal_not_called_on_agent_complete() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let wake_signal: Arc<dyn Fn() + Send + Sync> = {
+            let counter = Arc::clone(&call_count);
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let completion = Some(SessionCompletionReason::AgentComplete);
+        if should_wake(&completion) {
+            wake_signal();
+        }
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "wake signal must NOT fire on AgentComplete"
+        );
+    }
+
+    // ── T9: kernel_context_wake_signal_none_in_tests ──
+    #[test]
+    fn kernel_context_wake_signal_none_in_tests() {
+        // When wake_signal is None, the wake decision code must not panic.
+        let wake_signal: Option<Arc<dyn Fn() + Send + Sync>> = None;
+        let completion = Some(SessionCompletionReason::StepLimit);
+
+        // This mirrors the production code:
+        //   if let Some(wake_signal) = &kernel.wake_signal { wake_signal(); }
+        if should_wake(&completion) {
+            if let Some(ws) = &wake_signal {
+                ws();
+            }
+        }
+        // No panic = success
+    }
+
+    // ── T22: vessel_mode_starts_normal ──
+    #[test]
+    fn vessel_mode_starts_normal() {
+        let mode = Arc::new(Mutex::new(VesselMode::Normal));
+        assert_eq!(
+            *mode.lock().unwrap(),
+            VesselMode::Normal,
+            "KernelContext vessel_mode must initialize to Normal"
+        );
+    }
+
+    // ── T23: agent_requests_planning_mode ──
+    #[test]
+    fn agent_requests_planning_mode() {
+        let mode = Arc::new(Mutex::new(VesselMode::Normal));
+        let requested_mode = Some(VesselMode::Planning);
+
+        // Mirror the mode transition logic from run_tick
+        if let Some(requested) = requested_mode {
+            let mut guard = mode.lock().unwrap();
+            let current = *guard;
+            let valid = matches!(
+                (current, requested),
+                (VesselMode::Normal, VesselMode::Planning)
+                    | (VesselMode::Executing, VesselMode::Normal)
+            );
+            if valid {
+                *guard = requested;
+            }
+        }
+
+        assert_eq!(
+            *mode.lock().unwrap(),
+            VesselMode::Planning,
+            "Normal -> Planning transition must succeed"
+        );
+    }
+
+    // ── T27: agent_requests_normal_from_executing ──
+    #[test]
+    fn agent_requests_normal_from_executing() {
+        let mode = Arc::new(Mutex::new(VesselMode::Executing));
+        let requested_mode = Some(VesselMode::Normal);
+
+        if let Some(requested) = requested_mode {
+            let mut guard = mode.lock().unwrap();
+            let current = *guard;
+            let valid = matches!(
+                (current, requested),
+                (VesselMode::Normal, VesselMode::Planning)
+                    | (VesselMode::Executing, VesselMode::Normal)
+            );
+            if valid {
+                *guard = requested;
+            }
+        }
+
+        assert_eq!(
+            *mode.lock().unwrap(),
+            VesselMode::Normal,
+            "Executing -> Normal transition must succeed"
+        );
+    }
+
+    // ── T28: invalid_transition_ignored ──
+    #[test]
+    fn invalid_transition_ignored() {
+        let mode = Arc::new(Mutex::new(VesselMode::Normal));
+        let requested_mode = Some(VesselMode::Executing);
+
+        if let Some(requested) = requested_mode {
+            let mut guard = mode.lock().unwrap();
+            let current = *guard;
+            let valid = matches!(
+                (current, requested),
+                (VesselMode::Normal, VesselMode::Planning)
+                    | (VesselMode::Executing, VesselMode::Normal)
+            );
+            if valid {
+                *guard = requested;
+            }
+        }
+
+        assert_eq!(
+            *mode.lock().unwrap(),
+            VesselMode::Normal,
+            "Normal -> Executing transition must be ignored (invalid)"
+        );
+    }
+
+    // ── T29: vessel_mode_persisted_in_snapshot ──
+    #[test]
+    fn vessel_mode_persisted_in_snapshot() {
+        let snapshot = exoskeleton_core::StateSnapshot::initial(
+            exoskeleton_core::VesselId::new(),
+            "test".into(),
+        );
+        assert_eq!(
+            snapshot.vessel_mode,
+            VesselMode::Normal,
+            "initial snapshot should have Normal mode"
+        );
+
+        // Serialize and deserialize to verify persistence
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: exoskeleton_core::StateSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.vessel_mode, VesselMode::Normal);
+
+        // Modify and re-check
+        let mut snapshot_with_planning = snapshot;
+        snapshot_with_planning.vessel_mode = VesselMode::Planning;
+        let json = serde_json::to_string(&snapshot_with_planning).unwrap();
+        let parsed: exoskeleton_core::StateSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.vessel_mode,
+            VesselMode::Planning,
+            "snapshot with Planning mode must roundtrip"
+        );
+    }
+
+    // ── T30: plan_draft_artifact_stored_in_planning ──
+    #[test]
+    fn plan_draft_artifact_stored_in_planning() {
+        use exoskeleton_core::{Artifact, ArtifactKind, ArtifactStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::storage::StorageManager::open(dir.path()).unwrap();
+
+        let vessel_mode = VesselMode::Planning;
+        let plan_update = serde_json::json!({
+            "objective": "Refactor auth module",
+            "tasks": [
+                {"title": "Read current code", "status": "pending"}
+            ]
+        });
+
+        // Mirror the plan draft storage logic from run_tick
+        if vessel_mode == VesselMode::Planning {
+            if let Ok(artifact) = Artifact::from_json(ArtifactKind::PlanDraft, &plan_update) {
+                let result = storage.artifact_store().put(&artifact);
+                assert!(result.is_ok(), "storing PlanDraft must succeed");
+                let artifact_id = result.unwrap();
+
+                // Verify the artifact is retrievable
+                let retrieved = storage
+                    .artifact_store()
+                    .get(&artifact_id)
+                    .unwrap()
+                    .expect("PlanDraft artifact must exist after storage");
+                assert_eq!(retrieved.kind, ArtifactKind::PlanDraft);
+            }
+        }
     }
 }

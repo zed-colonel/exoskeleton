@@ -174,6 +174,7 @@ mod tests {
             mission: "test mission".into(),
             plan: None,
             status: VesselStatus::Idle,
+            vessel_mode: exoskeleton_core::VesselMode::Normal,
             working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
@@ -294,6 +295,7 @@ mod tests {
                 "Execute plan B".into(),
             )),
             status: VesselStatus::Thinking,
+            vessel_mode: exoskeleton_core::VesselMode::Normal,
             working_memory: exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
                 "Evaluating threats".into(),
             ),

@@ -19,13 +19,14 @@ use actionqueue_core::task::metadata::TaskMetadata;
 use actionqueue_core::task::run_policy::RunPolicy;
 use actionqueue_core::task::task_spec::{TaskPayload, TaskSpec};
 use exoskeleton_core::inbox::Inbox;
-use exoskeleton_core::{ArtifactStore, ExoError, LiveEvent, VesselId};
+use exoskeleton_core::{ArtifactStore, ExoError, LiveEvent, SnapshotStore, VesselId, VesselMode};
 use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
 use exoskeleton_threads::ThreadRegistry;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use worldinterface_connector::connectors::default_registry;
-use worldinterface_connector::connectors::PeerResolveConnector;
+use worldinterface_connector::connectors::{
+    default_registry, AgentAskUserConnector, PeerResolveConnector,
+};
 use worldinterface_connector::registry::ConnectorRegistry;
 use worldinterface_core::descriptor::Descriptor;
 use worldinterface_host::config::HostConfig;
@@ -43,7 +44,7 @@ use crate::llm::client::LlmClient;
 use crate::storage::StorageManager;
 
 /// Type alias for the engine slot (shared between tick loop and Vessel API).
-pub(crate) type CognitiveEngineSlot = Arc<Mutex<Option<CognitiveEngine>>>;
+pub type CognitiveEngineSlot = Arc<Mutex<Option<CognitiveEngine>>>;
 
 /// The top-level Exoskeleton runtime.
 ///
@@ -79,6 +80,8 @@ pub struct Vessel {
     tool_budget_gate: Option<Arc<std::sync::Mutex<crate::budget::ToolBudgetGate>>>,
     /// Broadcast sender for real-time events (D2).
     event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
+    /// Shared vessel mode state for daemon interactions.
+    vessel_mode: Arc<std::sync::Mutex<VesselMode>>,
 }
 
 impl Vessel {
@@ -122,6 +125,11 @@ impl Vessel {
 
         // 3. Open storage layer (Sprint 2)
         let storage = StorageManager::open(&config.data_dir)?;
+        let initial_vessel_mode = storage
+            .snapshot_store()
+            .latest()?
+            .map(|snapshot| snapshot.vessel_mode)
+            .unwrap_or(VesselMode::Normal);
 
         // 4. Create ContextCompiler
         let counter = Arc::new(ApproximateTokenCounter);
@@ -164,6 +172,10 @@ impl Vessel {
 
         // 7.6 Create broadcast channel for real-time events (D2)
         let (event_tx, _) = tokio::sync::broadcast::channel::<LiveEvent>(256);
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let wake_signal: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = wake_tx.send(());
+        });
 
         // 7.7 Create PromptRegistry (Epoch 0)
         let mut prompt_registry = exoskeleton_core::prompt::PromptRegistry::with_defaults();
@@ -199,6 +211,10 @@ impl Vessel {
             max_watches: config.max_watches,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: config.inner_loop.clone(),
+            tool_policy: config.tool_policy.clone(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(initial_vessel_mode)),
+            wake_signal: Some(Arc::clone(&wake_signal)),
         });
 
         // 7.8 Seed episodic memory for first boot (Decoherence Fix)
@@ -243,12 +259,27 @@ impl Vessel {
                 local_backend,
                 frontier_backend,
                 artifact_store.clone(),
-                Some(kernel_context),
+                Some(kernel_context.clone()),
             )?
         } else {
-            bootstrap_cognitive_engine(&config, artifact_store.clone(), Some(kernel_context))?
+            bootstrap_cognitive_engine(
+                &config,
+                artifact_store.clone(),
+                Some(kernel_context.clone()),
+            )?
         };
         let engine_slot: CognitiveEngineSlot = Arc::new(Mutex::new(Some(cognitive_engine)));
+
+        let wake_engine_slot = Arc::clone(&engine_slot);
+        tokio::spawn(async move {
+            while wake_rx.recv().await.is_some() {
+                if let Ok(mut guard) = wake_engine_slot.try_lock() {
+                    if let Some(engine) = guard.as_mut() {
+                        let _ = engine.fire_custom_event("caelum.wake".to_string());
+                    }
+                }
+            }
+        });
 
         // 10. Start cognitive tick loop
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -269,6 +300,8 @@ impl Vessel {
                 token,
             )));
         }
+
+        registry.register(Arc::new(AgentAskUserConnector::new(&config.data_dir)));
 
         // 10c. Create streaming message handler for WI → inbox bridge
         let stream_handler: Option<Arc<dyn worldinterface_core::streaming::StreamMessageHandler>> =
@@ -300,6 +333,19 @@ impl Vessel {
 
         // 14. Submit master loop task
         let master_loop_task_id = schedule_master_loop(&engine_slot, &config).await?;
+        {
+            let mut guard = engine_slot.lock().await;
+            if let Some(engine) = guard.as_mut() {
+                engine
+                    .create_subscription(
+                        master_loop_task_id,
+                        actionqueue_core::subscription::EventFilter::Custom {
+                            key: "caelum.wake".to_string(),
+                        },
+                    )
+                    .map_err(|e| ExoError::Engine(format!("early-wake subscription: {e}")))?;
+            }
+        }
 
         // 15. Allocate AQ budgets on master loop task (Sprint 9)
         if let Some(ref cb) = config.cognitive_budget {
@@ -369,11 +415,9 @@ impl Vessel {
             exoskeleton_core::StateSnapshot::initial(config.vessel_id, config.mission.clone());
         let _ = event_tx.send(LiveEvent {
             event_type: exoskeleton_core::EventType::VesselStarted,
-            tick_number: None,
             summary: format!("Vessel {} started", config.vessel_id),
-            timestamp: chrono::Utc::now(),
             snapshot: Some(initial_snapshot),
-            inner_loop_detail: None,
+            ..LiveEvent::new(None)
         });
 
         Ok(Self {
@@ -392,6 +436,7 @@ impl Vessel {
             budget_tracker,
             tool_budget_gate,
             event_tx,
+            vessel_mode: kernel_context.vessel_mode.clone(),
         })
     }
 
@@ -464,6 +509,11 @@ impl Vessel {
     /// Access the Cognitive AQ engine slot (for testing and direct task submission).
     pub fn cognitive_engine_slot(&self) -> &CognitiveEngineSlot {
         &self.cognitive_engine
+    }
+
+    /// Access the shared vessel mode.
+    pub fn vessel_mode(&self) -> &Arc<std::sync::Mutex<VesselMode>> {
+        &self.vessel_mode
     }
 
     /// Access the storage manager (for testing and direct store access).

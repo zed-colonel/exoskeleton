@@ -409,6 +409,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         };
 
         (handler, kernel)
@@ -539,6 +543,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         };
 
         let token = CancellationToken::new();
@@ -594,6 +602,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         };
 
         let token = CancellationToken::new();

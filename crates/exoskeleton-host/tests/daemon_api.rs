@@ -31,11 +31,8 @@ fn broadcast_send_succeeds_with_no_receivers() {
     drop(initial_rx);
     let event = LiveEvent {
         event_type: EventType::VesselStarted,
-        tick_number: None,
         summary: "test".into(),
-        timestamp: chrono::Utc::now(),
-        snapshot: None,
-        inner_loop_detail: None,
+        ..LiveEvent::new(None)
     };
     // send() returns Err(SendError) when no receivers, but it must not panic
     let _ = tx.send(event);
@@ -51,11 +48,8 @@ fn broadcast_multiple_receivers_get_same_events() {
 
     let event = LiveEvent {
         event_type: EventType::TickStarted,
-        tick_number: Some(1),
         summary: "Tick 1 started".into(),
-        timestamp: chrono::Utc::now(),
-        snapshot: None,
-        inner_loop_detail: None,
+        ..LiveEvent::new(Some(1))
     };
     tx.send(event.clone()).unwrap();
 
@@ -75,11 +69,8 @@ fn broadcast_slow_receiver_gets_lagged() {
     for i in 0..8 {
         let event = LiveEvent {
             event_type: EventType::TickStarted,
-            tick_number: Some(i),
             summary: format!("event {i}"),
-            timestamp: chrono::Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(i))
         };
         let _ = tx.send(event);
     }
@@ -101,11 +92,8 @@ fn broadcast_no_receivers_send_succeeds() {
     for i in 0..10 {
         let event = LiveEvent {
             event_type: EventType::TickCompleted,
-            tick_number: Some(i),
             summary: "test".into(),
-            timestamp: chrono::Utc::now(),
-            snapshot: None,
-            inner_loop_detail: None,
+            ..LiveEvent::new(Some(i))
         };
         let _ = tx.send(event);
     }

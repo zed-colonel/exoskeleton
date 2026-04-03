@@ -583,6 +583,7 @@ impl VesselInspector {
                 .to_string(),
             plan: source_snapshot.plan.clone(),
             status: VesselStatus::Idle,
+            vessel_mode: source_snapshot.vessel_mode,
             working_memory: source_snapshot.working_memory.clone(),
             thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
@@ -847,6 +848,7 @@ mod tests {
                 "the plan".into(),
             )),
             status: VesselStatus::Idle,
+            vessel_mode: exoskeleton_core::VesselMode::Normal,
             working_memory: exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
                 "working on something".into(),
             ),
@@ -904,6 +906,7 @@ mod tests {
                 "execute plan B".into(),
             )),
             status: VesselStatus::Acting,
+            vessel_mode: exoskeleton_core::VesselMode::Normal,
             working_memory: exoskeleton_core::working_memory::WorkingMemory::from_legacy_string(
                 "analyzing data".into(),
             ),

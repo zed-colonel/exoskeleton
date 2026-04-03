@@ -115,6 +115,10 @@ pub enum ArtifactKind {
     /// An event payload artifact (E4-S4). Contains serialized event-specific data as JSON.
     /// Used for CapabilityRequest payloads and other structured event details.
     Event,
+    /// Agent-proposed plan draft during planning mode.
+    PlanDraft,
+    /// Operator approval linking to a PlanDraft artifact.
+    PlanApproved,
 }
 
 /// Lightweight reference to an artifact (id + kind) for embedding in other structures.
@@ -233,12 +237,26 @@ mod tests {
             ArtifactKind::Tick,
             ArtifactKind::ContextBreakdown,
             ArtifactKind::Event,
+            ArtifactKind::PlanDraft,
+            ArtifactKind::PlanApproved,
         ];
         for kind in &variants {
             let json = serde_json::to_string(kind).unwrap();
             let parsed: ArtifactKind = serde_json::from_str(&json).unwrap();
             assert_eq!(*kind, parsed);
         }
+    }
+
+    #[test]
+    fn artifact_kind_plan_variants() {
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::PlanDraft).unwrap(),
+            "\"plan_draft\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::PlanApproved).unwrap(),
+            "\"plan_approved\""
+        );
     }
 
     #[test]

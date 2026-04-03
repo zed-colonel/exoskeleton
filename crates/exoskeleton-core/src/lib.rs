@@ -23,6 +23,7 @@ pub mod relationship;
 pub mod snapshot;
 pub mod thread;
 pub mod tick;
+pub mod vessel_mode;
 pub mod watch;
 pub mod working_memory;
 
@@ -39,7 +40,10 @@ pub use conversation::{
 };
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
-pub use event::{CapabilityRequestPayload, EventEntry, EventLedger, EventType, LiveEvent};
+pub use event::{
+    CapabilityRequestPayload, DiffSummary, EventEntry, EventLedger, EventType, InnerLoopStepDetail,
+    LiveEvent, PlanModeDetail, PolicyDetail, QuestionDetail,
+};
 pub use id::{
     derive_external_principal_id, sha256_hex, ArtifactId, ArtifactIdError, ConversationId,
     EnvelopeId, LedgerEntryId, PlanTaskId, PrincipalId, ThreadId, TickId, VesselId, WatchId,
@@ -60,6 +64,7 @@ pub use tick::{
     ActionOutcome, ActionRecord, LlmCallRecord, ThreadContribution, TickPhase, TickRecord,
     TickStore,
 };
+pub use vessel_mode::VesselMode;
 pub use watch::{
     InMemoryWatchStore, MetricKind, WatchCondition, WatchDefinition, WatchProposal, WatchSchedule,
     WatchStatus, WatchStore, WatchType, DEFAULT_MAX_WATCHES,
@@ -97,6 +102,7 @@ mod tests {
                 mission: "proptest mission".into(),
                 plan: None,
                 status,
+                vessel_mode: VesselMode::Normal,
                 working_memory: WorkingMemory::new(),
                 thread_summaries: Vec::new(),
                 relationship_snapshot_ref: None,

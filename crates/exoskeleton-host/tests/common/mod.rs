@@ -50,6 +50,7 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         extra_destructive_tools: vec![],
         connectors_dir: None,
         inner_loop: exoskeleton_host::config::InnerLoopConfig::default(),
+        tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
     }
 }
 
@@ -70,6 +71,7 @@ pub fn make_snapshot(vessel_id: VesselId, tick_number: u64) -> StateSnapshot {
         mission: "test mission".into(),
         plan: None,
         status: VesselStatus::Idle,
+        vessel_mode: exoskeleton_core::VesselMode::Normal,
         working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
         thread_summaries: Vec::new(),
         relationship_snapshot_ref: None,

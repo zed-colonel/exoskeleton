@@ -116,11 +116,8 @@ pub fn align(
         // Broadcast LiveEvent for real-time observers
         let live_event = exoskeleton_core::LiveEvent {
             event_type: exoskeleton_core::EventType::CapabilityRequest,
-            tick_number: None,
             summary: event.summary.clone(),
-            timestamp: event.timestamp,
-            snapshot: None,
-            inner_loop_detail: None,
+            ..exoskeleton_core::LiveEvent::new(None)
         };
         let _ = kernel.event_tx.send(live_event);
     }
@@ -226,6 +223,10 @@ mod tests {
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
         }
     }
 
@@ -248,6 +249,7 @@ mod tests {
             response_artifact_id: ArtifactId::from_content(b"test"),
             watch_proposals: vec![],
             inner_loop_requested: false,
+            vessel_mode_request: None,
         }
     }
 

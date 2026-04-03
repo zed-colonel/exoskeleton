@@ -42,4 +42,4 @@ pub use storage::{
     SqliteArtifactStore, SqliteBudgetStore, SqliteEventLedger, SqliteMemoryStore,
     SqliteSnapshotStore, SqliteThreadStore, SqliteTickStore, StorageManager,
 };
-pub use vessel::Vessel;
+pub use vessel::{CognitiveEngineSlot, Vessel};

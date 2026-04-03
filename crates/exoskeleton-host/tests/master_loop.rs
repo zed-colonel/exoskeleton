@@ -89,6 +89,10 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_watches: kernel.max_watches,
         read_paths_this_tick: kernel.read_paths_this_tick.clone(),
         inner_loop_config: kernel.inner_loop_config.clone(),
+        tool_policy: kernel.tool_policy.clone(),
+        session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
+        vessel_mode: kernel.vessel_mode.clone(),
+        wake_signal: kernel.wake_signal.clone(),
     }
 }
 
@@ -165,6 +169,10 @@ async fn setup_kernel_with_host(
         max_watches: 20,
         read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
+        tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
+        session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
+        vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+        wake_signal: None,
     };
 
     (kernel, handler, mock_backend)
@@ -225,6 +233,10 @@ fn setup_kernel_no_host(
         max_watches: 20,
         read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
+        tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
+        session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
+        vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+        wake_signal: None,
     };
 
     (kernel, handler, mock_backend)
@@ -1040,6 +1052,7 @@ mod proptest_tests {
                 reply: None,
                 plan_update,
                 working_memory_ops,
+                vessel_mode_request: None,
                 actions,
                 memory_notes: notes,
                 watch_proposals: vec![],

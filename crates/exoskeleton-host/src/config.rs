@@ -15,6 +15,8 @@ use exoskeleton_core::llm::LlmBackend;
 use exoskeleton_core::{ExoError, VesselId};
 use serde::{Deserialize, Serialize};
 
+use crate::kernel::policy::ToolPolicyConfig;
+
 /// Wire format of the LLM API for local models.
 ///
 /// Most local inference servers support the OpenAI Chat Completions format.
@@ -319,6 +321,8 @@ pub struct VesselConfig {
     // ── Inner loop settings (E8-S1) ──
     /// Inner loop configuration for interactive coding sessions.
     pub inner_loop: InnerLoopConfig,
+    /// Tool policy configuration for allow/deny/ask rules.
+    pub tool_policy: ToolPolicyConfig,
 }
 
 impl Default for VesselConfig {
@@ -353,6 +357,7 @@ impl Default for VesselConfig {
             extra_destructive_tools: vec![],
             connectors_dir: None,
             inner_loop: InnerLoopConfig::default(),
+            tool_policy: ToolPolicyConfig::default(),
         }
     }
 }
@@ -501,6 +506,11 @@ impl VesselConfig {
                 Some(self.inner_loop.clone())
             } else {
                 None
+            },
+            tool_policy: if self.tool_policy == ToolPolicyConfig::default() {
+                None
+            } else {
+                Some(self.tool_policy.clone())
             },
         };
 
@@ -730,6 +740,9 @@ pub struct VesselConfigFile {
     /// `[inner_loop]` section — inner loop for interactive coding sessions.
     #[serde(default)]
     pub inner_loop: Option<InnerLoopConfig>,
+    /// `[tool_policy]` section — per-tool allow/deny/ask rules.
+    #[serde(default)]
+    pub tool_policy: Option<ToolPolicyConfig>,
 }
 
 /// The `[daemon]` section of the TOML config file.
@@ -1070,6 +1083,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
                 .unwrap_or_default(),
             connectors_dir: file.connectors.as_ref().and_then(|c| c.dir.clone()),
             inner_loop: file.inner_loop.unwrap_or_default(),
+            tool_policy: file.tool_policy.unwrap_or_default(),
         })
     }
 }
