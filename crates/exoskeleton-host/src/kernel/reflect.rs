@@ -20,6 +20,7 @@ pub fn reflect(
     decision: &DecisionResult,
     act_result: &ActResult,
     cancellation: &CancellationToken,
+    diff_section: &str,
 ) -> ReflectionResult {
     // Always compute heuristic baseline
     let heuristic = heuristic_reflect(act_result);
@@ -37,6 +38,7 @@ pub fn reflect(
         decision,
         act_result,
         cancellation,
+        diff_section,
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -111,6 +113,7 @@ fn llm_reflect(
     decision: &DecisionResult,
     act_result: &ActResult,
     cancellation: &CancellationToken,
+    diff_section: &str,
 ) -> Result<ReflectionResult, ExoError> {
     // 1. Build system prompt from template
     let system_prompt = kernel.prompt_registry.resolve(
@@ -122,7 +125,7 @@ fn llm_reflect(
     )?;
 
     // 2. Build user message with action outcomes + plan + working memory
-    let user_message = build_reflect_user_message(snapshot, decision, act_result);
+    let user_message = build_reflect_user_message(snapshot, decision, act_result, diff_section);
 
     // 3. Build request (always default backend, no escalation)
     let request = LlmRequest {
@@ -188,6 +191,7 @@ fn build_reflect_user_message(
     snapshot: &StateSnapshot,
     decision: &DecisionResult,
     act_result: &ActResult,
+    diff_section: &str,
 ) -> String {
     let mut msg = String::new();
     msg.push_str("## Action Outcomes\n\n");
@@ -235,6 +239,9 @@ fn build_reflect_user_message(
         "\n## Decision Reasoning\n{}\n",
         decision.reasoning
     ));
+    if !diff_section.is_empty() {
+        msg.push_str(diff_section);
+    }
     msg
 }
 
@@ -276,6 +283,7 @@ mod tests {
                 outcome: ActionOutcome::Success,
             },
             pending_question: false,
+            code_diff: None,
         }
     }
 
@@ -295,6 +303,7 @@ mod tests {
                 outcome: ActionOutcome::Failure,
             },
             pending_question: false,
+            code_diff: None,
         }
     }
 
@@ -412,6 +421,46 @@ mod tests {
         assert!(result.observations[0].contains("2 actions"));
         assert!(result.observations[0].contains("1 succeeded"));
         assert!(result.observations[0].contains("1 failed"));
+    }
+
+    #[test]
+    fn reflect_user_message_includes_diff_section() {
+        let snapshot = StateSnapshot::initial(exoskeleton_core::VesselId::new(), "mission".into());
+        let decision = test_decision();
+        let act_result = test_act_result();
+        let message = build_reflect_user_message(
+            &snapshot,
+            &decision,
+            &act_result,
+            "\n## File Changes This Tick\n\nModified 1 file(s)\n",
+        );
+
+        assert!(message.contains("## File Changes This Tick"));
+        assert!(message.contains("Modified 1 file(s)"));
+    }
+
+    #[test]
+    fn reflect_user_message_no_diff_section_when_empty() {
+        let snapshot = StateSnapshot::initial(exoskeleton_core::VesselId::new(), "mission".into());
+        let decision = test_decision();
+        let act_result = test_act_result();
+        let message = build_reflect_user_message(&snapshot, &decision, &act_result, "");
+
+        assert!(!message.contains("## File Changes This Tick"));
+    }
+
+    #[test]
+    fn heuristic_reflect_unchanged_with_diffs() {
+        let act_result = ActResult {
+            executions: vec![
+                success_execution("code.edit"),
+                failure_execution("code.read", "bad"),
+            ],
+        };
+        let heuristic = heuristic_reflect(&act_result);
+
+        assert!((heuristic.action_success_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(heuristic.concerns.len(), 0);
     }
 
     // ── LLM Reflect test helpers ──
@@ -585,7 +634,15 @@ mod tests {
         let act_result = test_act_result();
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         assert_eq!(result.task_updates.len(), 1);
         assert_eq!(result.task_updates[0].task_id, task_id);
         assert_eq!(result.task_updates[0].new_status, PlanTaskStatus::Completed);
@@ -621,7 +678,15 @@ mod tests {
         let act_result = test_act_result();
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         assert_eq!(result.working_memory_ops.len(), 1);
         match &result.working_memory_ops[0] {
             WorkingMemoryOp::Set { key, value, .. } => {
@@ -659,7 +724,15 @@ mod tests {
         let act_result = test_act_result();
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         assert!(result.should_replan);
         assert!(!result.concerns.is_empty());
     }
@@ -681,7 +754,15 @@ mod tests {
         let act_result = test_act_result();
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         // Heuristic fallback: 1 success out of 1
         assert_eq!(result.action_success_rate, 1.0);
         // Heuristic doesn't produce LLM call record
@@ -712,7 +793,15 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel(); // Cancel before reflect
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         // Should return heuristic (no LLM call)
         assert!(result.llm_call_record.is_none());
         assert_eq!(result.action_success_rate, 1.0);
@@ -747,7 +836,15 @@ mod tests {
         let act_result = test_act_result();
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         // LLM path should produce a call record with an artifact ref
         let record = result.llm_call_record.expect("should have LLM call record");
         let artifact_id = record
@@ -787,7 +884,15 @@ mod tests {
         let act_result = test_act_result();
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &act_result, &token);
+        let result = reflect(
+            &handler,
+            &kernel,
+            &snapshot,
+            &decision,
+            &act_result,
+            &token,
+            "",
+        );
         assert!(result.llm_call_record.is_some());
 
         // Verify budget tracker recorded consumption
@@ -822,7 +927,9 @@ mod tests {
         let empty_act = ActResult { executions: vec![] };
         let token = CancellationToken::new();
 
-        let result = reflect(&handler, &kernel, &snapshot, &decision, &empty_act, &token);
+        let result = reflect(
+            &handler, &kernel, &snapshot, &decision, &empty_act, &token, "",
+        );
         // Should be heuristic (no LLM call)
         assert!(result.action_success_rate.is_nan());
         assert!(result.llm_call_record.is_none());

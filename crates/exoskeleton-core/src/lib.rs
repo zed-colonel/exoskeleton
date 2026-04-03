@@ -9,6 +9,7 @@ pub mod artifact;
 pub mod budget;
 pub mod charter;
 pub mod conversation;
+pub mod diff;
 pub mod envelope;
 pub mod error;
 pub mod event;
@@ -38,6 +39,7 @@ pub use conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
     ConversationStore, InMemoryConversationStore,
 };
+pub use diff::{CodeDiffContent, CodeDiffOperation, FileDiffEntry, TickDiffSummary};
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
 pub use event::{

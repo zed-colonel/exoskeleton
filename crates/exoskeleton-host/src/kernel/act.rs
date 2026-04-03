@@ -10,13 +10,69 @@ use actionqueue_executor_local::CancellationToken;
 use chrono::Utc;
 use exoskeleton_core::tick::{ActionOutcome, ActionRecord};
 use exoskeleton_core::{
-    Artifact, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent,
-    PolicyDetail, TickId,
+    Artifact, ArtifactKind, CodeDiffContent, CodeDiffOperation, EventEntry, EventType, ExoError,
+    LedgerEntryId, LiveEvent, PolicyDetail, TickId,
 };
+use worldinterface_core::descriptor::{ConnectorCategory, Descriptor};
 
 use super::policy::{self, PolicyDecision};
 use super::types::{ActResult, ActionExecution, AlignmentResult};
 use super::KernelContext;
+
+/// Extract a CodeDiff artifact from a successful mutating code tool result.
+fn try_extract_code_diff(
+    kernel: &KernelContext,
+    tool_name: &str,
+    descriptor: Option<&Descriptor>,
+    result_value: &serde_json::Value,
+) -> Option<(exoskeleton_core::ArtifactId, CodeDiffContent)> {
+    let desc = descriptor?;
+    if !desc.is_mutating || desc.category != ConnectorCategory::Code {
+        return None;
+    }
+
+    let diff_obj = result_value.get("diff")?;
+    if diff_obj.is_null() {
+        return None;
+    }
+
+    let file_path = result_value.get("file_path")?.as_str()?.to_string();
+    let unified = diff_obj.get("unified")?.as_str()?.to_string();
+    let lines_added = diff_obj.get("lines_added")?.as_i64().unwrap_or(0);
+    let lines_removed = diff_obj.get("lines_removed")?.as_i64().unwrap_or(0);
+
+    let operation = match tool_name {
+        "code.edit" => CodeDiffOperation::Edit,
+        "code.apply_patch" => CodeDiffOperation::Patch,
+        "code.write" => {
+            if result_value
+                .get("created")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                CodeDiffOperation::Create
+            } else {
+                CodeDiffOperation::Write
+            }
+        }
+        _ => CodeDiffOperation::Edit,
+    };
+
+    let content = CodeDiffContent {
+        file_path,
+        tool_name: tool_name.to_string(),
+        operation,
+        diff_text: unified,
+        lines_added,
+        lines_removed,
+        before_sha256: None,
+        after_sha256: None,
+    };
+
+    let artifact = Artifact::from_json(ArtifactKind::CodeDiff, &content).ok()?;
+    let artifact_id = kernel.artifact_store.put(&artifact).ok()?;
+    Some((artifact_id, content))
+}
 
 /// Execute the Act step: invoke tools via WI Host (Tool AQ).
 ///
@@ -95,6 +151,7 @@ pub fn act(
                         result: Err("rate_limited".into()),
                         record,
                         pending_question: false,
+                        code_diff: None,
                     });
                     continue;
                 }
@@ -167,6 +224,7 @@ pub fn act(
                             result: Err("read_before_write_required".into()),
                             record,
                             pending_question: false,
+                            code_diff: None,
                         });
                         continue;
                     }
@@ -200,6 +258,7 @@ pub fn act(
                     result: Err(reason.clone()),
                     record,
                     pending_question: false,
+                    code_diff: None,
                 });
                 broadcast_policy_event(kernel, &action.tool_name, "deny", &reason, tick_id);
                 continue;
@@ -222,6 +281,7 @@ pub fn act(
                     result: Err(reason.clone()),
                     record,
                     pending_question: false,
+                    code_diff: None,
                 });
                 broadcast_policy_event(kernel, &action.tool_name, "ask", &reason, tick_id);
                 continue;
@@ -257,6 +317,7 @@ pub fn act(
                             result: Err(e.to_string()),
                             record,
                             pending_question: false,
+                            code_diff: None,
                         });
                         continue;
                     }
@@ -280,7 +341,7 @@ pub fn act(
             raw_result
         };
 
-        let (outcome, result_value, receipt_ref) = match result {
+        let (outcome, result_value, receipt_ref, code_diff) = match result {
             Ok(value) => {
                 // Store receipt artifact (I3: everything replayable)
                 let receipt_ref = match Artifact::from_json(ArtifactKind::Receipt, &value) {
@@ -296,7 +357,9 @@ pub fn act(
                         None
                     }
                 };
-                (ActionOutcome::Success, Ok(value), receipt_ref)
+                let code_diff =
+                    try_extract_code_diff(kernel, &action.tool_name, descriptor.as_ref(), &value);
+                (ActionOutcome::Success, Ok(value), receipt_ref, code_diff)
             }
             Err(e) => {
                 tracing::warn!(
@@ -320,7 +383,12 @@ pub fn act(
                     },
                     Err(_) => None,
                 };
-                (ActionOutcome::Failure, Err(e.to_string()), receipt_ref)
+                (
+                    ActionOutcome::Failure,
+                    Err(e.to_string()),
+                    receipt_ref,
+                    None,
+                )
             }
         };
 
@@ -407,6 +475,7 @@ pub fn act(
             result: result_value,
             record,
             pending_question,
+            code_diff,
         });
 
         if track_read_path {
@@ -453,6 +522,7 @@ pub fn act(
                     result: Err("cancelled".into()),
                     record,
                     pending_question: false,
+                    code_diff: None,
                 });
             }
             break;
@@ -515,7 +585,7 @@ mod tests {
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
     use worldinterface_connector::connectors::{
-        CodeReadConnector, CodeWriteConnector, DelayConnector,
+        CodeReadConnector, CodeWriteConnector, DelayConnector, FsWriteConnector,
     };
     use worldinterface_connector::registry::ConnectorRegistry;
     use worldinterface_host::config::HostConfig;
@@ -580,6 +650,7 @@ mod tests {
         registry.register(Arc::new(DelayConnector));
         registry.register(Arc::new(CodeReadConnector));
         registry.register(Arc::new(CodeWriteConnector));
+        registry.register(Arc::new(FsWriteConnector));
         let host_config = HostConfig {
             aq_data_dir: dir.join("wi").join("aq"),
             context_store_path: dir.join("wi").join("context.db"),
@@ -672,6 +743,15 @@ mod tests {
         PlannedAction {
             tool_name: "code.write".into(),
             params: serde_json::json!({"file_path": path.to_str().unwrap(), "content": content}),
+            rationale: "write file".into(),
+            plan_task_id: None,
+        }
+    }
+
+    fn fs_write_action(path: &std::path::Path, content: &str) -> PlannedAction {
+        PlannedAction {
+            tool_name: "fs.write".into(),
+            params: serde_json::json!({"path": path.to_str().unwrap(), "content": content, "mode": "overwrite"}),
             rationale: "write file".into(),
             plan_task_id: None,
         }
@@ -1101,6 +1181,74 @@ mod tests {
         shutdown_host(kernel).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_step_creates_code_diff_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![
+            code_read_action(&file),
+            code_write_action(&file, "new\n"),
+        ]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+        let artifact_store = kernel.artifact_store.clone();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let execution = result
+            .executions
+            .iter()
+            .find(|exec| exec.action.tool_name == "code.write")
+            .expect("code.write execution must exist");
+        let (artifact_id, diff) = execution
+            .code_diff
+            .as_ref()
+            .expect("code.write overwrite should produce a code diff");
+
+        assert_eq!(diff.operation, CodeDiffOperation::Write);
+        assert_eq!(diff.file_path, file.to_string_lossy());
+
+        let artifact = artifact_store
+            .get(artifact_id)
+            .unwrap()
+            .expect("code diff artifact must be stored");
+        assert_eq!(artifact.kind, ArtifactKind::CodeDiff);
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_step_no_code_diff_for_fs_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let alignment = alignment_with(vec![fs_write_action(&file, "hello\n")]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions.len(), 1);
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Success);
+        assert!(result.executions[0].code_diff.is_none());
+
+        shutdown_host(kernel).await;
+    }
+
     #[test]
     fn act_does_not_call_wi_host_from_other_steps() {
         // Code audit verification: the Act step (act.rs) is the ONLY kernel module
@@ -1150,6 +1298,135 @@ mod tests {
             !amend_source.contains("invoke_single"),
             "Amend must not call invoke_single"
         );
+    }
+
+    fn sample_descriptor(
+        category: ConnectorCategory,
+        is_read_only: bool,
+        is_mutating: bool,
+    ) -> Descriptor {
+        Descriptor {
+            name: "tool".into(),
+            display_name: "Tool".into(),
+            description: "test".into(),
+            category,
+            input_schema: None,
+            output_schema: None,
+            idempotent: false,
+            side_effects: is_mutating,
+            is_read_only,
+            is_mutating,
+            is_concurrency_safe: true,
+            requires_read_before_write: false,
+        }
+    }
+
+    #[test]
+    fn extract_code_diff_from_edit_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_no_host(dir.path());
+        let descriptor = sample_descriptor(ConnectorCategory::Code, false, true);
+        let result = serde_json::json!({
+            "file_path": "src/main.rs",
+            "diff": {
+                "unified": "--- a/src/main.rs\n+++ b/src/main.rs\n",
+                "lines_added": 5,
+                "lines_removed": 2
+            }
+        });
+
+        let extracted =
+            try_extract_code_diff(&kernel, "code.edit", Some(&descriptor), &result).unwrap();
+        assert_eq!(extracted.1.operation, CodeDiffOperation::Edit);
+        assert_eq!(extracted.1.file_path, "src/main.rs");
+    }
+
+    #[test]
+    fn extract_code_diff_from_write_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_no_host(dir.path());
+        let descriptor = sample_descriptor(ConnectorCategory::Code, false, true);
+        let result = serde_json::json!({
+            "file_path": "src/main.rs",
+            "created": false,
+            "diff": {
+                "unified": "--- a/src/main.rs\n+++ b/src/main.rs\n",
+                "lines_added": 4,
+                "lines_removed": 1
+            }
+        });
+
+        let extracted =
+            try_extract_code_diff(&kernel, "code.write", Some(&descriptor), &result).unwrap();
+        assert_eq!(extracted.1.operation, CodeDiffOperation::Write);
+    }
+
+    #[test]
+    fn extract_code_diff_from_write_create_returns_none_when_diff_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_no_host(dir.path());
+        let descriptor = sample_descriptor(ConnectorCategory::Code, false, true);
+        let result = serde_json::json!({
+            "file_path": "src/new.rs",
+            "created": true,
+            "diff": null
+        });
+
+        assert!(try_extract_code_diff(&kernel, "code.write", Some(&descriptor), &result).is_none());
+    }
+
+    #[test]
+    fn extract_code_diff_from_apply_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_no_host(dir.path());
+        let descriptor = sample_descriptor(ConnectorCategory::Code, false, true);
+        let result = serde_json::json!({
+            "file_path": "src/main.rs",
+            "created": false,
+            "diff": {
+                "unified": "--- a/src/main.rs\n+++ b/src/main.rs\n",
+                "lines_added": 8,
+                "lines_removed": 3
+            }
+        });
+
+        let extracted =
+            try_extract_code_diff(&kernel, "code.apply_patch", Some(&descriptor), &result).unwrap();
+        assert_eq!(extracted.1.operation, CodeDiffOperation::Patch);
+    }
+
+    #[test]
+    fn extract_code_diff_skips_non_code_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_no_host(dir.path());
+        let descriptor = sample_descriptor(ConnectorCategory::FileSystem, false, true);
+        let result = serde_json::json!({
+            "file_path": "src/main.rs",
+            "diff": {
+                "unified": "--- a/src/main.rs\n+++ b/src/main.rs\n",
+                "lines_added": 1,
+                "lines_removed": 1
+            }
+        });
+
+        assert!(try_extract_code_diff(&kernel, "fs.write", Some(&descriptor), &result).is_none());
+    }
+
+    #[test]
+    fn extract_code_diff_skips_read_only_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_no_host(dir.path());
+        let descriptor = sample_descriptor(ConnectorCategory::Code, true, false);
+        let result = serde_json::json!({
+            "file_path": "src/main.rs",
+            "diff": {
+                "unified": "--- a/src/main.rs\n+++ b/src/main.rs\n",
+                "lines_added": 1,
+                "lines_removed": 1
+            }
+        });
+
+        assert!(try_extract_code_diff(&kernel, "code.read", Some(&descriptor), &result).is_none());
     }
 
     // ── Helper for spawn_blocking ──

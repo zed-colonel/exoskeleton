@@ -15,6 +15,7 @@ use exoskeleton_core::prompt::PromptRegistry;
 /// All prompt file names and their registry keys.
 const PROMPT_FILES: &[(&str, &str)] = &[
     ("decide-system", "decide-system.md"),
+    ("coding-system", "coding-system.md"),
     ("context-system-section", "context-system-section.md"),
     ("thread-execution", "thread-execution.md"),
     ("thread-user-message", "thread-user-message.md"),
@@ -116,7 +117,7 @@ mod tests {
             "Custom decide prompt from data_dir"
         );
         // Other prompts should still be defaults
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 15);
     }
 
     // ── E0-T13: project-level override takes precedence over compiled-in ──
@@ -182,7 +183,7 @@ mod tests {
         let after = registry.get("decide-system").unwrap();
         assert!(!after.is_empty());
         // All 13 prompts should still be present
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 15);
         // If no project-level files found, should match the compiled-in
         if !Path::new("prompts/decide-system.md").exists() {
             assert_eq!(after, &before);
@@ -233,5 +234,15 @@ mod tests {
             file_content, SELF_CRITIQUE_CHARTER,
             "prompts/charters/self-critique.md must match SELF_CRITIQUE_CHARTER constant"
         );
+    }
+
+    #[test]
+    fn reflect_prompt_template_has_diff_instructions() {
+        let registry = PromptRegistry::with_defaults();
+        let prompt = registry.get("reflect-system").unwrap();
+
+        assert!(prompt.contains("file changes"));
+        assert!(prompt.contains("missing test updates"));
+        assert!(prompt.contains("not verified"));
     }
 }

@@ -6,6 +6,7 @@ pub mod act;
 pub mod align;
 pub mod amend;
 pub mod decide;
+pub mod diff_tracker;
 pub mod inner_loop;
 pub mod orient;
 pub mod perceive;
@@ -343,6 +344,7 @@ pub fn run_tick(
 
     // 12.5 Inner loop activation check (E8-S1)
     let inner_loop_active = kernel.inner_loop_config.enabled && decision.inner_loop_requested;
+    let mut diff_tracker = diff_tracker::DiffTracker::new(tick_number);
 
     let (decision, alignment, act_result, inner_loop_completion) = if inner_loop_active {
         // Inner loop: iterative DecideLite→Align→Act cycle.
@@ -376,6 +378,7 @@ pub fn run_tick(
             &orientation,
             &perception,
             decision,
+            &mut diff_tracker,
             cancellation,
             tick_number,
             tick_id,
@@ -421,10 +424,20 @@ pub fn run_tick(
 
         tracing::info!(tick_number, "Act");
         match act::act(kernel, &alignment, tick_id, cancellation) {
-            Ok(a) => (decision, alignment, a, None),
+            Ok(a) => {
+                for exec in &a.executions {
+                    if let Some((ref id, ref content)) = exec.code_diff {
+                        diff_tracker.record(id.clone(), content.clone());
+                    }
+                }
+                (decision, alignment, a, None)
+            }
             Err(e) => return HandlerOutput::retryable_failure(format!("Act failed: {e}")),
         }
     };
+
+    let diff_section = diff_tracker.format_for_reflect();
+    let _tick_diff_summary = diff_tracker.finalize(&kernel.artifact_store);
 
     // 15. Reflect
     tracing::info!(tick_number, "Reflect");
@@ -435,6 +448,7 @@ pub fn run_tick(
         &decision,
         &act_result,
         cancellation,
+        &diff_section,
     );
 
     // 15.5 Thrash detection (Sprint 9) — analyze recent ticks
@@ -633,9 +647,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use exoskeleton_core::{
+        ActionOutcome, ActionRecord, ArtifactId, CodeDiffContent, CodeDiffOperation,
+    };
+
     use exoskeleton_core::VesselMode;
 
     use crate::budget::session::SessionCompletionReason;
+    use crate::kernel::diff_tracker::DiffTracker;
+    use crate::kernel::types::{ActResult, ActionExecution, PlannedAction};
 
     /// E8S2-T13: `read_paths_this_tick` is cleared at the start of each tick.
     ///
@@ -915,5 +935,52 @@ mod tests {
                 assert_eq!(retrieved.kind, ArtifactKind::PlanDraft);
             }
         }
+    }
+
+    #[test]
+    fn classic_path_records_diffs_in_tracker() {
+        let mut diff_tracker = DiffTracker::new(7);
+        let act_result = ActResult {
+            executions: vec![ActionExecution {
+                action: PlannedAction {
+                    tool_name: "code.edit".into(),
+                    params: serde_json::json!({"file_path": "/tmp/sample.rs"}),
+                    rationale: "test".into(),
+                    plan_task_id: None,
+                },
+                result: Ok(serde_json::json!({"ok": true})),
+                record: ActionRecord {
+                    action_type: "code.edit".into(),
+                    target: "/tmp/sample.rs".into(),
+                    outcome: ActionOutcome::Success,
+                    receipt_ref: None,
+                },
+                pending_question: false,
+                code_diff: Some((
+                    ArtifactId::from_content(b"code-edit-diff"),
+                    CodeDiffContent {
+                        file_path: "/tmp/sample.rs".into(),
+                        tool_name: "code.edit".into(),
+                        operation: CodeDiffOperation::Edit,
+                        diff_text: "--- a/sample.rs\n+++ b/sample.rs\n".into(),
+                        lines_added: 3,
+                        lines_removed: 1,
+                        before_sha256: None,
+                        after_sha256: None,
+                    },
+                )),
+            }],
+        };
+
+        for exec in &act_result.executions {
+            if let Some((ref id, ref content)) = exec.code_diff {
+                diff_tracker.record(id.clone(), content.clone());
+            }
+        }
+
+        let rendered = diff_tracker.format_for_reflect();
+        assert!(!rendered.is_empty());
+        assert!(rendered.contains("File Changes This Tick"));
+        assert!(rendered.contains("/tmp/sample.rs"));
     }
 }

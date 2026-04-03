@@ -40,6 +40,10 @@ impl PromptRegistry {
             include_str!("../../../prompts/decide-system.md"),
         );
         registry.insert(
+            "coding-system",
+            include_str!("../../../prompts/coding-system.md"),
+        );
+        registry.insert(
             "context-system-section",
             include_str!("../../../prompts/context-system-section.md"),
         );
@@ -217,10 +221,11 @@ mod tests {
     #[test]
     fn with_defaults_has_all_thirteen_prompts() {
         let registry = PromptRegistry::with_defaults();
-        assert_eq!(registry.len(), 14, "should have 14 compiled-in prompts");
+        assert_eq!(registry.len(), 15, "should have 15 compiled-in prompts");
 
         let expected_keys = [
             "decide-system",
+            "coding-system",
             "context-system-section",
             "thread-execution",
             "thread-user-message",
@@ -233,6 +238,7 @@ mod tests {
             "bootstrap-preamble",
             "charter-creative-synthesis",
             "charter-initiative",
+            "inner-loop-system",
         ];
         for key in &expected_keys {
             assert!(
@@ -244,6 +250,20 @@ mod tests {
                 "compiled-in prompt should not be empty: {key}"
             );
         }
+    }
+
+    #[test]
+    fn coding_system_template_resolves_plan_section() {
+        let registry = PromptRegistry::with_defaults();
+        let resolved = registry
+            .resolve(
+                "coding-system",
+                &[("plan_section", "You are in planning mode.")],
+            )
+            .unwrap();
+
+        assert!(resolved.contains("You are in planning mode."));
+        assert!(resolved.contains("Coding Guidelines"));
     }
 
     // ── E0-T10: resolve preserves literal braces ──

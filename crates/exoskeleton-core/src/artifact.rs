@@ -119,6 +119,8 @@ pub enum ArtifactKind {
     PlanDraft,
     /// Operator approval linking to a PlanDraft artifact.
     PlanApproved,
+    /// Structured diff output from a mutating code tool, or a per-tick diff summary.
+    CodeDiff,
 }
 
 /// Lightweight reference to an artifact (id + kind) for embedding in other structures.
@@ -239,6 +241,7 @@ mod tests {
             ArtifactKind::Event,
             ArtifactKind::PlanDraft,
             ArtifactKind::PlanApproved,
+            ArtifactKind::CodeDiff,
         ];
         for kind in &variants {
             let json = serde_json::to_string(kind).unwrap();
@@ -256,6 +259,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ArtifactKind::PlanApproved).unwrap(),
             "\"plan_approved\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::CodeDiff).unwrap(),
+            "\"code_diff\""
         );
     }
 

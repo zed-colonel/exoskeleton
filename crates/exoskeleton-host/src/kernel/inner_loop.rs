@@ -19,13 +19,13 @@ use exoskeleton_core::event::InnerLoopStepDetail;
 use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::LlmCallRecord;
 use exoskeleton_core::RelationshipSnapshot;
-use exoskeleton_core::{EventType, ExoError, LiveEvent, RelationshipRecord};
+use exoskeleton_core::{DiffSummary, EventType, ExoError, LiveEvent, RelationshipRecord};
 
 use super::types::{
     extract_json_from_code_fence, ActionExecution, DecisionProtocol, DecisionResult,
     OrientationResult, PerceptionResult, SnapshotDelta,
 };
-use super::{act, align, KernelContext};
+use super::{act, align, diff_tracker::DiffTracker, KernelContext};
 use crate::budget::session::{SessionBudget, SessionBudgetCheck, SessionCompletionReason};
 use crate::cognitive_engine::CognitiveHandler;
 use crate::llm::direct::handler_direct_llm_call;
@@ -59,6 +59,7 @@ pub fn run_inner_loop(
     orientation: &OrientationResult,
     perception: &PerceptionResult,
     initial_decision: DecisionResult,
+    diff_tracker: &mut DiffTracker,
     cancellation: &CancellationToken,
     tick_number: u64,
     tick_id: exoskeleton_core::TickId,
@@ -82,13 +83,21 @@ pub fn run_inner_loop(
             config.max_steps_per_tick, config.max_tokens_per_session
         ),
         None,
+        None,
     );
 
     loop {
         // ── Check session budget ──
         if let SessionBudgetCheck::Stop(reason) = session.can_continue() {
             let completion = SessionCompletionReason::from(reason);
-            broadcast_inner_loop_completed(kernel, tick_number, step, &session, &completion);
+            broadcast_inner_loop_completed(
+                kernel,
+                tick_number,
+                step,
+                &session,
+                &completion,
+                diff_tracker,
+            );
             return Ok(InnerLoopResult {
                 executions: all_executions,
                 llm_call_records: all_llm_records,
@@ -108,6 +117,7 @@ pub fn run_inner_loop(
                 step,
                 &session,
                 &SessionCompletionReason::Cancelled,
+                diff_tracker,
             );
             return Ok(InnerLoopResult {
                 executions: all_executions,
@@ -128,6 +138,7 @@ pub fn run_inner_loop(
                 step,
                 &session,
                 &SessionCompletionReason::AgentComplete,
+                diff_tracker,
             );
             return Ok(InnerLoopResult {
                 executions: all_executions,
@@ -153,6 +164,12 @@ pub fn run_inner_loop(
 
         // ── Act (execute approved actions) ──
         let act_result = act::act(kernel, &alignment, tick_id, cancellation)?;
+        let step_diff_summary = build_step_diff_summary(&act_result.executions);
+        for exec in &act_result.executions {
+            if let Some((ref id, ref content)) = exec.code_diff {
+                diff_tracker.record(id.clone(), content.clone());
+            }
+        }
 
         // Record tool calls for doom-loop detection
         for exec in &act_result.executions {
@@ -170,6 +187,7 @@ pub fn run_inner_loop(
                 step,
                 &session,
                 &SessionCompletionReason::AwaitingInput,
+                diff_tracker,
             );
             return Ok(InnerLoopResult {
                 executions: {
@@ -239,6 +257,7 @@ pub fn run_inner_loop(
                 tokens_total: session.tokens_consumed(),
                 completion_reason: None,
             }),
+            step_diff_summary,
         );
 
         current_decision = decide_result;
@@ -261,9 +280,14 @@ fn decide_lite(
 ) -> Result<DecisionResult, ExoError> {
     // Build system prompt from inner-loop template
     let tools_description = build_tools_description(kernel);
-    let system_prompt = kernel
-        .prompt_registry
-        .resolve("inner-loop-system", &[("tools", &tools_description)])?;
+    let mode_context = build_mode_context(kernel);
+    let system_prompt = kernel.prompt_registry.resolve(
+        "inner-loop-system",
+        &[
+            ("tools", &tools_description),
+            ("mode_context", &mode_context),
+        ],
+    )?;
 
     // Build messages: original context + decision summary + tool results
     let mut messages = vec![LlmMessage {
@@ -322,6 +346,20 @@ fn build_tools_description(kernel: &KernelContext) -> String {
             desc
         }
         None => "(no tools available)".into(),
+    }
+}
+
+fn build_mode_context(kernel: &KernelContext) -> String {
+    let guard = kernel.vessel_mode.lock().unwrap();
+    match *guard {
+        exoskeleton_core::VesselMode::Planning => {
+            "You are in **Planning** mode. Only read-only tools are allowed. Propose your plan."
+                .to_string()
+        }
+        exoskeleton_core::VesselMode::Executing => {
+            "You are **Executing** an approved plan. Follow the plan tasks in order.".to_string()
+        }
+        exoskeleton_core::VesselMode::Normal => String::new(),
     }
 }
 
@@ -428,28 +466,33 @@ fn parse_decide_lite_response(
 }
 
 /// Broadcast an inner-loop event via the event channel.
+#[allow(clippy::too_many_arguments)]
 fn broadcast_inner_loop_event(
     kernel: &KernelContext,
     tick_number: u64,
     event_type: EventType,
     summary: String,
     detail: Option<InnerLoopStepDetail>,
+    diff_summary: Option<DiffSummary>,
 ) {
     let _ = kernel.event_tx.send(LiveEvent {
         event_type,
         summary,
         inner_loop_detail: detail,
+        diff_summary,
         ..LiveEvent::new(Some(tick_number))
     });
 }
 
 /// Broadcast InnerLoopCompleted event.
+#[allow(clippy::too_many_arguments)]
 fn broadcast_inner_loop_completed(
     kernel: &KernelContext,
     tick_number: u64,
     steps: u32,
     session: &SessionBudget,
     reason: &SessionCompletionReason,
+    diff_tracker: &DiffTracker,
 ) {
     broadcast_inner_loop_event(
         kernel,
@@ -470,5 +513,151 @@ fn broadcast_inner_loop_completed(
             tokens_total: session.tokens_consumed(),
             completion_reason: Some(reason.to_string()),
         }),
+        diff_tracker.build_event_summary(),
     );
+}
+
+fn build_step_diff_summary(executions: &[ActionExecution]) -> Option<DiffSummary> {
+    let files: Vec<exoskeleton_core::FileDiffEntry> = executions
+        .iter()
+        .filter_map(|exec| exec.code_diff.as_ref().map(|(_, content)| content))
+        .map(|content| exoskeleton_core::FileDiffEntry {
+            path: content.file_path.clone(),
+            lines_added: content.lines_added,
+            lines_removed: content.lines_removed,
+            operation: content.operation,
+        })
+        .collect();
+
+    if files.is_empty() {
+        return None;
+    }
+
+    let lines_added = files.iter().map(|file| file.lines_added).sum();
+    let lines_removed = files.iter().map(|file| file.lines_removed).sum();
+
+    Some(DiffSummary {
+        files_modified: files.len() as u32,
+        lines_added,
+        lines_removed,
+        net_delta: lines_added - lines_removed,
+        files,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use exoskeleton_core::conversation::InMemoryConversationStore;
+    use exoskeleton_core::prompt::PromptRegistry;
+    use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
+    use exoskeleton_relationship::InMemoryRelationshipLedger;
+    use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
+
+    use super::*;
+    use crate::inbox::InMemoryInbox;
+    use crate::storage::StorageManager;
+
+    fn test_kernel(dir: &std::path::Path) -> KernelContext {
+        let storage = StorageManager::open(dir).unwrap();
+        let counter = Arc::new(ApproximateTokenCounter);
+        let compiler = ContextCompiler::with_defaults(counter, 4000);
+
+        KernelContext {
+            snapshot_store: storage.snapshot_store().clone(),
+            event_ledger: storage.event_ledger().clone(),
+            tick_store: storage.tick_store().clone(),
+            memory_store: storage.memory_store().clone(),
+            context_compiler: Arc::new(compiler),
+            artifact_store: storage.artifact_store().clone(),
+            wi_host_slot: Arc::new(tokio::sync::Mutex::new(None)),
+            inbox: Arc::new(InMemoryInbox::new()),
+            vessel_id: exoskeleton_core::VesselId::new(),
+            mission: "test mission".into(),
+            max_output_tokens: 4096,
+            master_loop_interval_secs: 60,
+            thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
+            relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
+            conversation_store: Arc::new(InMemoryConversationStore::new()),
+            budget_tracker: None,
+            tool_budget_gate: None,
+            metrics: None,
+            event_tx: tokio::sync::broadcast::channel::<LiveEvent>(16).0,
+            prompt_registry: Arc::new(PromptRegistry::with_defaults()),
+            trust_decay_config: None,
+            episodic_memory_capacity: None,
+            bootstrap_grace_period_ticks: 0,
+            max_decide_turns: 5,
+            watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
+            max_watches: 20,
+            read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
+            session_approvals: crate::kernel::policy::SessionApprovals::new(),
+            vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
+            wake_signal: None,
+            observatory_url: None,
+            observatory_token: None,
+        }
+    }
+
+    #[test]
+    fn inner_loop_system_resolves_mode_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        *kernel.vessel_mode.lock().unwrap() = exoskeleton_core::VesselMode::Planning;
+
+        let resolved = kernel
+            .prompt_registry
+            .resolve(
+                "inner-loop-system",
+                &[
+                    ("tools", "- code.read"),
+                    ("mode_context", &build_mode_context(&kernel)),
+                ],
+            )
+            .unwrap();
+
+        assert!(resolved.contains("Planning"));
+        assert!(resolved.contains("code.read"));
+    }
+
+    #[test]
+    fn inner_loop_completed_event_has_diff_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        let mut rx = kernel.event_tx.subscribe();
+        let mut tracker = DiffTracker::new(3);
+        tracker.record(
+            exoskeleton_core::ArtifactId::from_content(b"diff-a"),
+            exoskeleton_core::CodeDiffContent {
+                file_path: "src/main.rs".into(),
+                tool_name: "code.edit".into(),
+                operation: exoskeleton_core::CodeDiffOperation::Edit,
+                diff_text: "--- a/src/main.rs\n+++ b/src/main.rs\n".into(),
+                lines_added: 4,
+                lines_removed: 1,
+                before_sha256: None,
+                after_sha256: None,
+            },
+        );
+        let session = SessionBudget::new(&crate::config::InnerLoopConfig::default());
+
+        broadcast_inner_loop_completed(
+            &kernel,
+            3,
+            2,
+            &session,
+            &SessionCompletionReason::AgentComplete,
+            &tracker,
+        );
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, EventType::InnerLoopCompleted);
+        let diff_summary = event.diff_summary.expect("diff summary must be present");
+        assert_eq!(diff_summary.files_modified, 1);
+        assert_eq!(diff_summary.lines_added, 4);
+        assert_eq!(diff_summary.lines_removed, 1);
+    }
 }

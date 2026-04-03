@@ -147,6 +147,8 @@ pub struct ActionExecution {
     pub result: Result<serde_json::Value, String>,
     pub record: ActionRecord,
     pub pending_question: bool,
+    /// CodeDiff artifact ID and content, if this action produced a code diff.
+    pub code_diff: Option<(ArtifactId, exoskeleton_core::CodeDiffContent)>,
 }
 
 /// Output of the Act step.

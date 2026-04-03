@@ -17,6 +17,7 @@ use exoskeleton_core::budget::{
 use exoskeleton_core::conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
 };
+use exoskeleton_core::diff::{CodeDiffContent, CodeDiffOperation, FileDiffEntry, TickDiffSummary};
 use exoskeleton_core::event::{
     CapabilityRequestPayload, DiffSummary, EventEntry, EventType, InnerLoopStepDetail, LiveEvent,
     PlanModeDetail, PolicyDetail, QuestionDetail,
@@ -114,6 +115,10 @@ fn generate() -> String {
     emit!(output, &cfg, PolicyDetail);
     emit!(output, &cfg, PlanModeDetail);
     emit!(output, &cfg, DiffSummary);
+    emit!(output, &cfg, CodeDiffContent);
+    emit!(output, &cfg, CodeDiffOperation);
+    emit!(output, &cfg, FileDiffEntry);
+    emit!(output, &cfg, TickDiffSummary);
     emit!(output, &cfg, Artifact);
     emit!(output, &cfg, ArtifactRef);
     emit!(output, &cfg, PrincipalSummary);
@@ -171,5 +176,20 @@ fn main() {
         None => {
             std::io::stdout().write_all(output.as_bytes()).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate;
+
+    #[test]
+    fn export_types_includes_diff_types() {
+        let output = generate();
+
+        assert!(output.contains("export type CodeDiffContent"));
+        assert!(output.contains("export type CodeDiffOperation"));
+        assert!(output.contains("export type FileDiffEntry"));
+        assert!(output.contains("export type TickDiffSummary"));
     }
 }

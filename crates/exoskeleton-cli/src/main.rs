@@ -7,6 +7,7 @@
 
 mod bootstrap;
 mod client;
+mod code;
 mod commands;
 mod format;
 
@@ -124,6 +125,12 @@ enum Commands {
         /// Source principal ID (UUID). Generates a new one if omitted.
         #[arg(long)]
         source: Option<String>,
+    },
+
+    /// Start a live coding session with a vessel.
+    Code {
+        /// The coding task to submit.
+        task: Vec<String>,
     },
 
     /// Fetch and display an artifact by ID.
@@ -326,6 +333,11 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
             };
 
             commands::send::run_send(&client, &actual_source, message, cli.json).await
+        }
+
+        Commands::Code { task } => {
+            let task_text = task.join(" ");
+            code::run_code_session(&cli.addr, &task_text).await
         }
 
         Commands::Artifact { id } => commands::artifact::run_artifact(&client, id, cli.json).await,

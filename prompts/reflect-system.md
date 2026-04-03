@@ -29,3 +29,6 @@ Rules:
 - Set working_memory entries for important observations with appropriate TTL
 - Set should_replan to true only if the plan is fundamentally broken
 - Keep observations concise (one sentence each)
+- When file changes are shown, assess whether the changes are correct and complete
+- Flag missing test updates for modified files
+- Flag files that were changed but not verified (e.g., modified but not re-read)

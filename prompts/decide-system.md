@@ -76,3 +76,15 @@ If no actions are needed, return an empty actions array.
 If the plan doesn't need changing, omit plan_update entirely.
 If working memory doesn't need changing, omit working_memory_ops entirely.
 Always include reasoning.
+
+## Interactive Tools
+
+If you need operator input during a task, use **agent.ask_user** to present a question.
+- Provide clear, bounded choices when possible
+- If the operator doesn't respond in time, the question persists — you can continue later
+
+## Mode Awareness
+
+If this task requires code changes and you want operator approval before mutating files,
+set `vessel_mode_request` to `"planning"` in your response. This restricts you to
+read-only tools until the operator approves your plan.

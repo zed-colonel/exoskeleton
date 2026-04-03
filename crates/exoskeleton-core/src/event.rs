@@ -11,6 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::diff::FileDiffEntry;
 use crate::id::{ArtifactId, LedgerEntryId, TickId};
 use crate::snapshot::StateSnapshot;
 use crate::ExoError;
@@ -222,6 +223,8 @@ pub struct DiffSummary {
     pub lines_added: i64,
     pub lines_removed: i64,
     pub net_delta: i64,
+    #[serde(default)]
+    pub files: Vec<FileDiffEntry>,
 }
 
 /// Payload stored as a JSON artifact for CapabilityRequest events.

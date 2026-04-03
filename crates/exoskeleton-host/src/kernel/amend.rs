@@ -1115,6 +1115,7 @@ mod tests {
                 outcome: exoskeleton_core::tick::ActionOutcome::Success,
             },
             pending_question: false,
+            code_diff: None,
         };
         act_result.executions.push(exec);
         decision.snapshot_delta = SnapshotDelta::default();

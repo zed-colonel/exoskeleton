@@ -67,6 +67,9 @@ prometheus = "0.13"
 base64 = "0.22"
 tower-http = { version = "0.6", features = ["cors"] }
 ts-rs = { version = "12", features = ["serde-compat", "chrono-impl", "uuid-impl"] }
+crossterm = "0.28"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
 
 # Test dependencies
 tempfile = "3"

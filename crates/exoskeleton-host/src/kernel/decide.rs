@@ -406,7 +406,7 @@ fn build_system_prompt(
         ""
     };
 
-    let base = kernel.prompt_registry.resolve(
+    let mut system = kernel.prompt_registry.resolve(
         "decide-system",
         &[
             ("vessel_id", &kernel.vessel_id.to_string()),
@@ -414,7 +414,28 @@ fn build_system_prompt(
             ("tools", tools),
         ],
     )?;
-    Ok(format!("{base}{inner_loop_guidance}\n\n{introspection}"))
+    system.push_str(inner_loop_guidance);
+
+    let vessel_mode = *kernel.vessel_mode.lock().unwrap();
+    if kernel.inner_loop_config.enabled || vessel_mode != exoskeleton_core::VesselMode::Normal {
+        let plan_section = match vessel_mode {
+            exoskeleton_core::VesselMode::Planning => "You are in **Planning** mode. Only read-only tools are allowed. Propose a plan with PlanDraft artifact.".to_string(),
+            exoskeleton_core::VesselMode::Executing => "You are in **Executing** mode. Follow the approved plan. Mark tasks as completed as you go.".to_string(),
+            exoskeleton_core::VesselMode::Normal => "If this task requires code changes, consider entering Planning mode first by setting vessel_mode_request to \"planning\".".to_string(),
+        };
+
+        if let Ok(coding_section) = kernel
+            .prompt_registry
+            .resolve("coding-system", &[("plan_section", &plan_section)])
+        {
+            system.push_str("\n\n");
+            system.push_str(&coding_section);
+        }
+    }
+
+    system.push_str("\n\n");
+    system.push_str(introspection);
+    Ok(system)
 }
 
 /// Generate the introspection tools section for the system prompt.
@@ -780,6 +801,40 @@ mod tests {
         assert!(prompt.contains("tick_history"));
         assert!(prompt.contains("trust_scores"));
         assert!(prompt.contains("budget_status"));
+    }
+
+    #[test]
+    fn decide_system_injects_coding_when_inner_loop_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut kernel = test_kernel(dir.path());
+        kernel.inner_loop_config.enabled = true;
+
+        let prompt =
+            build_system_prompt(&kernel, "- code.read: Read a file", "introspection").unwrap();
+        assert!(prompt.contains("Coding Guidelines"));
+        assert!(prompt.contains("code.read"));
+    }
+
+    #[test]
+    fn decide_system_injects_coding_when_planning_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        *kernel.vessel_mode.lock().unwrap() = exoskeleton_core::VesselMode::Planning;
+
+        let prompt =
+            build_system_prompt(&kernel, "- code.read: Read a file", "introspection").unwrap();
+        assert!(prompt.contains("Coding Guidelines"));
+        assert!(prompt.contains("Only read-only tools are allowed"));
+    }
+
+    #[test]
+    fn decide_system_no_coding_when_normal_no_inner_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+
+        let prompt =
+            build_system_prompt(&kernel, "- fs.write: Write a file", "introspection").unwrap();
+        assert!(!prompt.contains("Coding Guidelines"));
     }
 
     #[test]
