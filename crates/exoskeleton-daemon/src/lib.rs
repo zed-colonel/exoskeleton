@@ -74,8 +74,7 @@ impl ExoDaemon {
         let wi_host_slot = self.vessel.wi_host_slot().clone();
         let cognitive_engine = self.vessel.cognitive_engine_slot().clone();
         let vessel_mode = self.vessel.vessel_mode().clone();
-        let questions_dir = self.vessel.config().data_dir.join("questions");
-        let answers_dir = self.vessel.config().data_dir.join("answers");
+        let signal_registry = self.vessel.signal_registry().clone();
 
         let cors_origins: Vec<HeaderValue> = self
             .cors_allowed_origins
@@ -105,8 +104,7 @@ impl ExoDaemon {
             align_config: None,
             cognitive_engine,
             vessel_mode,
-            questions_dir,
-            answers_dir,
+            signal_registry,
         });
 
         let router = routes::build_router(app_state);

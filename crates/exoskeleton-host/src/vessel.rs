@@ -25,9 +25,10 @@ use exoskeleton_threads::ThreadRegistry;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use worldinterface_connector::connectors::{
-    default_registry, AgentAskUserConnector, PeerResolveConnector,
+    default_registry, SignalAwaitConnector, SignalEmitConnector,
 };
 use worldinterface_connector::registry::ConnectorRegistry;
+use worldinterface_connector::SignalRegistry;
 use worldinterface_core::descriptor::Descriptor;
 use worldinterface_host::config::HostConfig;
 use worldinterface_host::host::EmbeddedHost;
@@ -82,6 +83,8 @@ pub struct Vessel {
     event_tx: tokio::sync::broadcast::Sender<LiveEvent>,
     /// Shared vessel mode state for daemon interactions.
     vessel_mode: Arc<std::sync::Mutex<VesselMode>>,
+    /// Signal registry for signal.await/signal.emit coordination (shared with daemon).
+    signal_registry: Arc<SignalRegistry>,
 }
 
 impl Vessel {
@@ -215,6 +218,11 @@ impl Vessel {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(initial_vessel_mode)),
             wake_signal: Some(Arc::clone(&wake_signal)),
+            observatory_url: config.observatory_url.clone(),
+            observatory_token: config
+                .observatory_token_env
+                .as_ref()
+                .and_then(|env_name| std::env::var(env_name).ok()),
         });
 
         // 7.8 Seed episodic memory for first boot (Decoherence Fix)
@@ -289,19 +297,14 @@ impl Vessel {
             shutdown_rx,
         );
 
-        // 10b. Conditionally register peer.resolve connector
-        if let Some(ref observatory_url) = config.observatory_url {
-            let token = config
-                .observatory_token_env
-                .as_ref()
-                .and_then(|env_name| std::env::var(env_name).ok());
-            registry.register(Arc::new(PeerResolveConnector::new(
-                observatory_url.clone(),
-                token,
-            )));
-        }
-
-        registry.register(Arc::new(AgentAskUserConnector::new(&config.data_dir)));
+        // 10b. Register signal connectors (shared registry for signal coordination)
+        let signal_registry = Arc::new(SignalRegistry::new());
+        registry.register(Arc::new(SignalAwaitConnector::new(Arc::clone(
+            &signal_registry,
+        ))));
+        registry.register(Arc::new(SignalEmitConnector::new(Arc::clone(
+            &signal_registry,
+        ))));
 
         // 10c. Create streaming message handler for WI → inbox bridge
         let stream_handler: Option<Arc<dyn worldinterface_core::streaming::StreamMessageHandler>> =
@@ -437,6 +440,7 @@ impl Vessel {
             tool_budget_gate,
             event_tx,
             vessel_mode: kernel_context.vessel_mode.clone(),
+            signal_registry,
         })
     }
 
@@ -633,6 +637,11 @@ impl Vessel {
     /// Access the broadcast sender for real-time events (D2).
     pub fn event_sender(&self) -> &tokio::sync::broadcast::Sender<LiveEvent> {
         &self.event_tx
+    }
+
+    /// Access the shared signal registry for daemon signal coordination.
+    pub fn signal_registry(&self) -> &Arc<SignalRegistry> {
+        &self.signal_registry
     }
 
     /// Build a WI HostConfig from VesselConfig tool settings.
@@ -863,18 +872,22 @@ mod tests {
         assert!(registry.get("sandbox.exec").is_some());
     }
 
-    // ── E4S1-T18: peer.resolve registered when observatory_url is set ──
+    // ── Signal connectors registered at vessel boot ──
 
     #[test]
-    fn peer_resolve_registered_when_observatory_url_set() {
+    fn signal_connectors_registered_at_boot() {
         let registry = default_registry();
         assert_eq!(registry.len(), 13);
 
-        // Simulate the conditional registration from start_with_registry_and_backends
-        let observatory_url = "http://observatory:3000".to_string();
-        registry.register(Arc::new(PeerResolveConnector::new(observatory_url, None)));
+        // Simulate the signal connector registration from start_with_registry_and_backends
+        let signal_registry = Arc::new(SignalRegistry::new());
+        registry.register(Arc::new(SignalAwaitConnector::new(Arc::clone(
+            &signal_registry,
+        ))));
+        registry.register(Arc::new(SignalEmitConnector::new(signal_registry)));
 
-        assert_eq!(registry.len(), 14);
-        assert!(registry.get("peer.resolve").is_some());
+        assert_eq!(registry.len(), 15);
+        assert!(registry.get("signal.await").is_some());
+        assert!(registry.get("signal.emit").is_some());
     }
 }

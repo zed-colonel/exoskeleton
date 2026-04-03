@@ -185,6 +185,8 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
         vessel_mode: kernel.vessel_mode.clone(),
         wake_signal: kernel.wake_signal.clone(),
+        observatory_url: kernel.observatory_url.clone(),
+        observatory_token: kernel.observatory_token.clone(),
     }
 }
 
@@ -279,6 +281,8 @@ async fn setup_with_threads(
         session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
         vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
         wake_signal: None,
+        observatory_url: None,
+        observatory_token: None,
     };
 
     (kernel, handler, mock)
@@ -357,6 +361,8 @@ async fn setup_with_threads_custom_backend(
         session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
         vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
         wake_signal: None,
+        observatory_url: None,
+        observatory_token: None,
     };
 
     (kernel, handler)

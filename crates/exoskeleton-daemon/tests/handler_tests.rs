@@ -66,8 +66,7 @@ fn test_app_state(dir: &std::path::Path) -> Arc<AppState> {
         align_config: None,
         cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
         vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
-        questions_dir: dir.join("questions"),
-        answers_dir: dir.join("answers"),
+        signal_registry: Arc::new(worldinterface_connector::SignalRegistry::new()),
     })
 }
 
@@ -113,8 +112,7 @@ fn test_app_state_with_cors(dir: &std::path::Path, origins: Vec<&str>) -> Arc<Ap
         align_config: None,
         cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
         vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
-        questions_dir: dir.join("questions"),
-        answers_dir: dir.join("answers"),
+        signal_registry: Arc::new(worldinterface_connector::SignalRegistry::new()),
     })
 }
 
@@ -1433,8 +1431,7 @@ async fn generic_webhook_hmac_valid() {
         align_config: None,
         cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
         vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
-        questions_dir: dir.path().join("questions"),
-        answers_dir: dir.path().join("answers"),
+        signal_registry: Arc::new(worldinterface_connector::SignalRegistry::new()),
     });
 
     let app = build_router(state);
@@ -1500,8 +1497,7 @@ async fn generic_webhook_hmac_invalid() {
         align_config: None,
         cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
         vessel_mode: Arc::new(std::sync::Mutex::new(VesselMode::Normal)),
-        questions_dir: dir.path().join("questions"),
-        answers_dir: dir.path().join("answers"),
+        signal_registry: Arc::new(worldinterface_connector::SignalRegistry::new()),
     });
 
     let app = build_router(state);
@@ -2072,30 +2068,16 @@ async fn plan_status_returns_current_mode() {
     assert_eq!(json["mode"], "planning");
 }
 
-// ── T46: question_answer_writes_file ──
+// ── T30: question_answer_delivers_via_signal ──
 #[tokio::test]
-async fn question_answer_writes_file() {
+async fn question_answer_delivers_via_signal() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_app_state(dir.path());
 
-    // Create questions and answers directories
-    let questions_dir = dir.path().join("questions");
-    let answers_dir = dir.path().join("answers");
-    std::fs::create_dir_all(&questions_dir).unwrap();
-    std::fs::create_dir_all(&answers_dir).unwrap();
-
-    // Write a question file
+    // Register a waiter in the signal registry
     let question_id = uuid::Uuid::new_v4().to_string();
-    let question_path = questions_dir.join(format!("{question_id}.json"));
-    std::fs::write(
-        &question_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "question": "What branch?",
-            "choices": ["main", "develop"]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let signal_key = format!("question:{}", question_id);
+    let rx = state.signal_registry.register_waiter(&signal_key);
 
     let app = build_router(state);
     let body = serde_json::json!({"answer": "main", "source": "operator"});
@@ -2111,25 +2093,19 @@ async fn question_answer_writes_file() {
 
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Verify answer file was written
-    let answer_path = answers_dir.join(format!("{question_id}.json"));
-    assert!(answer_path.exists(), "answer file must be written");
-    let answer: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&answer_path).unwrap()).unwrap();
-    assert_eq!(answer["answer"], "main");
-    assert_eq!(answer["answered_by"], "operator");
+    // Verify signal was delivered
+    let payload = rx.recv().unwrap();
+    assert_eq!(payload["answer"], "main");
+    assert_eq!(payload["answered_by"], "operator");
 }
 
-// ── T47: question_answer_nonexistent_404 ──
+// ── T30b: question_answer_no_waiter_returns_delivered_false ──
 #[tokio::test]
-async fn question_answer_nonexistent_404() {
+async fn question_answer_no_waiter_returns_delivered_false() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_app_state(dir.path());
 
-    // Create questions directory but don't put any question file
-    std::fs::create_dir_all(dir.path().join("questions")).unwrap();
-    std::fs::create_dir_all(dir.path().join("answers")).unwrap();
-
+    // No waiter registered — signal should not deliver
     let question_id = uuid::Uuid::new_v4().to_string();
     let app = build_router(state);
     let body = serde_json::json!({"answer": "test", "source": "operator"});
@@ -2143,5 +2119,10 @@ async fn question_answer_nonexistent_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Parse the response body to check delivered: false
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["delivered"], false);
 }

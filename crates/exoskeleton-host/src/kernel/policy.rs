@@ -127,8 +127,9 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    use super::{evaluate_policy, PolicyDecision, PolicyRule, SessionApprovals, ToolPolicyConfig};
     use exoskeleton_core::VesselMode;
+
+    use super::{evaluate_policy, PolicyDecision, PolicyRule, SessionApprovals, ToolPolicyConfig};
 
     fn config(default: PolicyRule, rules: &[(&str, PolicyRule)]) -> ToolPolicyConfig {
         ToolPolicyConfig {

@@ -350,28 +350,39 @@ fn build_tools_description(kernel: &KernelContext) -> String {
     // NOTE: We use try_lock here because we're in a sync context.
     // The slot should be populated by boot time.
     let guard = kernel.wi_host_slot.try_lock();
-    match guard {
+    let mut tools = match guard {
         Ok(slot) => match slot.as_ref() {
-            Some(host) => {
-                let caps = host.list_capabilities();
-                if caps.is_empty() {
-                    "No tools available.".into()
-                } else {
-                    caps.iter()
-                        .map(|d| {
-                            let mut line = format!("- {}: {}", d.name, d.description);
-                            if let Some(schema) = &d.input_schema {
-                                line.push_str(&format!("\n  params: {}", schema));
-                            }
-                            line
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            }
-            None => "No tools available (WI Host not ready).".into(),
+            Some(host) => host.list_capabilities(),
+            None => vec![],
         },
-        Err(_) => "Tools unavailable (slot locked).".into(),
+        Err(_) => return "Tools unavailable (slot locked).".into(),
+    };
+
+    // Append virtual tool descriptors (LLM sees these as normal tools)
+    let mut virtual_descs = super::virtual_tools::virtual_tool_descriptors();
+    // Only include peer.resolve if observatory_url is configured
+    if kernel.observatory_url.is_none() {
+        virtual_descs.retain(|d| d.name != super::virtual_tools::PEER_RESOLVE);
+    }
+    tools.extend(virtual_descs);
+
+    // Filter out signal primitives — the LLM should NOT see these
+    tools.retain(|d| d.name != "signal.await" && d.name != "signal.emit");
+
+    if tools.is_empty() {
+        "No tools available.".into()
+    } else {
+        tools
+            .iter()
+            .map(|d| {
+                let mut line = format!("- {}: {}", d.name, d.description);
+                if let Some(schema) = &d.input_schema {
+                    line.push_str(&format!("\n  params: {}", schema));
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -534,6 +545,8 @@ mod tests {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
             wake_signal: None,
+            observatory_url: None,
+            observatory_token: None,
         }
     }
 
@@ -838,6 +851,8 @@ mod tests {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
             wake_signal: None,
+            observatory_url: None,
+            observatory_token: None,
         }
     }
 

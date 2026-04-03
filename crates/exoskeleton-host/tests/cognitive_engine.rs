@@ -329,7 +329,8 @@ async fn list_capabilities_returns_registered_connectors() {
         .unwrap();
 
     let caps = vessel.list_capabilities();
-    assert_eq!(caps.len(), 14);
+    // 13 default + signal.await + signal.emit = 15
+    assert_eq!(caps.len(), 15);
 
     let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"delay"));
@@ -345,7 +346,11 @@ async fn list_capabilities_returns_registered_connectors() {
     assert!(names.contains(&"http.request"));
     assert!(names.contains(&"shell.exec"));
     assert!(names.contains(&"sandbox.exec"));
-    assert!(names.contains(&"agent.ask_user"));
+    assert!(names.contains(&"signal.await"));
+    assert!(names.contains(&"signal.emit"));
+    // agent.ask_user and peer.resolve are virtual tools, NOT WI connectors
+    assert!(!names.contains(&"agent.ask_user"));
+    assert!(!names.contains(&"peer.resolve"));
 
     vessel.shutdown().await.unwrap();
 }
@@ -386,8 +391,8 @@ async fn capabilities_match_registry() {
     let base_count = registry.len();
     let vessel = Vessel::start_with_registry(config, registry).await.unwrap();
 
-    // Vessel boot registers agent.ask_user (+1 over the base registry)
-    assert_eq!(vessel.list_capabilities().len(), base_count + 1);
+    // Vessel boot registers signal.await + signal.emit (+2 over the base registry)
+    assert_eq!(vessel.list_capabilities().len(), base_count + 2);
 
     vessel.shutdown().await.unwrap();
 }
@@ -621,9 +626,9 @@ async fn wi_dir_has_no_cognitive_files() {
     vessel.shutdown().await.unwrap();
 }
 
-// ── T48: vessel_has_agent_ask_user_connector ──
+// ── T27: vessel_registers_signal_connectors ──
 #[tokio::test]
-async fn vessel_has_agent_ask_user_connector() {
+async fn vessel_registers_signal_connectors() {
     let dir = tempfile::tempdir().unwrap();
     let config = common::test_config(dir.path());
     let vessel = Vessel::start_with_registry(config, common::test_registry())
@@ -633,15 +638,57 @@ async fn vessel_has_agent_ask_user_connector() {
     let caps = vessel.list_capabilities();
     let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
     assert!(
-        names.contains(&"agent.ask_user"),
-        "fully booted vessel must include agent.ask_user connector, got: {names:?}"
+        names.contains(&"signal.await"),
+        "fully booted vessel must include signal.await connector, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"signal.emit"),
+        "fully booted vessel must include signal.emit connector, got: {names:?}"
     );
 
-    // Verify it's described correctly
-    let desc = vessel.describe("agent.ask_user");
-    assert!(desc.is_some(), "agent.ask_user must be describable");
+    // Verify signal.await descriptor
+    let desc = vessel.describe("signal.await");
+    assert!(desc.is_some(), "signal.await must be describable");
     let desc = desc.unwrap();
-    assert!(desc.is_read_only, "agent.ask_user must be marked read_only");
+    assert!(desc.is_read_only, "signal.await must be marked read_only");
+
+    vessel.shutdown().await.unwrap();
+}
+
+// ── T28: vessel_does_not_have_agent_ask_user_connector ──
+#[tokio::test]
+async fn vessel_does_not_have_agent_ask_user_connector() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::test_config(dir.path());
+    let vessel = Vessel::start_with_registry(config, common::test_registry())
+        .await
+        .unwrap();
+
+    let caps = vessel.list_capabilities();
+    let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        !names.contains(&"agent.ask_user"),
+        "agent.ask_user is a virtual tool, not a WI connector, got: {names:?}"
+    );
+
+    vessel.shutdown().await.unwrap();
+}
+
+// ── T29: vessel_does_not_have_peer_resolve_connector ──
+#[tokio::test]
+async fn vessel_does_not_have_peer_resolve_connector() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::test_config(dir.path());
+    let vessel = Vessel::start_with_registry(config, common::test_registry())
+        .await
+        .unwrap();
+
+    let caps = vessel.list_capabilities();
+    let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        !names.contains(&"peer.resolve"),
+        "peer.resolve is a virtual tool, not a WI connector, got: {names:?}"
+    );
 
     vessel.shutdown().await.unwrap();
 }

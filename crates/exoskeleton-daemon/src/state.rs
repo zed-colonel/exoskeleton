@@ -16,6 +16,7 @@ use exoskeleton_host::metrics::ExoMetrics;
 use exoskeleton_host::CognitiveEngineSlot;
 use exoskeleton_relationship::AlignConfig;
 use exoskeleton_threads::ThreadRegistry;
+use worldinterface_connector::SignalRegistry;
 
 /// Shared state available to all HTTP handlers via axum's `State` extractor.
 pub struct AppState {
@@ -54,8 +55,6 @@ pub struct AppState {
     pub cognitive_engine: CognitiveEngineSlot,
     /// Shared vessel mode state.
     pub vessel_mode: Arc<std::sync::Mutex<VesselMode>>,
-    /// Question storage directory.
-    pub questions_dir: PathBuf,
-    /// Answer storage directory.
-    pub answers_dir: PathBuf,
+    /// Signal registry for signal.await/signal.emit coordination.
+    pub signal_registry: Arc<SignalRegistry>,
 }

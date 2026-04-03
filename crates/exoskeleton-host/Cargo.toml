@@ -23,6 +23,7 @@ reqwest = { workspace = true }
 prometheus = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 ts-rs = { workspace = true }
 
 # ActionQueue crates — Cognitive AQ engine (direct ownership, I9)

@@ -13,6 +13,7 @@ pub mod policy;
 pub mod reflect;
 pub mod threads;
 pub mod types;
+pub mod virtual_tools;
 pub mod watches;
 
 use std::sync::Arc;
@@ -103,6 +104,10 @@ pub struct KernelContext {
     pub vessel_mode: Arc<std::sync::Mutex<VesselMode>>,
     /// Best-effort early-wake signal.
     pub wake_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Observatory URL for peer.resolve virtual tool translation.
+    pub observatory_url: Option<String>,
+    /// Observatory auth token for peer.resolve virtual tool translation.
+    pub observatory_token: Option<String>,
 }
 
 /// Run one complete PODAARA tick.

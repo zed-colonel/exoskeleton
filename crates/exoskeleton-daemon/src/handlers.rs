@@ -389,59 +389,42 @@ pub async fn post_question_answer(
     if Uuid::parse_str(&question_id).is_err() {
         return (
             StatusCode::BAD_REQUEST,
-            "invalid question ID (expected UUID)".to_string(),
+            Json(serde_json::json!({"error": "invalid question_id"})),
         )
             .into_response();
     }
 
-    let question_path = state.questions_dir.join(format!("{question_id}.json"));
-    if !question_path.exists() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    let answer_path = state.answers_dir.join(format!("{question_id}.json"));
-    let answer = serde_json::json!({
+    // Emit signal to deliver answer to the waiting signal.await connector
+    let signal_key = format!("question:{}", question_id);
+    let payload = serde_json::json!({
         "answer": req.answer,
         "answered_by": req.source,
-        "answered_at": Utc::now(),
     });
-    if let Err(e) = std::fs::write(
-        &answer_path,
-        serde_json::to_vec_pretty(&answer).unwrap_or_default(),
-    ) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
+    let delivered = state.signal_registry.emit(&signal_key, payload);
 
-    let question_text = std::fs::read_to_string(&question_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| {
-            value
-                .get("question")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-    let choices = std::fs::read_to_string(&question_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| value.get("choices").cloned())
-        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok());
-
+    // Broadcast QuestionAnswered event
     let _ = state.event_tx.send(LiveEvent {
         event_type: EventType::QuestionAnswered,
-        summary: format!("Question answered: {question_id}"),
+        summary: format!("Question {} answered", question_id),
         question_detail: Some(QuestionDetail {
             question_id: question_id.clone(),
-            question: question_text,
-            choices,
+            question: String::new(),
+            choices: None,
             status: "answered".into(),
         }),
         ..LiveEvent::new(None)
     });
 
     fire_wake(&state);
-    StatusCode::OK.into_response()
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "delivered": delivered,
+            "question_id": question_id,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /healthz -> 200 OK always

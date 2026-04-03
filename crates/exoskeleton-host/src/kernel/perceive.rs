@@ -177,6 +177,8 @@ mod tests {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
             wake_signal: None,
+            observatory_url: None,
+            observatory_token: None,
         }
     }
 

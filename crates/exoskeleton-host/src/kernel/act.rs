@@ -56,7 +56,13 @@ pub fn act(
     let mut executions = Vec::new();
 
     for (i, action) in alignment.approved_actions.iter().enumerate() {
-        let descriptor = host.describe_connector(&action.tool_name);
+        let descriptor = if super::virtual_tools::is_virtual_tool(&action.tool_name) {
+            super::virtual_tools::virtual_tool_descriptors()
+                .into_iter()
+                .find(|d| d.name == action.tool_name)
+        } else {
+            host.describe_connector(&action.tool_name)
+        };
 
         // Tool budget gate check (Sprint 9, I6/I9)
         if let Some(ref gate) = kernel.tool_budget_gate {
@@ -222,11 +228,57 @@ pub fn act(
             }
         }
 
+        // ── Virtual tool translation ──
+        // Virtual tools are Exoskeleton-specific tool names that the LLM sees.
+        // The Act step translates them into WI connector invocations (I9).
+        let (actual_tool_name, actual_params, virtual_context) =
+            if super::virtual_tools::is_virtual_tool(&action.tool_name) {
+                match super::virtual_tools::translate(
+                    &action.tool_name,
+                    &action.params,
+                    kernel,
+                    tick_id,
+                ) {
+                    Ok((name, params, ctx)) => (name, params, Some(ctx)),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %action.tool_name,
+                            error = %e,
+                            "virtual tool translation failed"
+                        );
+                        let record = ActionRecord {
+                            action_type: action.tool_name.clone(),
+                            target: action.params.to_string(),
+                            receipt_ref: None,
+                            outcome: ActionOutcome::Failure,
+                        };
+                        executions.push(ActionExecution {
+                            action: action.clone(),
+                            result: Err(e.to_string()),
+                            record,
+                            pending_question: false,
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                (action.tool_name.clone(), action.params.clone(), None)
+            };
+
         // Execute via WI Host (boundary crossing to Tool AQ).
         // invoke_single is async; we use Handle::current().block_on() because
         // the Act step runs on a blocking thread in the AQ dispatch loop.
-        let result = tokio::runtime::Handle::current()
-            .block_on(host.invoke_single(&action.tool_name, action.params.clone()));
+        let raw_result = tokio::runtime::Handle::current()
+            .block_on(host.invoke_single(&actual_tool_name, actual_params));
+
+        // Post-process if this was a virtual tool
+        let result = if let Some(ref vt_ctx) = virtual_context {
+            let mapped = raw_result.map_err(|e| e.to_string());
+            super::virtual_tools::post_process(vt_ctx, &mapped)
+                .map_err(worldinterface_host::error::HostError::InternalError)
+        } else {
+            raw_result
+        };
 
         let (outcome, result_value, receipt_ref) = match result {
             Ok(value) => {
@@ -514,6 +566,8 @@ mod tests {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
             wake_signal: None,
+            observatory_url: None,
+            observatory_token: None,
         }
     }
 
@@ -574,6 +628,8 @@ mod tests {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
             wake_signal: None,
+            observatory_url: None,
+            observatory_token: None,
         }
     }
 
@@ -1142,6 +1198,8 @@ mod tests {
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: kernel.vessel_mode.clone(),
             wake_signal: kernel.wake_signal.clone(),
+            observatory_url: kernel.observatory_url.clone(),
+            observatory_token: kernel.observatory_token.clone(),
         }
     }
 }

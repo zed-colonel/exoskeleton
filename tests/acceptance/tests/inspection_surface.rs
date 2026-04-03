@@ -34,7 +34,6 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
     let thread_registry = vessel.thread_registry().clone();
 
     let wi_host_slot = vessel.wi_host_slot().clone();
-    let dir = tempfile::tempdir().unwrap();
 
     Arc::new(AppState {
         inspector,
@@ -53,8 +52,7 @@ fn build_app_state(vessel: &exoskeleton_host::Vessel) -> Arc<AppState> {
         align_config: None,
         cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
         vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
-        questions_dir: dir.path().join("questions"),
-        answers_dir: dir.path().join("answers"),
+        signal_registry: Arc::new(worldinterface_connector::SignalRegistry::new()),
     })
 }
 
@@ -224,7 +222,6 @@ async fn metrics_endpoint_has_live_data() {
     let metrics = Arc::new(ExoMetrics::new().unwrap());
     metrics.ticks_total.with_label_values(&["completed"]).inc();
 
-    let metrics_dir = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
         inspector: vessel.inspector(),
         metrics,
@@ -242,8 +239,7 @@ async fn metrics_endpoint_has_live_data() {
         align_config: None,
         cognitive_engine: Arc::new(tokio::sync::Mutex::new(None)),
         vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
-        questions_dir: metrics_dir.path().join("questions"),
-        answers_dir: metrics_dir.path().join("answers"),
+        signal_registry: Arc::new(worldinterface_connector::SignalRegistry::new()),
     });
     let app = build_router(state);
 
