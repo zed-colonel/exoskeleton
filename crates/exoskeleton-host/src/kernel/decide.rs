@@ -1361,4 +1361,54 @@ mod tests {
         assert_eq!(result.actions.len(), 1);
         assert_eq!(result.actions[0].tool_name, "fs.write");
     }
+
+    // T31: Virtual tools appear in decide prompt; signal primitives excluded
+    #[test]
+    fn virtual_tools_in_decide_prompt() {
+        // Case 1: observatory_url = None → agent.ask_user present, peer.resolve absent
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel(dir.path());
+        assert!(kernel.observatory_url.is_none());
+
+        let desc = build_tools_description(&kernel);
+        assert!(
+            desc.contains("agent.ask_user"),
+            "expected agent.ask_user in tools description, got: {desc}"
+        );
+        assert!(
+            !desc.contains("peer.resolve"),
+            "peer.resolve should be excluded when observatory_url is None, got: {desc}"
+        );
+        assert!(
+            !desc.contains("signal.await"),
+            "signal.await should never appear in tools description, got: {desc}"
+        );
+        assert!(
+            !desc.contains("signal.emit"),
+            "signal.emit should never appear in tools description, got: {desc}"
+        );
+
+        // Case 2: observatory_url = Some → peer.resolve included
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut kernel2 = test_kernel(dir2.path());
+        kernel2.observatory_url = Some("http://observatory:8080".into());
+
+        let desc2 = build_tools_description(&kernel2);
+        assert!(
+            desc2.contains("agent.ask_user"),
+            "expected agent.ask_user in tools description, got: {desc2}"
+        );
+        assert!(
+            desc2.contains("peer.resolve"),
+            "expected peer.resolve when observatory_url is set, got: {desc2}"
+        );
+        assert!(
+            !desc2.contains("signal.await"),
+            "signal.await should never appear in tools description, got: {desc2}"
+        );
+        assert!(
+            !desc2.contains("signal.emit"),
+            "signal.emit should never appear in tools description, got: {desc2}"
+        );
+    }
 }
