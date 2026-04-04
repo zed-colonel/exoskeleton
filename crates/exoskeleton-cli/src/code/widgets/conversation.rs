@@ -1,0 +1,447 @@
+//! Conversation model and scrollable block list widget.
+//!
+//! The conversation is rendered as a vertical list of `Block` items — each
+//! representing a user message, agent text, tool call, or system note. This
+//! module owns the data model (`Block`, `ConversationState`) and the ratatui
+//! widget that renders them as plain text (S1). Markdown rendering is added
+//! in S2.
+
+use chrono::{DateTime, Utc};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block as RatatuiBlock, Borders, Paragraph, Widget, Wrap},
+};
+
+/// A single visual element in the conversation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Block {
+    /// Operator's message.
+    UserMessage {
+        text: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// Agent's reasoning/response text (plain text in S1, markdown spans in S2).
+    AgentText { text: String },
+    /// Tool call with result.
+    ToolCall {
+        tool_name: String,
+        args_summary: String,
+        outcome: ToolOutcome,
+        collapsed: bool,
+    },
+    /// System notification (tick boundary, mode change, completion).
+    SystemNote {
+        text: String,
+        severity: NoteSeverity,
+    },
+}
+
+/// Outcome of a tool invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolOutcome {
+    /// Tool completed normally.
+    Success,
+    /// Tool returned an error.
+    Error(String),
+    /// Tool execution in progress.
+    Pending,
+}
+
+/// Severity level for system notes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteSeverity {
+    /// Informational (tick boundaries, mode transitions).
+    Info,
+    /// Warning (budget warnings, reconnection notices).
+    Warning,
+}
+
+/// State for the conversation display area.
+#[derive(Debug)]
+pub struct ConversationState {
+    /// All blocks in the conversation, in chronological order.
+    blocks: Vec<Block>,
+    /// Vertical scroll offset (in rendered lines from the top).
+    scroll_offset: u16,
+    /// Whether auto-scroll is enabled (scroll to bottom on new content).
+    auto_scroll: bool,
+    /// Whether there is new content below the current scroll position.
+    has_new_content_below: bool,
+    /// Total rendered height from last render pass (for scroll calculations).
+    last_rendered_height: u16,
+    /// Viewport height from last render pass.
+    last_viewport_height: u16,
+}
+
+impl ConversationState {
+    /// Create a new empty conversation state.
+    pub fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            scroll_offset: 0,
+            auto_scroll: true,
+            has_new_content_below: false,
+            last_rendered_height: 0,
+            last_viewport_height: 0,
+        }
+    }
+
+    /// Add a block to the conversation.
+    pub fn add_block(&mut self, block: Block) {
+        self.blocks.push(block);
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        } else {
+            self.has_new_content_below = true;
+        }
+    }
+
+    /// Number of blocks in the conversation.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Whether the conversation is empty.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Get an immutable reference to all blocks.
+    pub fn blocks(&self) -> &[Block] {
+        &self.blocks
+    }
+
+    /// Whether auto-scroll is currently active.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn auto_scroll(&self) -> bool {
+        self.auto_scroll
+    }
+
+    /// Whether there is new content below the visible area.
+    pub fn has_new_content_below(&self) -> bool {
+        self.has_new_content_below
+    }
+
+    /// Scroll up by the given number of lines.
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.auto_scroll = false;
+    }
+
+    /// Scroll down by the given number of lines.
+    pub fn scroll_down(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        let max = self
+            .last_rendered_height
+            .saturating_sub(self.last_viewport_height);
+        if self.scroll_offset >= max {
+            self.scroll_offset = max;
+            self.auto_scroll = true;
+            self.has_new_content_below = false;
+        }
+    }
+
+    /// Jump to the bottom and re-enable auto-scroll.
+    pub fn jump_to_bottom(&mut self) {
+        let max = self
+            .last_rendered_height
+            .saturating_sub(self.last_viewport_height);
+        self.scroll_offset = max;
+        self.auto_scroll = true;
+        self.has_new_content_below = false;
+    }
+
+    /// Scroll to bottom (used internally when auto-scroll is on).
+    fn scroll_to_bottom(&mut self) {
+        let max = self
+            .last_rendered_height
+            .saturating_sub(self.last_viewport_height);
+        self.scroll_offset = max;
+        self.has_new_content_below = false;
+    }
+
+    /// Update rendered dimensions after a render pass.
+    pub fn set_rendered_dimensions(&mut self, total_height: u16, viewport_height: u16) {
+        self.last_rendered_height = total_height;
+        self.last_viewport_height = viewport_height;
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        }
+    }
+}
+
+impl Default for ConversationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Render a block to ratatui Lines (plain text for S1).
+fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
+    let _ = width;
+    match block {
+        Block::UserMessage { text, timestamp } => {
+            let time_str = timestamp.format("%H:%M").to_string();
+            let header = Line::from(vec![Span::styled(
+                format!(" You ({time_str}) "),
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+            let mut lines = vec![Line::from(""), header];
+            for line in text.lines() {
+                lines.push(Line::from(format!("  {line}")));
+            }
+            lines.push(Line::from(""));
+            lines
+        }
+        Block::AgentText { text } => {
+            let header = Line::from(vec![Span::styled(
+                " Agent ",
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+            let mut lines = vec![Line::from(""), header];
+            for line in text.lines() {
+                lines.push(Line::from(format!("  {line}")));
+            }
+            lines.push(Line::from(""));
+            lines
+        }
+        Block::ToolCall {
+            tool_name,
+            args_summary,
+            outcome,
+            collapsed: _,
+        } => {
+            let (icon, color) = match outcome {
+                ToolOutcome::Success => ("OK", Color::Green),
+                ToolOutcome::Error(_) => ("ERR", Color::Red),
+                ToolOutcome::Pending => ("...", Color::Yellow),
+            };
+            let line = Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    tool_name.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {args_summary} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("[{icon}]"), Style::default().fg(color)),
+            ]);
+            vec![line]
+        }
+        Block::SystemNote { text, severity } => {
+            let color = match severity {
+                NoteSeverity::Info => Color::DarkGray,
+                NoteSeverity::Warning => Color::Yellow,
+            };
+            vec![Line::from(vec![Span::styled(
+                format!("  --- {text} ---"),
+                Style::default().fg(color),
+            )])]
+        }
+    }
+}
+
+/// Widget for rendering the conversation area.
+pub struct ConversationWidget<'a> {
+    state: &'a ConversationState,
+}
+
+impl<'a> ConversationWidget<'a> {
+    /// Create a new conversation widget.
+    pub fn new(state: &'a ConversationState) -> Self {
+        Self { state }
+    }
+}
+
+impl<'a> Widget for ConversationWidget<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let border = RatatuiBlock::default().borders(Borders::NONE);
+        let inner = border.inner(area);
+
+        let mut all_lines: Vec<Line<'static>> = Vec::new();
+        for block in self.state.blocks() {
+            let block_lines = render_block_lines(block, inner.width);
+            all_lines.extend(block_lines);
+        }
+
+        let paragraph = Paragraph::new(all_lines)
+            .scroll((self.state.scroll_offset, 0))
+            .wrap(Wrap { trim: false });
+        paragraph.render(inner, buf);
+
+        if self.state.has_new_content_below() && area.width > 20 {
+            let indicator = " v New content below v ";
+            let x = area.x + area.width.saturating_sub(indicator.len() as u16 + 1);
+            let y = area.y + area.height.saturating_sub(1);
+            if y >= area.y && x >= area.x {
+                buf.set_string(
+                    x,
+                    y,
+                    indicator,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+    }
+}
+
+/// Estimate the total rendered height for the conversation content.
+///
+/// This is an approximation used for scroll calculations. The actual height
+/// depends on terminal width and text wrapping, but for plain text in S1
+/// counting newlines is sufficient.
+pub fn estimate_rendered_height(state: &ConversationState, width: u16) -> u16 {
+    let mut total: u16 = 0;
+    for block in state.blocks() {
+        let lines = render_block_lines(block, width);
+        total = total.saturating_add(lines.len() as u16);
+    }
+    total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TUI-T9: conversation_state_add_block_increments_len ──
+
+    #[test]
+    fn conversation_state_add_block_increments_len() {
+        let mut state = ConversationState::new();
+        assert_eq!(state.len(), 0);
+        assert!(state.is_empty());
+
+        state.add_block(Block::SystemNote {
+            text: "test".into(),
+            severity: NoteSeverity::Info,
+        });
+        assert_eq!(state.len(), 1);
+        assert!(!state.is_empty());
+
+        state.add_block(Block::AgentText {
+            text: "hello".into(),
+        });
+        assert_eq!(state.len(), 2);
+    }
+
+    // ── TUI-T10: auto_scroll_pauses_on_scroll_up ──
+
+    #[test]
+    fn auto_scroll_pauses_on_scroll_up() {
+        let mut state = ConversationState::new();
+        assert!(state.auto_scroll());
+
+        state.scroll_up(5);
+        assert!(!state.auto_scroll());
+    }
+
+    // ── TUI-T11: auto_scroll_resumes_on_jump_to_bottom ──
+
+    #[test]
+    fn auto_scroll_resumes_on_jump_to_bottom() {
+        let mut state = ConversationState::new();
+        state.set_rendered_dimensions(100, 20);
+
+        state.scroll_up(10);
+        assert!(!state.auto_scroll());
+
+        state.jump_to_bottom();
+        assert!(state.auto_scroll());
+        assert!(!state.has_new_content_below());
+    }
+
+    // ── TUI-T17: block_from_inner_loop_step_with_detail ──
+
+    #[test]
+    fn block_from_inner_loop_step_with_detail() {
+        let block = Block::ToolCall {
+            tool_name: "code.edit".into(),
+            args_summary: "src/main.rs".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+        };
+        match &block {
+            Block::ToolCall {
+                tool_name,
+                args_summary,
+                outcome,
+                ..
+            } => {
+                assert_eq!(tool_name, "code.edit");
+                assert_eq!(args_summary, "src/main.rs");
+                assert_eq!(*outcome, ToolOutcome::Success);
+            }
+            _ => panic!("expected ToolCall block"),
+        }
+    }
+
+    // ── TUI-T18: block_from_action_executed ──
+
+    #[test]
+    fn block_from_action_executed() {
+        let summary = "shell.exec: cargo test (exit 0)";
+        let block = Block::ToolCall {
+            tool_name: "shell.exec".into(),
+            args_summary: "cargo test".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+        };
+        match &block {
+            Block::ToolCall {
+                tool_name, outcome, ..
+            } => {
+                assert_eq!(tool_name, "shell.exec");
+                assert_eq!(*outcome, ToolOutcome::Success);
+                assert!(summary.contains("shell.exec"));
+            }
+            _ => panic!("expected ToolCall block"),
+        }
+    }
+
+    #[test]
+    fn new_content_below_set_when_not_auto_scrolling() {
+        let mut state = ConversationState::new();
+        state.set_rendered_dimensions(100, 20);
+
+        state.scroll_up(5);
+        assert!(!state.auto_scroll());
+
+        state.add_block(Block::SystemNote {
+            text: "test".into(),
+            severity: NoteSeverity::Info,
+        });
+
+        assert!(state.has_new_content_below());
+    }
+
+    #[test]
+    fn scroll_down_past_bottom_reenables_auto_scroll() {
+        let mut state = ConversationState::new();
+        state.set_rendered_dimensions(100, 20);
+
+        state.scroll_up(5);
+        assert!(!state.auto_scroll());
+
+        state.scroll_down(200);
+        assert!(state.auto_scroll());
+        assert!(!state.has_new_content_below());
+    }
+}

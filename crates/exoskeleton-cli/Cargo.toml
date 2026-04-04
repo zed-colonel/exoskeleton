@@ -28,9 +28,12 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 dialoguer = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+ratatui = { workspace = true }
+tui-textarea = { workspace = true }
+directories = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "io-util"] }

@@ -300,6 +300,33 @@ impl DaemonClient {
         Ok(value)
     }
 
+    /// GET /api/v1/conversations?limit=N -> Vec<Conversation>.
+    pub async fn conversations(&self, limit: usize) -> Result<Vec<serde_json::Value>, CliError> {
+        let path = format!("/api/v1/conversations?limit={limit}");
+        let resp = self.get_raw(&path).await?;
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// GET /api/v1/conversations/:id/messages?limit=N -> Vec<ConversationMessage>.
+    pub async fn conversation_messages(
+        &self,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let path = format!("/api/v1/conversations/{conversation_id}/messages?limit={limit}");
+        let resp = self.get_raw(&path).await?;
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// Return the base URL this client targets.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     // ── Internal helpers ──
 
     /// Issue a GET and return status + body text. Errors on non-2xx.
@@ -444,5 +471,24 @@ mod tests {
             matches!(result2, Err(CliError::DaemonError { status: 500, .. })),
             "expected DaemonError for 500 on allow_404 path, got: {result2:?}"
         );
+    }
+
+    // ── TUI-T21: conversations_endpoint_path ──
+
+    #[test]
+    fn conversations_endpoint_path() {
+        let client = DaemonClient::new("http://localhost:7600");
+        assert_eq!(client.base_url(), "http://localhost:7600");
+
+        let client2 = DaemonClient::new("http://localhost:7600/");
+        assert_eq!(client2.base_url(), "http://localhost:7600");
+    }
+
+    // ── TUI-T22: conversation_messages_endpoint_path ──
+
+    #[test]
+    fn conversation_messages_endpoint_path() {
+        let client = DaemonClient::new("https://example.com:8080/");
+        assert_eq!(client.base_url(), "https://example.com:8080");
     }
 }
