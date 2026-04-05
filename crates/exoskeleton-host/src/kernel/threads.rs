@@ -86,6 +86,7 @@ pub fn execute_thread(
         max_output_tokens: thread.token_budget / 4,
         temperature: Some(0.7),
         stop_sequences: vec![],
+        stream: false,
     };
 
     // 5. Unified LLM call (H-1 pattern, E8-S1)

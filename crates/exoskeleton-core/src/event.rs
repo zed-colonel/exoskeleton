@@ -109,6 +109,9 @@ pub enum EventType {
     PolicyApprovalGranted,
     /// Vessel mode transitioned between normal/planning/executing.
     PlanModeTransition,
+    /// Incremental text delta from an LLM streaming response.
+    /// Carries a single token or chunk of tokens. High-frequency event.
+    LlmTextDelta,
     /// An error occurred.
     Error,
 }
@@ -148,6 +151,9 @@ pub struct LiveEvent {
     /// Diff summary placeholder. Populated in E9-S2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_summary: Option<DiffSummary>,
+    /// Incremental text chunk from LLM streaming. Present only for LlmTextDelta events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_delta: Option<String>,
 }
 
 impl LiveEvent {
@@ -164,6 +170,7 @@ impl LiveEvent {
             policy_detail: None,
             plan_mode_detail: None,
             diff_summary: None,
+            text_delta: None,
         }
     }
 }
@@ -305,6 +312,7 @@ mod tests {
             EventType::PolicyApprovalRequired,
             EventType::PolicyApprovalGranted,
             EventType::PlanModeTransition,
+            EventType::LlmTextDelta,
             EventType::Error,
         ];
         for event_type in &variants {
@@ -338,6 +346,14 @@ mod tests {
         assert_eq!(json, "\"vessel_response_sent\"");
         let parsed: EventType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, EventType::VesselResponseSent);
+    }
+
+    #[test]
+    fn event_type_llm_text_delta_serializes() {
+        let json = serde_json::to_string(&EventType::LlmTextDelta).unwrap();
+        assert_eq!(json, "\"llm_text_delta\"");
+        let parsed: EventType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, EventType::LlmTextDelta);
     }
 
     #[test]
@@ -440,6 +456,32 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("tick_number"));
         assert!(!obj.contains_key("snapshot"));
+    }
+
+    #[test]
+    fn live_event_text_delta_field_round_trip() {
+        let event = LiveEvent {
+            event_type: EventType::LlmTextDelta,
+            summary: String::new(),
+            text_delta: Some("Hello".into()),
+            ..LiveEvent::new(Some(42))
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.text_delta, Some("Hello".into()));
+        assert_eq!(parsed.event_type, EventType::LlmTextDelta);
+    }
+
+    #[test]
+    fn live_event_text_delta_none_omitted() {
+        let event = LiveEvent {
+            event_type: EventType::TickStarted,
+            summary: "Tick started".into(),
+            ..LiveEvent::new(Some(1))
+        };
+        let value: serde_json::Value = serde_json::to_value(&event).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(!obj.contains_key("text_delta"));
     }
 
     // ── T-4: EventLedger::by_type is object-safe ──
@@ -600,5 +642,6 @@ mod tests {
         assert!(event.policy_detail.is_none());
         assert!(event.plan_mode_detail.is_none());
         assert!(event.diff_summary.is_none());
+        assert!(event.text_delta.is_none());
     }
 }

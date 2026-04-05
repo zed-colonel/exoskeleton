@@ -113,6 +113,7 @@ pub fn test_llm_request() -> LlmRequest {
         max_output_tokens: 256,
         temperature: Some(0.0),
         stop_sequences: vec![],
+        stream: false,
     }
 }
 

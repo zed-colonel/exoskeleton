@@ -160,6 +160,7 @@ async fn verify_connectivity(llm_config: &LlmConfig) -> Result<(), CliError> {
         max_output_tokens: 16,
         temperature: Some(0.0),
         stop_sequences: vec![],
+        stream: false,
     };
 
     print!("  Connecting to LLM backend... ");
@@ -222,6 +223,7 @@ async fn extract_identity(
         max_output_tokens: 512,
         temperature: Some(0.0),
         stop_sequences: vec![],
+        stream: false,
     };
 
     let response = direct_llm_call(llm_config, request)

@@ -14,6 +14,7 @@ use super::app::{App, UiMode};
 use super::widgets::activity::ActivityWidget;
 use super::widgets::approval::ApprovalWidget;
 use super::widgets::conversation::{estimate_rendered_height, ConversationWidget};
+use super::widgets::debug_banner::DebugBannerWidget;
 use super::widgets::input::InputWidget;
 use super::widgets::status_bar::StatusBarWidget;
 
@@ -22,6 +23,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
     let status_height: u16 = 1;
+    let debug_height: u16 = DebugBannerWidget::height(&app.debug, area.width);
     let activity_height: u16 = if ActivityWidget::is_visible(&app.activity) {
         1
     } else {
@@ -40,6 +42,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
             (base + plan_lines).min(
                 area.height.saturating_sub(
                     status_height
+                        .saturating_add(debug_height)
                         .saturating_add(activity_height)
                         .saturating_add(3),
                 ),
@@ -50,7 +53,8 @@ pub fn view(app: &mut App, frame: &mut Frame) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(status_height),
+            Constraint::Length(debug_height),
             Constraint::Min(3),
             Constraint::Length(activity_height),
             Constraint::Length(bottom_height),
@@ -58,18 +62,29 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         .split(area);
 
     let status_area = layout[0];
-    let conversation_area = layout[1];
-    let activity_area = layout[2];
-    let bottom_area = layout[3];
+    let debug_area = layout[1];
+    let conversation_area = layout[2];
+    let activity_area = layout[3];
+    let bottom_area = layout[4];
 
-    let rendered_height = estimate_rendered_height(&app.conversation, conversation_area.width);
+    let rendered_height = estimate_rendered_height(
+        &app.conversation,
+        conversation_area.width,
+        app.debug.visible,
+    );
     app.conversation
         .set_rendered_dimensions(rendered_height, conversation_area.height);
 
     let status_bar = StatusBarWidget::new(&app.status, &app.connection, &app.activity);
     frame.render_widget(status_bar, status_area);
 
-    let conversation = ConversationWidget::new(&app.conversation);
+    if debug_height > 0 {
+        let debug_banner = DebugBannerWidget::new(&app.debug, area.width);
+        frame.render_widget(debug_banner, debug_area);
+    }
+
+    let conversation =
+        ConversationWidget::new(&app.conversation).with_debug_mode(app.debug.visible);
     frame.render_widget(conversation, conversation_area);
 
     if activity_height > 0 {
@@ -185,5 +200,55 @@ mod tests {
                 view(&mut app, frame);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn view_renders_with_debug_banner() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.debug.visible = true;
+        app.debug.tick_number = 42;
+        app.debug.step_count = "3/25 steps".into();
+        app.debug.token_count = "4,231/50,000 tok".into();
+
+        terminal
+            .draw(|frame| {
+                view(&mut app, frame);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let debug_line: String = (0..120)
+            .map(|x| buffer[(x, 1)].symbol().to_string())
+            .collect();
+        assert!(
+            debug_line.contains("TICK #42"),
+            "debug banner should show tick, got: {debug_line}"
+        );
+    }
+
+    #[test]
+    fn view_debug_banner_hidden_when_toggled_off() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.debug.visible = false;
+        app.debug.tick_number = 42;
+
+        terminal
+            .draw(|frame| {
+                view(&mut app, frame);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let line1: String = (0..120)
+            .map(|x| buffer[(x, 1)].symbol().to_string())
+            .collect();
+        assert!(
+            !line1.contains("TICK #42"),
+            "debug banner should be hidden, but line 1 got: {line1}"
+        );
     }
 }

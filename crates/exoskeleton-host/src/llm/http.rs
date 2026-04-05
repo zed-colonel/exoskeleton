@@ -33,6 +33,20 @@ pub trait LlmHttpBackend: Send + Sync {
         request: &LlmRequest,
         cancellation: &CancellationToken,
     ) -> Result<LlmResponse, ExoError>;
+
+    /// Send a streaming request, invoking `on_delta` for each text chunk.
+    ///
+    /// The default implementation falls back to `call()` (non-streaming).
+    fn call_streaming(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<LlmResponse, ExoError> {
+        let _ = on_delta;
+        self.call(client, request, cancellation)
+    }
 }
 
 // ── Sync HTTP helper ──
@@ -43,6 +57,175 @@ pub trait LlmHttpBackend: Send + Sync {
 /// We use `Handle::current().block_on()` to bridge async reqwest calls.
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     tokio::runtime::Handle::current().block_on(fut)
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+// ── SSE Streaming Helpers ──
+
+/// Parsed event from an OpenAI-compatible SSE stream.
+#[derive(Debug, Clone, PartialEq)]
+enum OpenAiSseEvent {
+    Delta(String),
+    Final {
+        finish_reason: Option<String>,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+    },
+    Done,
+    Skip,
+}
+
+/// Parsed event from an Anthropic SSE stream.
+#[derive(Debug, Clone, PartialEq)]
+enum AnthropicSseEvent {
+    MessageStart {
+        model: Option<String>,
+        input_tokens: Option<u64>,
+    },
+    TextDelta(String),
+    MessageDelta {
+        stop_reason: Option<String>,
+        output_tokens: Option<u64>,
+    },
+    Done,
+    Skip,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiSseChunk {
+    choices: Vec<OpenAiSseChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiSseChoice {
+    #[serde(default)]
+    delta: OpenAiSseDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiSseDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseContentDelta {
+    delta: AnthropicSseTextDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseTextDelta {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseMessageDelta {
+    delta: AnthropicSseMessageDeltaInner,
+    #[serde(default)]
+    usage: Option<AnthropicSseOutputUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseMessageDeltaInner {
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseOutputUsage {
+    output_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseMessageStart {
+    message: AnthropicSseMessageStartInner,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseMessageStartInner {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<AnthropicSseStartUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicSseStartUsage {
+    input_tokens: u64,
+}
+
+fn parse_openai_sse_line(line: &str) -> OpenAiSseEvent {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return OpenAiSseEvent::Skip;
+    }
+    let data = match line.strip_prefix("data:") {
+        Some(d) => d.trim(),
+        None => return OpenAiSseEvent::Skip,
+    };
+    if data == "[DONE]" {
+        return OpenAiSseEvent::Done;
+    }
+    let chunk: OpenAiSseChunk = match serde_json::from_str(data) {
+        Ok(c) => c,
+        Err(_) => return OpenAiSseEvent::Skip,
+    };
+    let choice = match chunk.choices.first() {
+        Some(c) => c,
+        None => return OpenAiSseEvent::Skip,
+    };
+    if let Some(ref content) = choice.delta.content {
+        if !content.is_empty() {
+            return OpenAiSseEvent::Delta(content.clone());
+        }
+    }
+    if choice.finish_reason.is_some() || chunk.usage.is_some() {
+        let (prompt_tokens, completion_tokens) = chunk.usage.map_or((None, None), |u| {
+            (Some(u.prompt_tokens), Some(u.completion_tokens))
+        });
+        return OpenAiSseEvent::Final {
+            finish_reason: choice.finish_reason.clone(),
+            prompt_tokens,
+            completion_tokens,
+        };
+    }
+    OpenAiSseEvent::Skip
+}
+
+fn parse_anthropic_sse_event(event_type: &str, data: &str) -> AnthropicSseEvent {
+    match event_type {
+        "content_block_delta" => match serde_json::from_str::<AnthropicSseContentDelta>(data) {
+            Ok(parsed) => match parsed.delta.text {
+                Some(text) if !text.is_empty() => AnthropicSseEvent::TextDelta(text),
+                _ => AnthropicSseEvent::Skip,
+            },
+            Err(_) => AnthropicSseEvent::Skip,
+        },
+        "message_delta" => match serde_json::from_str::<AnthropicSseMessageDelta>(data) {
+            Ok(parsed) => AnthropicSseEvent::MessageDelta {
+                stop_reason: parsed.delta.stop_reason,
+                output_tokens: parsed.usage.map(|u| u.output_tokens),
+            },
+            Err(_) => AnthropicSseEvent::Skip,
+        },
+        "message_start" => match serde_json::from_str::<AnthropicSseMessageStart>(data) {
+            Ok(parsed) => AnthropicSseEvent::MessageStart {
+                model: parsed.message.model,
+                input_tokens: parsed.message.usage.map(|u| u.input_tokens),
+            },
+            Err(_) => AnthropicSseEvent::Skip,
+        },
+        "message_stop" => AnthropicSseEvent::Done,
+        _ => AnthropicSseEvent::Skip,
+    }
 }
 
 // ── OpenAI-Compatible Backend ──
@@ -113,6 +296,7 @@ impl OpenAiCompatBackend {
             } else {
                 Some(request.stop_sequences.clone())
             },
+            stream: request.stream,
         }
     }
 }
@@ -129,6 +313,8 @@ struct OpenAiRequest {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    stream: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -255,6 +441,148 @@ impl LlmHttpBackend for OpenAiCompatBackend {
             },
         })
     }
+
+    fn call_streaming(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<LlmResponse, ExoError> {
+        if !request.stream {
+            return self.call(client, request, cancellation);
+        }
+        if cancellation.is_cancelled() {
+            return Err(ExoError::LlmInvocation("cancelled before HTTP call".into()));
+        }
+
+        let body = self.build_request_body(request);
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
+
+        let mut req = client.post(&url).json(&body);
+        if let Some(ref key) = self.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        let response = block_on(async { req.send().await }).map_err(|e| {
+            if e.is_timeout() {
+                ExoError::LlmInvocation(format!("timeout: {e}"))
+            } else if e.is_connect() {
+                ExoError::LlmInvocation(format!("connection refused: {e}"))
+            } else {
+                ExoError::LlmInvocation(format!("HTTP error: {e}"))
+            }
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = block_on(response.text()).unwrap_or_default();
+            return Err(ExoError::LlmInvocation(format!(
+                "{}: {}",
+                status.as_u16(),
+                body_text
+            )));
+        }
+
+        let mut content_buffer = String::new();
+        let mut finish_reason: Option<String> = None;
+        let mut tokens_in = 0;
+        let mut tokens_out = 0;
+
+        block_on(async {
+            use futures_util::StreamExt;
+
+            let mut stream = response.bytes_stream();
+            let mut line_buffer = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                if cancellation.is_cancelled() {
+                    return Err(ExoError::LlmInvocation("cancelled during streaming".into()));
+                }
+
+                let chunk = chunk_result
+                    .map_err(|e| ExoError::LlmInvocation(format!("stream read error: {e}")))?;
+                let text = String::from_utf8_lossy(&chunk);
+                line_buffer.push_str(&text);
+
+                let mut stream_done = false;
+                while let Some(newline_pos) = line_buffer.find('\n') {
+                    let line = line_buffer[..newline_pos].to_string();
+                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+
+                    match parse_openai_sse_line(&line) {
+                        OpenAiSseEvent::Delta(text) => {
+                            content_buffer.push_str(&text);
+                            on_delta(&text);
+                        }
+                        OpenAiSseEvent::Final {
+                            finish_reason: fr,
+                            prompt_tokens,
+                            completion_tokens,
+                        } => {
+                            finish_reason = fr;
+                            if let Some(t) = prompt_tokens {
+                                tokens_in = t;
+                            }
+                            if let Some(t) = completion_tokens {
+                                tokens_out = t;
+                            }
+                        }
+                        OpenAiSseEvent::Done => {
+                            stream_done = true;
+                            break;
+                        }
+                        OpenAiSseEvent::Skip => {}
+                    }
+                }
+
+                if stream_done {
+                    break;
+                }
+            }
+            Ok(())
+        })?;
+
+        let stop_reason = match finish_reason.as_deref() {
+            Some("length") => StopReason::MaxTokens,
+            Some("stop_sequence") => StopReason::StopSequence,
+            _ => StopReason::EndTurn,
+        };
+
+        if tokens_in == 0 && tokens_out == 0 {
+            let in_chars: usize = request
+                .messages
+                .iter()
+                .map(|m| m.content.len())
+                .sum::<usize>()
+                + request.system_prompt.as_deref().map_or(0, |s| s.len());
+            tokens_in = (in_chars / 4) as u64;
+            tokens_out = (content_buffer.len() / 4) as u64;
+        }
+
+        let cost_estimate_cents = self
+            .api_key
+            .as_ref()
+            .and_then(|_| estimate_openai_cost(&self.model, tokens_in, tokens_out));
+
+        Ok(LlmResponse {
+            content: content_buffer,
+            model: self.model.clone(),
+            tokens_in,
+            tokens_out,
+            latency_ms: 0,
+            stop_reason,
+            cost_estimate_cents,
+            backend: if self.api_key.is_some() {
+                LlmBackend::Frontier
+            } else {
+                LlmBackend::Local
+            },
+        })
+    }
 }
 
 // ── Anthropic Backend ──
@@ -320,6 +648,7 @@ impl AnthropicBackend {
             } else {
                 Some(request.stop_sequences.clone())
             },
+            stream: request.stream,
         }
     }
 }
@@ -335,6 +664,8 @@ struct AnthropicRequest {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    stream: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -439,6 +770,151 @@ impl LlmHttpBackend for AnthropicBackend {
             tokens_in: parsed.usage.input_tokens,
             tokens_out: parsed.usage.output_tokens,
             latency_ms,
+            stop_reason,
+            cost_estimate_cents: Some(cost_estimate_cents),
+            backend: LlmBackend::Frontier,
+        })
+    }
+
+    fn call_streaming(
+        &self,
+        client: &reqwest::Client,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<LlmResponse, ExoError> {
+        if !request.stream {
+            return self.call(client, request, cancellation);
+        }
+        if cancellation.is_cancelled() {
+            return Err(ExoError::LlmInvocation("cancelled before HTTP call".into()));
+        }
+
+        let body = self.build_request_body(request);
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+
+        let response = block_on(async {
+            client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+        })
+        .map_err(|e| {
+            if e.is_timeout() {
+                ExoError::LlmInvocation(format!("timeout: {e}"))
+            } else if e.is_connect() {
+                ExoError::LlmInvocation(format!("connection refused: {e}"))
+            } else {
+                ExoError::LlmInvocation(format!("HTTP error: {e}"))
+            }
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = block_on(response.text()).unwrap_or_default();
+            return Err(ExoError::LlmInvocation(format!(
+                "{}: {}",
+                status.as_u16(),
+                body_text
+            )));
+        }
+
+        let mut content_buffer = String::new();
+        let mut stop_reason_str: Option<String> = None;
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+        let mut model_name: Option<String> = None;
+
+        block_on(async {
+            use futures_util::StreamExt;
+
+            let mut stream = response.bytes_stream();
+            let mut line_buffer = String::new();
+            let mut current_event_type = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                if cancellation.is_cancelled() {
+                    return Err(ExoError::LlmInvocation("cancelled during streaming".into()));
+                }
+
+                let chunk = chunk_result
+                    .map_err(|e| ExoError::LlmInvocation(format!("stream read error: {e}")))?;
+                let text = String::from_utf8_lossy(&chunk);
+                line_buffer.push_str(&text);
+
+                let mut stream_done = false;
+                while let Some(newline_pos) = line_buffer.find('\n') {
+                    let line = line_buffer[..newline_pos].trim().to_string();
+                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some(event_type) = line.strip_prefix("event: ") {
+                        current_event_type = event_type.trim().to_string();
+                        continue;
+                    }
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        match parse_anthropic_sse_event(&current_event_type, data.trim()) {
+                            AnthropicSseEvent::MessageStart {
+                                model,
+                                input_tokens: tokens,
+                            } => {
+                                model_name = model;
+                                if let Some(t) = tokens {
+                                    input_tokens = t;
+                                }
+                            }
+                            AnthropicSseEvent::TextDelta(text) => {
+                                content_buffer.push_str(&text);
+                                on_delta(&text);
+                            }
+                            AnthropicSseEvent::MessageDelta {
+                                stop_reason,
+                                output_tokens: tokens,
+                            } => {
+                                stop_reason_str = stop_reason;
+                                if let Some(t) = tokens {
+                                    output_tokens = t;
+                                }
+                            }
+                            AnthropicSseEvent::Done => {
+                                stream_done = true;
+                                break;
+                            }
+                            AnthropicSseEvent::Skip => {}
+                        }
+                        current_event_type.clear();
+                    }
+                }
+
+                if stream_done {
+                    break;
+                }
+            }
+            Ok(())
+        })?;
+
+        let stop_reason = match stop_reason_str.as_deref() {
+            Some("max_tokens") => StopReason::MaxTokens,
+            Some("stop_sequence") => StopReason::StopSequence,
+            _ => StopReason::EndTurn,
+        };
+
+        let resolved_model = model_name.unwrap_or_else(|| self.model.clone());
+        let cost_estimate_cents =
+            estimate_anthropic_cost(&resolved_model, input_tokens, output_tokens);
+
+        Ok(LlmResponse {
+            content: content_buffer,
+            model: resolved_model,
+            tokens_in: input_tokens,
+            tokens_out: output_tokens,
+            latency_ms: 0,
             stop_reason,
             cost_estimate_cents: Some(cost_estimate_cents),
             backend: LlmBackend::Frontier,
@@ -676,8 +1152,137 @@ mod tests {
     use exoskeleton_core::llm::LlmMessage;
 
     use super::*;
+    use crate::llm::mock::MockLlmBackend;
 
     // ── T-3: HTTP Client Layer ──
+
+    #[test]
+    fn parse_openai_sse_delta_extracts_content() {
+        let line = r#"data: {"choices":[{"delta":{"content":"Hello"},"index":0}]}"#;
+        let delta = parse_openai_sse_line(line);
+        assert_eq!(delta, OpenAiSseEvent::Delta("Hello".into()));
+    }
+
+    #[test]
+    fn parse_openai_sse_done_signal() {
+        let delta = parse_openai_sse_line("data: [DONE]");
+        assert_eq!(delta, OpenAiSseEvent::Done);
+    }
+
+    #[test]
+    fn parse_openai_sse_with_usage() {
+        let line = r#"data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+        let delta = parse_openai_sse_line(line);
+        match delta {
+            OpenAiSseEvent::Final {
+                finish_reason,
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                assert_eq!(finish_reason.as_deref(), Some("stop"));
+                assert_eq!(prompt_tokens, Some(10));
+                assert_eq!(completion_tokens, Some(5));
+            }
+            other => panic!("expected Final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openai_sse_empty_delta_ignored() {
+        let line = r#"data: {"choices":[{"delta":{},"index":0}]}"#;
+        let delta = parse_openai_sse_line(line);
+        assert_eq!(delta, OpenAiSseEvent::Skip);
+    }
+
+    #[test]
+    fn parse_anthropic_sse_content_block_delta() {
+        let event_type = "content_block_delta";
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let delta = parse_anthropic_sse_event(event_type, data);
+        assert_eq!(delta, AnthropicSseEvent::TextDelta("Hello".into()));
+    }
+
+    #[test]
+    fn parse_anthropic_sse_message_delta_stop_reason() {
+        let event_type = "message_delta";
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#;
+        let delta = parse_anthropic_sse_event(event_type, data);
+        match delta {
+            AnthropicSseEvent::MessageDelta {
+                stop_reason,
+                output_tokens,
+            } => {
+                assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+                assert_eq!(output_tokens, Some(5));
+            }
+            other => panic!("expected MessageDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_sse_message_stop() {
+        let delta = parse_anthropic_sse_event("message_stop", r#"{"type":"message_stop"}"#);
+        assert_eq!(delta, AnthropicSseEvent::Done);
+    }
+
+    #[test]
+    fn parse_anthropic_sse_message_start_extracts_input_tokens() {
+        let event_type = "message_start";
+        let data = r#"{"type":"message_start","message":{"model":"claude-sonnet-4-20250514","usage":{"input_tokens":25,"output_tokens":0}}}"#;
+        let delta = parse_anthropic_sse_event(event_type, data);
+        match delta {
+            AnthropicSseEvent::MessageStart {
+                model,
+                input_tokens,
+            } => {
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-20250514"));
+                assert_eq!(input_tokens, Some(25));
+            }
+            other => panic!("expected MessageStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_streaming_default_falls_back_to_call() {
+        let backend = OllamaNativeBackend::new("http://localhost:11434".into(), "test".into());
+        let _: &dyn LlmHttpBackend = &backend;
+
+        use exoskeleton_core::llm::{LlmBackend, StopReason};
+
+        let response = LlmResponse {
+            content: "streaming fallback".into(),
+            model: "mock".into(),
+            tokens_in: 10,
+            tokens_out: 5,
+            latency_ms: 50,
+            stop_reason: StopReason::EndTurn,
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        };
+        let mock = MockLlmBackend::new(response);
+        let client = reqwest::Client::new();
+        let token = CancellationToken::new();
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: None,
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hi".into(),
+            }],
+            max_output_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: true,
+        };
+
+        let deltas = std::sync::Mutex::new(Vec::new());
+        let result = mock.call_streaming(&client, &request, &token, &|chunk: &str| {
+            deltas.lock().unwrap().push(chunk.to_string());
+        });
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "streaming fallback");
+        assert!(deltas.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn openai_compat_request_format() {
@@ -696,6 +1301,7 @@ mod tests {
             max_output_tokens: 1024,
             temperature: Some(0.7),
             stop_sequences: vec!["</answer>".into()],
+            stream: false,
         };
         let body = backend.build_request_body(&request);
         assert_eq!(body.model, "llama3.2:latest");
@@ -740,6 +1346,7 @@ mod tests {
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
+            stream: false,
         };
         let body = backend.build_request_body(&request);
         // System prompt becomes the first message with role "system"
@@ -764,6 +1371,7 @@ mod tests {
             max_output_tokens: 2048,
             temperature: Some(0.5),
             stop_sequences: vec!["STOP".into()],
+            stream: false,
         };
         let body = backend.build_request_body(&request);
         assert_eq!(body.model, "claude-sonnet-4-20250514");
@@ -808,6 +1416,7 @@ mod tests {
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
+            stream: false,
         };
         let body = backend.build_request_body(&request);
         // System should be a top-level field
@@ -845,6 +1454,7 @@ mod tests {
             max_output_tokens: 1024,
             temperature: Some(0.8),
             stop_sequences: vec!["END".into()],
+            stream: false,
         };
 
         // The backend builds the request internally — we test via serialization format

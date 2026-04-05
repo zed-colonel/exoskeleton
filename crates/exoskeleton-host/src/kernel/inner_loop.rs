@@ -314,6 +314,7 @@ fn decide_lite(
         max_output_tokens: kernel.max_output_tokens,
         temperature: Some(0.3),
         stop_sequences: vec![],
+        stream: true,
     };
 
     // Use unified handler_direct_llm_call

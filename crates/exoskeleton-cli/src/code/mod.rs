@@ -8,6 +8,7 @@ pub mod app;
 pub mod connection;
 pub mod messages;
 pub mod render;
+pub mod session;
 pub mod view;
 pub mod widgets;
 
@@ -27,13 +28,13 @@ use tokio_tungstenite::{
     tungstenite::{Error as WsError, Message as WsMessage},
     MaybeTlsStream, WebSocketStream,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::client::{CliError, DaemonClient};
 
 use self::app::{App, Message, SideEffect};
 use self::connection::{
-    cli_principal_id, fetch_vessel_status, load_conversation_history, normalize_base_url,
+    cli_principal_id, fetch_vessel_status, load_conversation_history_for, normalize_base_url,
     websocket_url,
 };
 use self::messages::{from_crossterm_event, from_ws_text};
@@ -58,8 +59,35 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
         ))
     })?;
 
-    if let Err(e) = load_conversation_history(&client, &mut app, 50).await {
+    let mut saved_session = None;
+    if let Ok(Some(session_state)) = session::load_session(&_vessel_id) {
+        if session::is_session_recent(&session_state) {
+            app.debug.visible = session_state.debug_visible;
+            info!(
+                "resuming session for vessel {} (conversation: {})",
+                session_state.vessel_id, session_state.conversation_id
+            );
+            saved_session = Some(session_state);
+        }
+    }
+
+    if let Ok(prefs) = session::load_preferences(&_vessel_id) {
+        if !app.debug.visible {
+            app.debug.visible = prefs.debug_view;
+        }
+    }
+
+    let preferred_conversation_id = saved_session.as_ref().and_then(|state| {
+        (!state.conversation_id.is_empty()).then_some(state.conversation_id.as_str())
+    });
+    if let Err(e) =
+        load_conversation_history_for(&client, &mut app, 50, preferred_conversation_id).await
+    {
         warn!("failed to load conversation history: {e}");
+    }
+    if let Some(session_state) = saved_session {
+        app.conversation
+            .restore_scroll_offset(session_state.scroll_position);
     }
 
     enable_raw_mode().map_err(|e| CliError::Other(format!("failed to enable raw mode: {e}")))?;
@@ -197,8 +225,9 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                             {
                                 let _ = app::update(
                                     &mut app,
-                                    Message::MessageSent(Err(format!(
-                                        "Failed to submit answer: {e}"
+                                    Message::MessageSent(Err(rest_error_message(
+                                        "submit answer",
+                                        &e,
                                     ))),
                                 );
                             }
@@ -207,8 +236,9 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                             if let Err(e) = client.approve_plan(&plan_draft_id).await {
                                 let _ = app::update(
                                     &mut app,
-                                    Message::MessageSent(Err(format!(
-                                        "Failed to approve plan: {e}"
+                                    Message::MessageSent(Err(rest_error_message(
+                                        "approve plan",
+                                        &e,
                                     ))),
                                 );
                             }
@@ -217,8 +247,9 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                             if let Err(e) = client.cancel_plan().await {
                                 let _ = app::update(
                                     &mut app,
-                                    Message::MessageSent(Err(format!(
-                                        "Failed to cancel plan: {e}"
+                                    Message::MessageSent(Err(rest_error_message(
+                                        "cancel plan",
+                                        &e,
                                     ))),
                                 );
                             }
@@ -253,6 +284,76 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                             };
                             let _ =
                                 app::update(&mut app, Message::PlanStatusFetched(status_result));
+                        }
+                        SideEffect::SaveSession => {
+                            let state = session::SessionState {
+                                vessel_id: app.vessel_id.clone(),
+                                conversation_id: app.current_conversation_id.clone(),
+                                scroll_position: app.conversation.scroll_offset(),
+                                debug_visible: app.debug.visible,
+                                timestamp: chrono::Utc::now(),
+                            };
+                            let save_result = session::save_session(&state);
+                            let msg_result = match save_result {
+                                Ok(()) => Ok(()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = app::update(&mut app, Message::SessionSaved(msg_result));
+
+                            let prefs = session::Preferences {
+                                debug_view: app.debug.visible,
+                            };
+                            if let Err(e) = session::save_preferences(&app.vessel_id, &prefs) {
+                                warn!("failed to save preferences: {e}");
+                            }
+                        }
+                        SideEffect::SendCancellation => {
+                            let principal = connection::cli_principal_id();
+                            if let Err(e) = client
+                                .send_message(
+                                    &principal,
+                                    "[CANCEL] Operator requested interruption",
+                                )
+                                .await
+                            {
+                                warn!("failed to send cancellation: {e}");
+                            }
+                        }
+                        SideEffect::ReconnectWithBackoff => {
+                            let delays = connection::backoff_delays(10);
+                            let mut reconnected = false;
+                            for delay in delays {
+                                tokio::time::sleep(delay).await;
+                                match connect_async(&ws_url).await {
+                                    Ok((ws_stream, _)) => {
+                                        let (_, read) = ws_stream.split();
+                                        ws_read = Some(read);
+                                        let _ = app::update(
+                                            &mut app,
+                                            Message::ReconnectAttempt(Ok(())),
+                                        );
+                                        reconnected = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let _ = app::update(
+                                            &mut app,
+                                            Message::ReconnectAttempt(Err(e.to_string())),
+                                        );
+                                        if let Err(e) =
+                                            terminal.draw(|frame| view::view(&mut app, frame))
+                                        {
+                                            warn!("render error during reconnect: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                            if !reconnected {
+                                let _ = app::update(
+                                    &mut app,
+                                    Message::ReconnectAttempt(Err("max retries exceeded".into())),
+                                );
+                            }
                         }
                         SideEffect::Quit => {
                             break;
@@ -293,6 +394,18 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
         (Err(err), _) => Err(err),
         (Ok(()), Err(err)) => Err(err),
         (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn rest_error_message(action: &str, err: &CliError) -> String {
+    match err {
+        CliError::DaemonError { status: 404, .. } => {
+            format!("Failed to {action}: request expired or was not found (404)")
+        }
+        CliError::DaemonError { status, .. } if *status >= 500 => {
+            format!("Failed to {action}: daemon error ({status})")
+        }
+        _ => format!("Failed to {action}: {err}"),
     }
 }
 

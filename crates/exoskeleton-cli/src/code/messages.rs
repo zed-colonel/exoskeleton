@@ -25,7 +25,13 @@ pub fn from_crossterm_event(event: CrosstermEvent) -> Option<Message> {
 /// such as broadcast lag warnings).
 pub fn from_ws_text(text: &str) -> Option<Message> {
     match serde_json::from_str::<LiveEvent>(text) {
-        Ok(event) => Some(Message::WsEvent(event)),
+        Ok(event) => {
+            if event.event_type == exoskeleton_core::EventType::LlmTextDelta {
+                event.text_delta.clone().map(Message::TextDelta)
+            } else {
+                Some(Message::WsEvent(event))
+            }
+        }
         Err(_) => None,
     }
 }
@@ -84,6 +90,22 @@ mod tests {
                 assert_eq!(e.event_type, EventType::VesselForked);
             }
             other => panic!("expected WsEvent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_event_llm_text_delta_parses() {
+        let event = LiveEvent {
+            event_type: EventType::LlmTextDelta,
+            summary: String::new(),
+            text_delta: Some("Hello".into()),
+            ..LiveEvent::new(Some(42))
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let msg = from_ws_text(&json);
+        match msg {
+            Some(Message::TextDelta(delta)) => assert_eq!(delta, "Hello"),
+            other => panic!("expected TextDelta, got {other:?}"),
         }
     }
 

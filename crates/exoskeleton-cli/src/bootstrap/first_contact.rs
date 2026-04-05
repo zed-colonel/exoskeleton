@@ -128,6 +128,7 @@ async fn call_llm(
         max_output_tokens: 1024,
         temperature: Some(0.8),
         stop_sequences: vec![],
+        stream: false,
     };
 
     direct_llm_call(llm_config, request)

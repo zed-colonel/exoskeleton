@@ -764,7 +764,9 @@ mod tests {
         let lines = render_block_lines(&block, 80, false);
         assert!(!lines.is_empty());
         let has_cyan = lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.style.fg == Some(Color::Cyan))
+            line.spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Cyan))
         });
         assert!(has_cyan, "Insight should render with Cyan color");
     }
@@ -869,8 +871,14 @@ mod tests {
     #[test]
     fn focus_prev_from_none_selects_last() {
         let mut state = ConversationState::new();
-        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
-        state.add_block(Block::SystemNote { text: "b".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
+        state.add_block(Block::SystemNote {
+            text: "b".into(),
+            severity: NoteSeverity::Info,
+        });
         assert_eq!(state.focused_block(), None);
         state.focus_prev();
         assert_eq!(state.focused_block(), Some(1));
@@ -879,8 +887,14 @@ mod tests {
     #[test]
     fn focus_next_from_none_selects_first() {
         let mut state = ConversationState::new();
-        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
-        state.add_block(Block::SystemNote { text: "b".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
+        state.add_block(Block::SystemNote {
+            text: "b".into(),
+            severity: NoteSeverity::Info,
+        });
         state.focus_next();
         assert_eq!(state.focused_block(), Some(0));
     }
@@ -888,7 +902,10 @@ mod tests {
     #[test]
     fn focus_prev_clamps_at_zero() {
         let mut state = ConversationState::new();
-        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
         state.set_focused_block(Some(0));
         state.focus_prev();
         assert_eq!(state.focused_block(), Some(0));
@@ -897,7 +914,10 @@ mod tests {
     #[test]
     fn focus_next_clamps_at_last() {
         let mut state = ConversationState::new();
-        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
         state.set_focused_block(Some(0));
         state.focus_next();
         assert_eq!(state.focused_block(), Some(0));
@@ -906,7 +926,10 @@ mod tests {
     #[test]
     fn clear_focus_resets_to_none() {
         let mut state = ConversationState::new();
-        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
         state.set_focused_block(Some(0));
         state.clear_focus();
         assert_eq!(state.focused_block(), None);
@@ -938,7 +961,10 @@ mod tests {
     #[test]
     fn toggle_focused_collapse_noop_on_non_tool_call() {
         let mut state = ConversationState::new();
-        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
         state.set_focused_block(Some(0));
         assert!(!state.toggle_focused_collapse());
     }
@@ -962,8 +988,15 @@ mod tests {
             token_cost: Some(750),
         };
         let lines = render_block_lines(&block, 100, false);
-        assert!(lines.len() > 1, "expanded ToolCall should have multiple lines, got {}", lines.len());
-        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert!(
+            lines.len() > 1,
+            "expanded ToolCall should have multiple lines, got {}",
+            lines.len()
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
         assert!(text.contains("Tool:"), "should show Tool: label");
         assert!(text.contains("Args:"), "should show Args: label");
         assert!(text.contains("exit code 1"), "should show error message");
@@ -993,7 +1026,13 @@ mod tests {
             token_cost: None,
         };
         let lines = render_block_lines(&block, 100, false);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
-        assert!(text.contains("Policy denied"), "should show policy denied message, got: {text}");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("Policy denied"),
+            "should show policy denied message, got: {text}"
+        );
     }
 }

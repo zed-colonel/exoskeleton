@@ -20,6 +20,8 @@ pub enum ApprovalKind {
     Question,
     /// Plan draft needs approval (Approve/Deny/Edit).
     PlanApproval,
+    /// Interrupt confirmation ("Interrupt agent? (y/n)").
+    Confirmation,
 }
 
 /// An option presented in the approval overlay.
@@ -163,6 +165,22 @@ pub fn plan_approval_options() -> Vec<ApprovalOption> {
             label: "Edit (e)".into(),
             hotkey: Some('e'),
             value: "edit".into(),
+        },
+    ]
+}
+
+/// Options for an interrupt confirmation dialog.
+pub fn confirmation_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            label: "Yes (y)".into(),
+            hotkey: Some('y'),
+            value: "yes".into(),
+        },
+        ApprovalOption {
+            label: "No (n)".into(),
+            hotkey: Some('n'),
+            value: "no".into(),
         },
     ]
 }

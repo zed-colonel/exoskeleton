@@ -41,15 +41,24 @@ impl<'a> Widget for ActivityWidget<'a> {
             return;
         }
 
-        let spinner_char = SPINNER_FRAMES
-            .get(self.activity.spinner_phase)
-            .copied()
-            .unwrap_or(' ');
+        let indicator = if self.activity.is_streaming {
+            '●'
+        } else {
+            SPINNER_FRAMES
+                .get(self.activity.spinner_phase)
+                .copied()
+                .unwrap_or(' ')
+        };
+        let indicator_color = if self.activity.is_streaming {
+            Color::Green
+        } else {
+            Color::Cyan
+        };
 
         let line = Line::from(vec![
             Span::styled(
-                format!("  {spinner_char} "),
-                Style::default().fg(Color::Cyan),
+                format!("  {indicator} "),
+                Style::default().fg(indicator_color),
             ),
             Span::styled(
                 self.activity.label.clone(),
@@ -77,6 +86,8 @@ mod tests {
             label: "Thinking...".into(),
             spinner_phase: 0,
             is_active: true,
+            is_streaming: false,
+            streaming_tokens: 0,
         };
         let widget = ActivityWidget::new(&activity);
         let area = Rect::new(0, 0, 40, 1);
@@ -103,6 +114,8 @@ mod tests {
             label: "Running code.edit...".into(),
             spinner_phase: 3,
             is_active: true,
+            is_streaming: false,
+            streaming_tokens: 0,
         };
         let widget = ActivityWidget::new(&activity);
         let area = Rect::new(0, 0, 60, 1);
@@ -124,6 +137,8 @@ mod tests {
             label: String::new(),
             spinner_phase: 0,
             is_active: false,
+            is_streaming: false,
+            streaming_tokens: 0,
         };
         assert!(
             !ActivityWidget::is_visible(&activity),
@@ -148,6 +163,8 @@ mod tests {
                 label: "test".into(),
                 spinner_phase: phase,
                 is_active: true,
+                is_streaming: false,
+                streaming_tokens: 0,
             };
             let widget = ActivityWidget::new(&activity);
             let area = Rect::new(0, 0, 40, 1);
@@ -160,5 +177,42 @@ mod tests {
                 "phase {phase} should show char {expected_char}, got: {content:?}"
             );
         }
+    }
+
+    #[test]
+    fn activity_streaming_state_shows_dot() {
+        let activity = ActivityState {
+            label: "Streaming (42 tokens)".into(),
+            spinner_phase: 0,
+            is_active: true,
+            is_streaming: true,
+            streaming_tokens: 42,
+        };
+        let widget = ActivityWidget::new(&activity);
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(content.contains('●'));
+        assert!(content.contains("Streaming"));
+    }
+
+    #[test]
+    fn activity_streaming_shows_token_count() {
+        let activity = ActivityState {
+            label: "Streaming (99 tokens)".into(),
+            spinner_phase: 5,
+            is_active: true,
+            is_streaming: true,
+            streaming_tokens: 99,
+        };
+        let widget = ActivityWidget::new(&activity);
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(content.contains("99 tokens"));
     }
 }

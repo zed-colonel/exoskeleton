@@ -138,6 +138,7 @@ fn llm_reflect(
         max_output_tokens: kernel.max_output_tokens / 2,
         temperature: Some(0.3),
         stop_sequences: vec![],
+        stream: false,
     };
 
     // 4. Unified LLM call (H-1 pattern, E8-S1)

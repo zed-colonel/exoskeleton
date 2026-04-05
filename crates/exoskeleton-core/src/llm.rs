@@ -8,6 +8,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// Which LLM backend to use for a given request.
 ///
 /// The vessel operates with two classes of model:
@@ -72,6 +76,11 @@ pub struct LlmRequest {
     /// Stop sequences: the model stops generating when any of these appear.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
+    /// Whether to request server-sent event streaming from the backend.
+    /// When true, the backend emits incremental text deltas via callback.
+    /// Default: false (complete response returned at once).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream: bool,
 }
 
 /// Why the LLM stopped generating.
@@ -171,6 +180,7 @@ mod tests {
             max_output_tokens: 1024,
             temperature: Some(0.7),
             stop_sequences: vec!["</answer>".into()],
+            stream: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         let parsed: LlmRequest = serde_json::from_str(&json).unwrap();
@@ -189,6 +199,7 @@ mod tests {
             max_output_tokens: 256,
             temperature: None,
             stop_sequences: vec![],
+            stream: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         // Optional fields should be absent
@@ -196,8 +207,60 @@ mod tests {
         assert!(!json.contains("system_prompt"));
         assert!(!json.contains("temperature"));
         assert!(!json.contains("stop_sequences"));
+        assert!(!json.contains("stream"));
         let parsed: LlmRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(request, parsed);
+    }
+
+    #[test]
+    fn llm_request_stream_field_default_false() {
+        let json = r#"{"messages":[{"role":"user","content":"Hi"}],"max_output_tokens":100}"#;
+        let parsed: LlmRequest = serde_json::from_str(json).unwrap();
+        assert!(!parsed.stream);
+    }
+
+    #[test]
+    fn llm_request_stream_true_serializes() {
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: None,
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hi".into(),
+            }],
+            max_output_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: true,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains("\"stream\":true"),
+            "stream: true should be serialized"
+        );
+        let parsed: LlmRequest = serde_json::from_str(&json).unwrap();
+        assert!(parsed.stream);
+    }
+
+    #[test]
+    fn llm_request_stream_false_omitted_in_json() {
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: None,
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Hi".into(),
+            }],
+            max_output_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: false,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            !json.contains("stream"),
+            "stream: false should be omitted, got: {json}"
+        );
     }
 
     #[test]

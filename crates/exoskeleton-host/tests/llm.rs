@@ -983,6 +983,7 @@ mod sprint4_proptest {
                         max_output_tokens,
                         temperature,
                         stop_sequences,
+                        stream: false,
                     }
                 },
             )
@@ -1031,6 +1032,7 @@ mod sprint4_proptest {
             && a.messages == b.messages
             && a.max_output_tokens == b.max_output_tokens
             && a.stop_sequences == b.stop_sequences
+            && a.stream == b.stream
             && match (a.temperature, b.temperature) {
                 (None, None) => true,
                 (Some(x), Some(y)) => (x - y).abs() < 1e-10,

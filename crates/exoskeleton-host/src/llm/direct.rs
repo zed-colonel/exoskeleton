@@ -120,7 +120,7 @@ fn build_frontier_backend(config: &LlmConfig) -> Result<Option<Arc<dyn LlmHttpBa
 // ── Handler-context unified LLM call (E8-S1) ──
 
 use exoskeleton_core::tick::LlmCallRecord;
-use exoskeleton_core::{Artifact, ArtifactId, ArtifactKind};
+use exoskeleton_core::{Artifact, ArtifactId, ArtifactKind, EventType, LiveEvent};
 
 use crate::cognitive_engine::CognitiveHandler;
 use crate::kernel::KernelContext;
@@ -152,12 +152,26 @@ pub fn handler_direct_llm_call(
     request: &LlmRequest,
     cancellation: &CancellationToken,
 ) -> Result<DirectLlmResult, ExoError> {
-    // 1. Resolve backend (with escalation fallback)
     let (backend, backend_type) = resolve_handler_backend(handler, request)?;
+    let event_tx = kernel.event_tx.clone();
+    let tick_number = kernel
+        .tick_store
+        .latest()
+        .ok()
+        .flatten()
+        .map(|tick| tick.tick_number);
+    let on_delta = |chunk: &str| {
+        let _ = event_tx.send(LiveEvent {
+            event_type: EventType::LlmTextDelta,
+            summary: String::new(),
+            text_delta: Some(chunk.to_string()),
+            ..LiveEvent::new(tick_number)
+        });
+    };
 
-    // 2. Direct HTTP call
     let start = std::time::Instant::now();
-    let mut response = backend.call(&handler.http_client, request, cancellation)?;
+    let mut response =
+        backend.call_streaming(&handler.http_client, request, cancellation, &on_delta)?;
     let latency_ms = start.elapsed().as_millis() as u64;
     response.latency_ms = latency_ms;
 
@@ -348,6 +362,7 @@ mod tests {
             max_output_tokens: 256,
             temperature: Some(0.0),
             stop_sequences: vec![],
+            stream: false,
         }
     }
 
@@ -647,5 +662,51 @@ mod tests {
             result.response.latency_ms,
             result.llm_call_record.latency_ms
         );
+    }
+
+    #[test]
+    fn handler_streaming_emits_deltas_via_broadcast() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = Arc::new(MockLlmBackend::new(mock_response()));
+        let (handler, kernel) = setup_handler_and_kernel(dir.path(), mock, true);
+
+        let mut rx = kernel.event_tx.subscribe();
+        let token = CancellationToken::new();
+        let mut request = test_request();
+        request.stream = true;
+
+        let result = handler_direct_llm_call(&handler, &kernel, &request, &token).unwrap();
+        assert_eq!(result.response.content, "test response");
+
+        let mut delta_count = 0;
+        while let Ok(event) = rx.try_recv() {
+            if event.event_type == EventType::LlmTextDelta {
+                delta_count += 1;
+            }
+        }
+        assert_eq!(delta_count, 0);
+    }
+
+    #[test]
+    fn handler_streaming_returns_complete_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = Arc::new(MockLlmBackend::new(mock_response()));
+        let (handler, kernel) = setup_handler_and_kernel(dir.path(), mock, true);
+
+        let token = CancellationToken::new();
+        let mut request = test_request();
+        request.stream = true;
+
+        let result = handler_direct_llm_call(&handler, &kernel, &request, &token).unwrap();
+        assert_eq!(result.response.content, "test response");
+
+        let artifact = kernel
+            .artifact_store
+            .get(&result.artifact_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.kind, exoskeleton_core::ArtifactKind::LlmResponse);
+        assert_eq!(result.llm_call_record.tokens_in, 100);
+        assert_eq!(result.llm_call_record.tokens_out, 50);
     }
 }

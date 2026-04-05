@@ -195,6 +195,7 @@ pub async fn verify(
         max_output_tokens: 16,
         temperature: Some(0.0),
         stop_sequences: vec![],
+        stream: false,
     };
 
     match direct_llm_call(&llm_config, request).await {
@@ -264,6 +265,7 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
         max_output_tokens: 1024,
         temperature: Some(0.8),
         stop_sequences: vec![],
+        stream: false,
     };
 
     let greeting = match direct_llm_call(&llm_config, request).await {
@@ -347,6 +349,7 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
                 max_output_tokens: 1024,
                 temperature: Some(0.8),
                 stop_sequences: vec![],
+                stream: false,
             };
 
             match direct_llm_call(&llm_config, request).await {
@@ -441,6 +444,7 @@ pub async fn finalize(
         max_output_tokens: 512,
         temperature: Some(0.0),
         stop_sequences: vec![],
+        stream: false,
     };
 
     let response = direct_llm_call(&llm_config, request).await.map_err(|e| {

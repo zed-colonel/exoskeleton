@@ -71,6 +71,17 @@ impl LlmHttpBackend for MockLlmBackend {
             Ok(self.response.clone())
         }
     }
+
+    fn call_streaming(
+        &self,
+        client: &reqwest::Client,
+        request: &exoskeleton_core::llm::LlmRequest,
+        cancellation: &CancellationToken,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<LlmResponse, ExoError> {
+        let _ = on_delta;
+        self.call(client, request, cancellation)
+    }
 }
 
 /// Create a default mock response for testing.
@@ -125,6 +136,17 @@ impl LlmHttpBackend for MockSequenceLlmBackend {
         let response = &self.responses[idx % self.responses.len()];
         Ok(response.clone())
     }
+
+    fn call_streaming(
+        &self,
+        client: &reqwest::Client,
+        request: &exoskeleton_core::llm::LlmRequest,
+        cancellation: &CancellationToken,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<LlmResponse, ExoError> {
+        let _ = on_delta;
+        self.call(client, request, cancellation)
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +166,7 @@ mod tests {
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
+            stream: false,
         }
     }
 

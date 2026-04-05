@@ -132,6 +132,8 @@ mod tests {
             label: "Thinking...".into(),
             spinner_phase: 0,
             is_active: true,
+            is_streaming: false,
+            streaming_tokens: 0,
         };
         let widget = StatusBarWidget::new(&status, &connection, &activity);
         let area = Rect::new(0, 0, 100, 1);
