@@ -904,6 +904,11 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 } else {
                     app.debug.plan_summary = None;
                 }
+
+                if !snapshot.status.is_terminal() {
+                    app.activity.label = "Governance cycle...".into();
+                    app.activity.is_active = true;
+                }
             }
         }
         EventType::QuestionAsked => {
@@ -2205,5 +2210,54 @@ mod tests {
             }
             other => panic!("expected ToolCall with PolicyDenied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tick_completed_sets_governance_activity_when_active() {
+        use exoskeleton_core::id::VesselId;
+
+        let mut app = App::new();
+        let mut snapshot =
+            exoskeleton_core::StateSnapshot::initial(VesselId::new(), "test".into());
+        snapshot.tick_number = 5;
+
+        let event = LiveEvent {
+            event_type: EventType::TickCompleted,
+            summary: "Tick 5 completed".into(),
+            snapshot: Some(snapshot),
+            ..LiveEvent::new(Some(5))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert!(app.activity.is_active);
+        assert!(
+            app.activity.label.contains("Governance"),
+            "should show governance label, got: {}",
+            app.activity.label
+        );
+    }
+
+    #[test]
+    fn tick_completed_no_activity_when_suspended() {
+        use exoskeleton_core::id::VesselId;
+        use exoskeleton_core::snapshot::VesselStatus;
+
+        let mut app = App::new();
+        let mut snapshot =
+            exoskeleton_core::StateSnapshot::initial(VesselId::new(), "test".into());
+        snapshot.tick_number = 5;
+        snapshot.status = VesselStatus::Suspended;
+
+        let event = LiveEvent {
+            event_type: EventType::TickCompleted,
+            summary: "Tick 5 completed".into(),
+            snapshot: Some(snapshot),
+            ..LiveEvent::new(Some(5))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert!(!app.activity.is_active);
     }
 }
