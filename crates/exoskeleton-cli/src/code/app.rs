@@ -10,8 +10,8 @@ use exoskeleton_core::{EventType, LiveEvent};
 use crate::code::render::diff::{DiffFileSummary, DiffSummaryData};
 
 use super::widgets::approval::{
-    plan_approval_options, tool_approval_options, ApprovalAction, ApprovalContext, ApprovalKind,
-    ApprovalOption, ApprovalState,
+    confirmation_options, plan_approval_options, tool_approval_options, ApprovalAction,
+    ApprovalContext, ApprovalKind, ApprovalOption, ApprovalState,
 };
 use super::widgets::conversation::{Block, ConversationState, NoteSeverity, ToolOutcome};
 
@@ -68,6 +68,83 @@ pub struct ActivityState {
     pub spinner_phase: usize,
     /// Whether the agent is currently active (spinner should animate).
     pub is_active: bool,
+    /// Whether LLM text is currently streaming.
+    pub is_streaming: bool,
+    /// Number of streaming text chunks received in the current response.
+    pub streaming_tokens: u64,
+}
+
+/// Thread information displayed in the debug banner.
+#[derive(Debug, Clone, Default)]
+pub struct DebugThreadInfo {
+    /// Thread display name.
+    pub name: String,
+    /// Current state label: "idle", "active", "suspended", or "contributed: \"...\""
+    pub state: String,
+    /// Whether this thread recently contributed an insight (highlight in banner).
+    pub contributed: bool,
+}
+
+/// Budget information displayed in the debug banner.
+#[derive(Debug, Clone, Default)]
+pub struct DebugBudgetInfo {
+    /// Token budget usage as a percentage (0-100).
+    pub token_percent_used: u8,
+    /// Token budget remaining (formatted string like "4,231/50,000").
+    pub token_label: String,
+    /// Step budget usage as a percentage (0-100).
+    pub step_percent_used: u8,
+    /// Step budget remaining (formatted string like "3/25").
+    pub step_label: String,
+}
+
+/// Policy rule information displayed in the debug banner.
+#[derive(Debug, Clone)]
+pub struct DebugPolicyInfo {
+    /// Tool pattern (e.g., "shell.exec", "code.*").
+    pub tool_pattern: String,
+    /// Policy outcome (e.g., "ask", "allow", "deny").
+    pub outcome: String,
+}
+
+/// Plan summary information displayed in the debug banner.
+#[derive(Debug, Clone)]
+pub struct DebugPlanSummary {
+    /// Number of completed tasks.
+    pub completed: usize,
+    /// Total number of tasks.
+    pub total: usize,
+    /// Compact progress string.
+    pub progress_icons: String,
+    /// Plan objective (truncated).
+    pub objective: String,
+}
+
+/// State for the F1 debug banner.
+#[derive(Debug, Clone, Default)]
+pub struct DebugState {
+    /// Whether the debug banner is visible (toggled by F1).
+    pub visible: bool,
+    /// Current tick number.
+    pub tick_number: u64,
+    /// Whether the inner loop is currently active.
+    pub inner_loop_active: bool,
+    /// Step count summary (e.g., "3/25 steps").
+    pub step_count: String,
+    /// Token count summary (e.g., "4,231/50,000 tok").
+    pub token_count: String,
+    /// Thread state information.
+    pub threads: Vec<DebugThreadInfo>,
+    /// Budget progress information.
+    pub budget: DebugBudgetInfo,
+    /// Active policy rules.
+    pub policies: Vec<DebugPolicyInfo>,
+    /// Plan summary (if a plan exists).
+    pub plan_summary: Option<DebugPlanSummary>,
+    /// Initial token budget captured from the first snapshot.
+    pub initial_token_budget: Option<u64>,
+    /// Initial step limit captured from the first inner-loop step.
+    pub initial_step_limit: Option<u64>,
 }
 
 /// Braille spinner animation frames.
@@ -96,6 +173,12 @@ pub struct App {
     /// Terminal dimensions.
     pub terminal_width: u16,
     pub terminal_height: u16,
+    /// F1 debug banner state.
+    pub debug: DebugState,
+    /// Vessel ID (populated after initial status fetch).
+    pub vessel_id: String,
+    /// Active conversation ID for session persistence.
+    pub current_conversation_id: String,
     /// Whether the TUI should exit.
     pub should_quit: bool,
 }
@@ -113,6 +196,9 @@ impl App {
             approval: None,
             terminal_width: 80,
             terminal_height: 24,
+            debug: DebugState::default(),
+            vessel_id: String::new(),
+            current_conversation_id: String::new(),
             should_quit: false,
         }
     }
@@ -140,8 +226,12 @@ pub enum Message {
     WsDisconnected,
     /// WebSocket connection was re-established.
     WsReconnected,
+    /// A reconnection attempt result.
+    ReconnectAttempt(Result<(), String>),
     /// Spinner animation tick (100ms interval).
     SpinnerTick,
+    /// Incremental text delta from an LLM streaming response.
+    TextDelta(String),
     /// Result of submitting a message via the inbox.
     MessageSent(Result<(), String>),
     /// Result of fetching an artifact.
@@ -159,6 +249,8 @@ pub enum Message {
     },
     /// Current plan status was fetched to discover the active draft ID.
     PlanStatusFetched(Result<Option<String>, String>),
+    /// Session was saved successfully.
+    SessionSaved(Result<(), String>),
 }
 
 /// Side effects produced by update() for the event loop to execute.
@@ -169,6 +261,8 @@ pub enum SideEffect {
     /// Attempt to reconnect the WebSocket.
     #[allow(dead_code)]
     Reconnect,
+    /// Reconnect WebSocket with exponential backoff.
+    ReconnectWithBackoff,
     /// Fetch an artifact by ID via GET /api/v1/artifacts/{id}.
     #[allow(dead_code)]
     FetchArtifact(String),
@@ -182,6 +276,10 @@ pub enum SideEffect {
     FetchPlanDraft(String),
     /// Fetch current plan status to discover the active draft.
     FetchPlanStatus,
+    /// Save session state to disk before exiting.
+    SaveSession,
+    /// Send a cancellation message to the vessel inbox.
+    SendCancellation,
     /// Exit the TUI.
     Quit,
 }
@@ -210,19 +308,34 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
         }
         Message::WsDisconnected => {
             app.connection = ConnectionStatus::Disconnected;
-            app.activity.label = "Disconnected".into();
-            app.activity.is_active = false;
+            app.activity.label = "Reconnecting...".into();
+            app.activity.is_active = true;
+            effects.push(SideEffect::ReconnectWithBackoff);
         }
         Message::WsReconnected => {
             app.connection = ConnectionStatus::Connected;
             app.activity.label = String::new();
             app.activity.is_active = false;
         }
+        Message::ReconnectAttempt(result) => match result {
+            Ok(()) => {
+                app.connection = ConnectionStatus::Connected;
+                app.activity.label = String::new();
+                app.activity.is_active = false;
+            }
+            Err(err) => {
+                app.activity.label = format!("Reconnecting... ({err})");
+                app.activity.is_active = true;
+            }
+        },
         Message::SpinnerTick => {
             if app.activity.is_active {
                 app.activity.spinner_phase =
                     (app.activity.spinner_phase + 1) % SPINNER_FRAMES.len();
             }
+        }
+        Message::TextDelta(delta) => {
+            append_text_delta(app, &delta);
         }
         Message::ApprovalResolved(_action) => {}
         Message::MessageSent(result) => {
@@ -248,6 +361,11 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
         Message::PlanStatusFetched(result) => {
             handle_plan_status_fetched(app, result, &mut effects);
         }
+        Message::SessionSaved(result) => {
+            if let Err(err) = result {
+                tracing::warn!("failed to save session: {err}");
+            }
+        }
     }
 
     effects
@@ -267,12 +385,31 @@ fn handle_key_normal(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
             if app.input_text.is_empty() {
                 app.should_quit = true;
+                effects.push(SideEffect::SaveSession);
                 effects.push(SideEffect::Quit);
             }
         }
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            app.should_quit = true;
-            effects.push(SideEffect::Quit);
+            if app.activity.is_active {
+                let context = super::widgets::approval::ApprovalContext {
+                    question_id: String::new(),
+                    title: "Interrupt agent?".into(),
+                    description: "The agent is currently working. Interrupt and exit?".into(),
+                    options: confirmation_options(),
+                    kind: super::widgets::approval::ApprovalKind::Confirmation,
+                    plan_content: None,
+                    plan_draft_id: None,
+                };
+                app.mode = UiMode::Approval(context);
+                app.approval = Some(super::widgets::approval::ApprovalState::new());
+            } else {
+                app.should_quit = true;
+                effects.push(SideEffect::SaveSession);
+                effects.push(SideEffect::Quit);
+            }
+        }
+        (KeyCode::F(1), _) => {
+            app.debug.visible = !app.debug.visible;
         }
         (KeyCode::Enter, modifiers) if !modifiers.contains(KeyModifiers::SHIFT) => {
             let text = app.input_text.trim().to_string();
@@ -471,6 +608,14 @@ fn resolve_approval(app: &mut App, effects: &mut Vec<SideEffect>, action: Approv
                 effects.push(SideEffect::DenyPlan);
             }
         }
+        (ApprovalKind::Confirmation, ApprovalAction::Selected { value, .. }) => {
+            if value == "yes" {
+                app.should_quit = true;
+                effects.push(SideEffect::SendCancellation);
+                effects.push(SideEffect::SaveSession);
+                effects.push(SideEffect::Quit);
+            }
+        }
         (
             _,
             ApprovalAction::Selected {
@@ -491,6 +636,7 @@ fn resolve_approval(app: &mut App, effects: &mut Vec<SideEffect>, action: Approv
         (ApprovalKind::PlanApproval, ApprovalAction::Cancelled) => {
             effects.push(SideEffect::DenyPlan);
         }
+        (ApprovalKind::Confirmation, ApprovalAction::Cancelled) => {}
         (_, ApprovalAction::Cancelled) => {
             effects.push(SideEffect::SubmitAnswer {
                 question_id: context.question_id.clone(),
@@ -503,6 +649,41 @@ fn resolve_approval(app: &mut App, effects: &mut Vec<SideEffect>, action: Approv
     app.approval = None;
 }
 
+fn append_text_delta(app: &mut App, delta: &str) {
+    let should_create_new = match app.conversation.blocks().last() {
+        Some(Block::AgentText { is_streaming, .. }) => !is_streaming,
+        _ => true,
+    };
+
+    if should_create_new {
+        app.conversation.add_block(Block::AgentText {
+            text: delta.to_string(),
+            is_streaming: true,
+        });
+    } else if let Some(Block::AgentText { text, .. }) = app.conversation.blocks_mut().last_mut() {
+        text.push_str(delta);
+        app.conversation.notify_content_changed();
+    }
+
+    app.activity.is_streaming = true;
+    app.activity.streaming_tokens += 1;
+    app.activity.label = format!("Streaming ({} tokens)", app.activity.streaming_tokens);
+    app.activity.is_active = true;
+}
+
+fn finalize_streaming_block(app: &mut App) {
+    for block in app.conversation.blocks_mut().iter_mut().rev() {
+        if let Block::AgentText { is_streaming, .. } = block {
+            if *is_streaming {
+                *is_streaming = false;
+                break;
+            }
+        }
+    }
+    app.activity.is_streaming = false;
+    app.activity.streaming_tokens = 0;
+}
+
 /// Handle a WebSocket LiveEvent.
 fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
     let mut effects = Vec::new();
@@ -512,9 +693,18 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
             app.activity.label = "Thinking...".into();
             app.activity.is_active = true;
             app.activity.spinner_phase = 0;
+            app.activity.is_streaming = false;
+            app.activity.streaming_tokens = 0;
+            app.debug.inner_loop_active = true;
+        }
+        EventType::LlmTextDelta => {
+            if let Some(ref delta) = event.text_delta {
+                append_text_delta(app, delta);
+            }
         }
         EventType::InnerLoopStep => {
             if let Some(ref detail) = event.inner_loop_detail {
+                finalize_streaming_block(app);
                 let tool_name = detail.tool_name.clone().unwrap_or_default();
                 let outcome =
                     tool_outcome_from_str(detail.tool_outcome.as_deref().unwrap_or_default());
@@ -524,6 +714,7 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                     args_summary: format!("step {}/{}", detail.step_number, detail.max_steps),
                     outcome,
                     collapsed: true,
+                    token_cost: Some(detail.tokens_this_step),
                 });
 
                 app.status.step_summary =
@@ -531,6 +722,38 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 app.status.token_summary = format_token_count(detail.tokens_total);
                 app.activity.label = format!("Running {tool_name}...");
                 app.activity.is_active = true;
+
+                app.debug.step_count = format!("{}/{} steps", detail.step_number, detail.max_steps);
+                app.debug.token_count = format!(
+                    "{}/{} tok",
+                    detail.tokens_total,
+                    app.debug
+                        .initial_token_budget
+                        .unwrap_or(detail.tokens_total)
+                );
+
+                if app.debug.initial_step_limit.is_none() {
+                    app.debug.initial_step_limit = Some(detail.max_steps as u64);
+                }
+
+                if let Some(max_steps) = app.debug.initial_step_limit {
+                    if max_steps > 0 {
+                        let used = detail.step_number as u64;
+                        app.debug.budget.step_percent_used =
+                            ((used * 100) / max_steps).min(100) as u8;
+                        app.debug.budget.step_label =
+                            format!("{}/{}", detail.step_number, max_steps);
+                    }
+                }
+                if let Some(max_tokens) = app.debug.initial_token_budget {
+                    if max_tokens > 0 {
+                        let used = detail.tokens_total;
+                        app.debug.budget.token_percent_used =
+                            ((used * 100) / max_tokens).min(100) as u8;
+                        app.debug.budget.token_label =
+                            format!("{}/{}", detail.tokens_total, max_tokens);
+                    }
+                }
             }
         }
         EventType::InnerLoopCompleted => {
@@ -572,8 +795,10 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 });
             }
 
+            finalize_streaming_block(app);
             app.activity.label = String::new();
             app.activity.is_active = false;
+            app.debug.inner_loop_active = false;
         }
         EventType::ActionExecuted => {
             let summary = &event.summary;
@@ -582,9 +807,14 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 args_summary: truncate_str(summary, 80),
                 outcome: ToolOutcome::Success,
                 collapsed: true,
+                token_cost: None,
             });
         }
-        EventType::TickStarted => {}
+        EventType::TickStarted => {
+            if let Some(tick) = event.tick_number {
+                app.debug.tick_number = tick;
+            }
+        }
         EventType::TickCompleted => {
             app.conversation.add_block(Block::SystemNote {
                 text: event.summary.clone(),
@@ -599,6 +829,80 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 if let Some(ref plan) = snapshot.plan {
                     app.conversation
                         .add_block(Block::PlanSummary { plan: plan.clone() });
+                }
+
+                app.debug.tick_number = snapshot.tick_number;
+                app.debug.threads = snapshot
+                    .thread_summaries
+                    .iter()
+                    .map(|ts| {
+                        let state = match ts.status {
+                            exoskeleton_core::thread::ThreadStatus::Active => {
+                                if let Some(ref summary) = ts.last_output_summary {
+                                    format!(
+                                        "contributed: \"{}\"",
+                                        if summary.len() > 40 {
+                                            format!("{}...", &summary[..37])
+                                        } else {
+                                            summary.clone()
+                                        }
+                                    )
+                                } else {
+                                    "active".to_string()
+                                }
+                            }
+                            exoskeleton_core::thread::ThreadStatus::Suspended => {
+                                "suspended".to_string()
+                            }
+                            _ => "idle".to_string(),
+                        };
+                        let contributed = ts.last_output_summary.is_some()
+                            && ts.status == exoskeleton_core::thread::ThreadStatus::Active;
+                        DebugThreadInfo {
+                            name: ts.name.clone(),
+                            state,
+                            contributed,
+                        }
+                    })
+                    .collect();
+
+                let total_tokens = snapshot.budget_status.total_tokens_remaining();
+                if app.debug.initial_token_budget.is_none() && total_tokens < u64::MAX {
+                    app.debug.initial_token_budget = Some(total_tokens);
+                }
+
+                if let Some(ref plan) = snapshot.plan {
+                    let completed = plan
+                        .tasks
+                        .iter()
+                        .filter(|t| t.status == exoskeleton_core::plan::PlanTaskStatus::Completed)
+                        .count();
+                    let total = plan.tasks.len();
+                    let progress_icons: String = plan
+                        .tasks
+                        .iter()
+                        .map(|t| match t.status {
+                            exoskeleton_core::plan::PlanTaskStatus::Completed => '✓',
+                            exoskeleton_core::plan::PlanTaskStatus::InProgress => '▸',
+                            exoskeleton_core::plan::PlanTaskStatus::Pending => '○',
+                            exoskeleton_core::plan::PlanTaskStatus::Failed => '✗',
+                            exoskeleton_core::plan::PlanTaskStatus::Blocked => '⛔',
+                            exoskeleton_core::plan::PlanTaskStatus::Skipped => '‒',
+                        })
+                        .collect();
+                    let objective = if plan.objective.len() > 50 {
+                        format!("{}...", &plan.objective[..47])
+                    } else {
+                        plan.objective.clone()
+                    };
+                    app.debug.plan_summary = Some(DebugPlanSummary {
+                        completed,
+                        total,
+                        progress_icons,
+                        objective,
+                    });
+                } else {
+                    app.debug.plan_summary = None;
                 }
             }
         }
@@ -652,12 +956,12 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                     app.mode = UiMode::Approval(context);
                     app.approval = Some(ApprovalState::new());
                 } else {
-                    app.conversation.add_block(Block::SystemNote {
-                        text: format!(
-                            "Policy: {} requires approval ({})",
-                            detail.tool_name, detail.rule
-                        ),
-                        severity: NoteSeverity::Warning,
+                    app.conversation.add_block(Block::ToolCall {
+                        tool_name: detail.tool_name.clone(),
+                        args_summary: detail.rule.clone(),
+                        outcome: ToolOutcome::PolicyDenied,
+                        collapsed: true,
+                        token_cost: None,
                     });
                 }
             }
@@ -677,6 +981,36 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                         effects.push(SideEffect::FetchPlanStatus);
                     }
                 }
+            }
+        }
+        EventType::PolicyApprovalGranted => {
+            if let Some(ref detail) = event.policy_detail {
+                let outcome = if event.summary.contains("allow") {
+                    "allow"
+                } else if event.summary.contains("deny") {
+                    "deny"
+                } else {
+                    "ask"
+                };
+                let existing = app
+                    .debug
+                    .policies
+                    .iter_mut()
+                    .find(|p| p.tool_pattern == detail.tool_name);
+                if let Some(policy) = existing {
+                    policy.outcome = outcome.to_string();
+                } else {
+                    app.debug.policies.push(DebugPolicyInfo {
+                        tool_pattern: detail.tool_name.clone(),
+                        outcome: outcome.to_string(),
+                    });
+                }
+            }
+            if !event.summary.is_empty() {
+                app.conversation.add_block(Block::SystemNote {
+                    text: event.summary.clone(),
+                    severity: NoteSeverity::Info,
+                });
             }
         }
         _ => {
@@ -775,6 +1109,7 @@ fn tool_outcome_from_str(outcome: &str) -> ToolOutcome {
     match outcome {
         "success" => ToolOutcome::Success,
         "pending" => ToolOutcome::Pending,
+        "denied" | "policy_denied" => ToolOutcome::PolicyDenied,
         other => ToolOutcome::Error(other.to_string()),
     }
 }
@@ -817,6 +1152,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use exoskeleton_core::{
         CodeDiffOperation, DiffSummary, EventType, FileDiffEntry, InnerLoopStepDetail, LiveEvent,
+        PolicyDetail,
     };
 
     use crate::code::widgets::approval::{ApprovalKind, ApprovalState};
@@ -888,10 +1224,14 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         match &app.conversation.blocks()[0] {
             Block::ToolCall {
-                tool_name, outcome, ..
+                tool_name,
+                outcome,
+                token_cost,
+                ..
             } => {
                 assert_eq!(tool_name, "code.read");
                 assert_eq!(*outcome, ToolOutcome::Success);
+                assert_eq!(*token_cost, Some(500));
             }
             other => panic!("expected ToolCall block, got {other:?}"),
         }
@@ -930,10 +1270,12 @@ mod tests {
 
         let effects = update(&mut app, Message::WsDisconnected);
 
-        assert!(effects.is_empty());
         assert_eq!(app.connection, ConnectionStatus::Disconnected);
-        assert_eq!(app.activity.label, "Disconnected");
-        assert!(!app.activity.is_active);
+        assert!(app.activity.label.contains("Reconnecting"));
+        assert!(app.activity.is_active);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::ReconnectWithBackoff)));
     }
 
     // ── TUI-T6: update_resize_updates_dimensions ──
@@ -980,6 +1322,64 @@ mod tests {
         assert_eq!(app.connection, ConnectionStatus::Connecting);
         assert!(!app.should_quit);
         assert!(app.conversation.is_empty());
+        assert!(!app.debug.visible);
+    }
+
+    #[test]
+    fn text_delta_creates_new_agent_text_if_none_exists() {
+        let mut app = App::new();
+        assert!(app.conversation.is_empty());
+
+        update(&mut app, Message::TextDelta("Hello".into()));
+
+        assert_eq!(app.conversation.len(), 1);
+        match &app.conversation.blocks()[0] {
+            Block::AgentText { text, is_streaming } => {
+                assert_eq!(text, "Hello");
+                assert!(*is_streaming);
+            }
+            other => panic!("expected AgentText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_delta_appends_to_existing_streaming_block() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::AgentText {
+            text: "Hello".into(),
+            is_streaming: true,
+        });
+
+        update(&mut app, Message::TextDelta(" world".into()));
+
+        assert_eq!(app.conversation.len(), 1);
+        match &app.conversation.blocks()[0] {
+            Block::AgentText { text, is_streaming } => {
+                assert_eq!(text, "Hello world");
+                assert!(*is_streaming);
+            }
+            other => panic!("expected AgentText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_delta_does_not_append_to_non_streaming_block() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::AgentText {
+            text: "Previous response".into(),
+            is_streaming: false,
+        });
+
+        update(&mut app, Message::TextDelta("New text".into()));
+
+        assert_eq!(app.conversation.len(), 2);
+        match &app.conversation.blocks()[1] {
+            Block::AgentText { text, is_streaming } => {
+                assert_eq!(text, "New text");
+                assert!(*is_streaming);
+            }
+            other => panic!("expected new AgentText, got {other:?}"),
+        }
     }
 
     // ── TUI-T19: update_ws_event_inner_loop_started_sets_activity ──
@@ -997,6 +1397,23 @@ mod tests {
 
         assert_eq!(app.activity.label, "Thinking...");
         assert!(app.activity.is_active);
+    }
+
+    #[test]
+    fn inner_loop_started_clears_streaming_state() {
+        let mut app = App::new();
+        app.activity.is_streaming = true;
+        app.activity.streaming_tokens = 42;
+
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopStarted,
+            summary: "Inner loop started".into(),
+            ..LiveEvent::new(Some(1))
+        };
+        update(&mut app, Message::WsEvent(event));
+
+        assert!(!app.activity.is_streaming);
+        assert_eq!(app.activity.streaming_tokens, 0);
     }
 
     // ── TUI-T20: update_ws_event_inner_loop_completed_sets_idle ──
@@ -1029,13 +1446,55 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn inner_loop_completed_finalizes_streaming_block() {
         let mut app = App::new();
+        app.conversation.add_block(Block::AgentText {
+            text: "streaming content".into(),
+            is_streaming: true,
+        });
+        app.activity.is_streaming = true;
+        app.activity.streaming_tokens = 10;
+
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopCompleted,
+            summary: "Completed".into(),
+            inner_loop_detail: Some(InnerLoopStepDetail {
+                step_number: 3,
+                max_steps: 25,
+                tool_name: None,
+                tool_outcome: None,
+                tokens_this_step: 0,
+                tokens_total: 2000,
+                completion_reason: Some("agent_complete".into()),
+            }),
+            ..LiveEvent::new(Some(1))
+        };
+        update(&mut app, Message::WsEvent(event));
+
+        let last_agent = app
+            .conversation
+            .blocks()
+            .iter()
+            .rev()
+            .find(|b| matches!(b, Block::AgentText { .. }));
+        match last_agent {
+            Some(Block::AgentText { is_streaming, .. }) => assert!(!is_streaming),
+            other => panic!("expected finalized AgentText, got {other:?}"),
+        }
+        assert!(!app.activity.is_streaming);
+        assert_eq!(app.activity.streaming_tokens, 0);
+    }
+
+    #[test]
+    fn ctrl_c_while_idle_quits_directly() {
+        let mut app = App::new();
+        app.activity.is_active = false;
         let effects = update(
             &mut app,
             Message::Key(key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         );
         assert!(app.should_quit);
+        assert!(effects.iter().any(|e| matches!(e, SideEffect::SaveSession)));
         assert!(effects.iter().any(|e| matches!(e, SideEffect::Quit)));
     }
 
@@ -1047,6 +1506,7 @@ mod tests {
             Message::Key(key_with_mods(KeyCode::Char('d'), KeyModifiers::CONTROL)),
         );
         assert!(app.should_quit);
+        assert!(effects.iter().any(|e| matches!(e, SideEffect::SaveSession)));
         assert!(effects.iter().any(|e| matches!(e, SideEffect::Quit)));
     }
 
@@ -1060,6 +1520,40 @@ mod tests {
         );
         assert!(!app.should_quit);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn f1_toggles_debug_visibility() {
+        let mut app = App::new();
+        assert!(!app.debug.visible);
+
+        update(&mut app, Message::Key(key(KeyCode::F(1))));
+        assert!(app.debug.visible);
+
+        update(&mut app, Message::Key(key(KeyCode::F(1))));
+        assert!(!app.debug.visible);
+    }
+
+    #[test]
+    fn ctrl_c_during_active_task_shows_confirmation() {
+        let mut app = App::new();
+        app.activity.is_active = true;
+        app.activity.label = "Thinking...".into();
+
+        let effects = update(
+            &mut app,
+            Message::Key(key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+
+        assert!(!app.should_quit);
+        assert!(effects.is_empty());
+        match &app.mode {
+            UiMode::Approval(ctx) => {
+                assert_eq!(ctx.kind, ApprovalKind::Confirmation);
+                assert!(ctx.title.contains("Interrupt"));
+            }
+            other => panic!("expected Approval(Confirmation), got {other:?}"),
+        }
     }
 
     #[test]
@@ -1159,6 +1653,32 @@ mod tests {
 
         assert_eq!(app.connection, ConnectionStatus::Connected);
         assert!(app.activity.label.is_empty());
+    }
+
+    #[test]
+    fn reconnect_attempt_success_restores_connected() {
+        let mut app = App::new();
+        app.connection = ConnectionStatus::Disconnected;
+        app.activity.is_active = true;
+
+        update(&mut app, Message::ReconnectAttempt(Ok(())));
+
+        assert_eq!(app.connection, ConnectionStatus::Connected);
+        assert!(!app.activity.is_active);
+    }
+
+    #[test]
+    fn reconnect_attempt_failure_keeps_reconnecting() {
+        let mut app = App::new();
+        app.connection = ConnectionStatus::Disconnected;
+
+        update(
+            &mut app,
+            Message::ReconnectAttempt(Err("connection refused".into())),
+        );
+
+        assert!(app.activity.label.contains("Reconnecting"));
+        assert!(app.activity.is_active);
     }
 
     #[test]
@@ -1438,6 +1958,206 @@ mod tests {
         assert!(has_plan, "should have a PlanSummary block");
     }
 
+    #[test]
+    fn debug_state_populated_from_snapshot() {
+        use std::collections::HashMap;
+
+        use exoskeleton_core::{
+            id::{PlanTaskId, VesselId},
+            plan::{Plan, PlanTask, PlanTaskStatus},
+            thread::ThreadStatus,
+            StateSnapshot, ThreadSummary,
+        };
+
+        let mut app = App::new();
+
+        let mut snapshot = StateSnapshot::initial(VesselId::new(), "test".into());
+        snapshot.tick_number = 42;
+        snapshot.thread_summaries = vec![ThreadSummary {
+            thread_id: exoskeleton_core::id::ThreadId::new(),
+            name: "meta-cognition".into(),
+            status: ThreadStatus::Active,
+            last_output_summary: Some("consider edge cases".into()),
+            token_budget_remaining: 5000,
+        }];
+        snapshot.plan = Some(Plan {
+            objective: "Implement feature".into(),
+            tasks: vec![
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "Task A".into(),
+                    status: PlanTaskStatus::Completed,
+                    depends_on: Vec::new(),
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "Task B".into(),
+                    status: PlanTaskStatus::Pending,
+                    depends_on: Vec::new(),
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+            ],
+            updated_at: chrono::Utc::now(),
+        });
+
+        let event = LiveEvent {
+            event_type: EventType::TickCompleted,
+            summary: "Tick 42 completed".into(),
+            snapshot: Some(snapshot),
+            ..LiveEvent::new(Some(42))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert_eq!(app.debug.tick_number, 42);
+        assert_eq!(app.debug.threads.len(), 1);
+        assert_eq!(app.debug.threads[0].name, "meta-cognition");
+        assert!(app.debug.threads[0].contributed);
+        assert!(app.debug.threads[0].state.contains("contributed"));
+
+        let plan = app.debug.plan_summary.as_ref().expect("plan should exist");
+        assert_eq!(plan.completed, 1);
+        assert_eq!(plan.total, 2);
+        assert!(plan.objective.contains("Implement feature"));
+    }
+
+    #[test]
+    fn inner_loop_step_populates_debug_state() {
+        let mut app = App::new();
+        app.debug.initial_token_budget = Some(50_000);
+
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopStep,
+            summary: "Step 3/25".into(),
+            inner_loop_detail: Some(InnerLoopStepDetail {
+                step_number: 3,
+                max_steps: 25,
+                tool_name: Some("code.read".into()),
+                tool_outcome: Some("success".into()),
+                tokens_this_step: 200,
+                tokens_total: 4231,
+                completion_reason: None,
+            }),
+            ..LiveEvent::new(Some(1))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert_eq!(app.debug.step_count, "3/25 steps");
+        assert!(app.debug.token_count.contains("4231"));
+        assert_eq!(app.debug.budget.step_percent_used, 12);
+    }
+
+    #[test]
+    fn inner_loop_started_sets_debug_active() {
+        let mut app = App::new();
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopStarted,
+            summary: "Inner loop started".into(),
+            ..LiveEvent::new(Some(1))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert!(app.debug.inner_loop_active);
+    }
+
+    #[test]
+    fn inner_loop_completed_clears_debug_active() {
+        let mut app = App::new();
+        app.debug.inner_loop_active = true;
+
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopCompleted,
+            summary: "Inner loop completed".into(),
+            inner_loop_detail: Some(InnerLoopStepDetail {
+                step_number: 5,
+                max_steps: 25,
+                tool_name: None,
+                tool_outcome: None,
+                tokens_this_step: 0,
+                tokens_total: 5000,
+                completion_reason: Some("agent_complete".into()),
+            }),
+            ..LiveEvent::new(Some(1))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert!(!app.debug.inner_loop_active);
+    }
+
+    #[test]
+    fn confirmation_yes_quits_and_cancels() {
+        use crate::code::widgets::approval::{
+            confirmation_options, ApprovalContext, ApprovalState,
+        };
+
+        let mut app = App::new();
+        app.mode = UiMode::Approval(ApprovalContext {
+            question_id: String::new(),
+            title: "Interrupt agent?".into(),
+            description: "test".into(),
+            options: confirmation_options(),
+            kind: ApprovalKind::Confirmation,
+            plan_content: None,
+            plan_draft_id: None,
+        });
+        app.approval = Some(ApprovalState::new());
+
+        let effects = update(&mut app, Message::Key(key(KeyCode::Char('y'))));
+
+        assert!(app.should_quit);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::SendCancellation)));
+        assert!(effects.iter().any(|e| matches!(e, SideEffect::SaveSession)));
+    }
+
+    #[test]
+    fn confirmation_no_returns_to_normal() {
+        use crate::code::widgets::approval::{
+            confirmation_options, ApprovalContext, ApprovalState,
+        };
+
+        let mut app = App::new();
+        app.mode = UiMode::Approval(ApprovalContext {
+            question_id: String::new(),
+            title: "Interrupt agent?".into(),
+            description: "test".into(),
+            options: confirmation_options(),
+            kind: ApprovalKind::Confirmation,
+            plan_content: None,
+            plan_draft_id: None,
+        });
+        let mut state = ApprovalState::new();
+        state.selected_index = 1;
+        app.approval = Some(state);
+
+        let effects = update(&mut app, Message::Key(key(KeyCode::Enter)));
+
+        assert!(!app.should_quit);
+        assert_eq!(app.mode, UiMode::Normal);
+        assert!(effects.is_empty() || !effects.iter().any(|e| matches!(e, SideEffect::Quit)));
+    }
+
+    #[test]
+    fn tick_started_updates_debug_tick() {
+        let mut app = App::new();
+        let event = LiveEvent {
+            event_type: EventType::TickStarted,
+            summary: "Tick 10 started".into(),
+            ..LiveEvent::new(Some(10))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert_eq!(app.debug.tick_number, 10);
+    }
+
     // ── T26: plan_mode_transition_with_draft_triggers_fetch ──
 
     #[test]
@@ -1461,5 +2181,29 @@ mod tests {
                 .any(|e| matches!(e, SideEffect::FetchPlanDraft(id) if id == "draft-abc-123")),
             "should produce FetchPlanDraft side effect, got: {effects:?}"
         );
+    }
+
+    #[test]
+    fn policy_auto_deny_creates_tool_call_with_policy_denied() {
+        let mut app = App::new();
+        let event = LiveEvent {
+            event_type: EventType::PolicyApprovalRequired,
+            summary: "Policy denied shell.exec".into(),
+            policy_detail: Some(PolicyDetail {
+                tool_name: "shell.exec".into(),
+                rule: "deny: *".into(),
+            }),
+            question_detail: None,
+            ..LiveEvent::new(Some(1))
+        };
+        update(&mut app, Message::WsEvent(event));
+        assert_eq!(app.conversation.len(), 1);
+        match &app.conversation.blocks()[0] {
+            Block::ToolCall { tool_name, outcome, .. } => {
+                assert_eq!(tool_name, "shell.exec");
+                assert_eq!(*outcome, ToolOutcome::PolicyDenied);
+            }
+            other => panic!("expected ToolCall with PolicyDenied, got {other:?}"),
+        }
     }
 }

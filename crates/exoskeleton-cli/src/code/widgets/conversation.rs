@@ -29,13 +29,14 @@ pub enum Block {
         timestamp: DateTime<Utc>,
     },
     /// Agent's reasoning/response text (plain text in S1, markdown spans in S2).
-    AgentText { text: String },
+    AgentText { text: String, is_streaming: bool },
     /// Tool call with result.
     ToolCall {
         tool_name: String,
         args_summary: String,
         outcome: ToolOutcome,
         collapsed: bool,
+        token_cost: Option<u64>,
     },
     /// System notification (tick boundary, mode change, completion).
     SystemNote {
@@ -62,6 +63,8 @@ pub enum ToolOutcome {
     Error(String),
     /// Tool execution in progress.
     Pending,
+    /// Tool blocked by policy engine.
+    PolicyDenied,
 }
 
 /// Severity level for system notes.
@@ -71,6 +74,9 @@ pub enum NoteSeverity {
     Info,
     /// Warning (budget warnings, reconnection notices).
     Warning,
+    /// Insight (thread contributions, governance recommendations).
+    #[allow(dead_code)]
+    Insight,
 }
 
 /// State for the conversation display area.
@@ -113,6 +119,15 @@ impl ConversationState {
         }
     }
 
+    /// Notify that existing content has changed without adding a new block.
+    pub fn notify_content_changed(&mut self) {
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        } else {
+            self.has_new_content_below = true;
+        }
+    }
+
     /// Number of blocks in the conversation.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn len(&self) -> usize {
@@ -144,6 +159,11 @@ impl ConversationState {
     /// Whether there is new content below the visible area.
     pub fn has_new_content_below(&self) -> bool {
         self.has_new_content_below
+    }
+
+    /// Current scroll offset in rendered lines from the top.
+    pub fn scroll_offset(&self) -> u16 {
+        self.scroll_offset
     }
 
     /// Scroll up by the given number of lines.
@@ -190,7 +210,19 @@ impl ConversationState {
         self.last_viewport_height = viewport_height;
         if self.auto_scroll {
             self.scroll_to_bottom();
+        } else {
+            let max = self
+                .last_rendered_height
+                .saturating_sub(self.last_viewport_height);
+            self.scroll_offset = self.scroll_offset.min(max);
         }
+    }
+
+    /// Restore a previously-saved scroll offset and disable auto-scroll.
+    pub fn restore_scroll_offset(&mut self, offset: u16) {
+        self.scroll_offset = offset;
+        self.auto_scroll = false;
+        self.has_new_content_below = false;
     }
 }
 
@@ -201,7 +233,7 @@ impl Default for ConversationState {
 }
 
 /// Render a block to ratatui Lines.
-fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
+fn render_block_lines(block: &Block, width: u16, debug_mode: bool) -> Vec<Line<'static>> {
     match block {
         Block::UserMessage { text, timestamp } => {
             let time_str = timestamp.format("%H:%M").to_string();
@@ -219,7 +251,7 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines
         }
-        Block::AgentText { text } => {
+        Block::AgentText { text, .. } => {
             let header = Line::from(vec![Span::styled(
                 " Agent ",
                 Style::default()
@@ -244,13 +276,15 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
             args_summary,
             outcome,
             collapsed: _,
+            token_cost,
         } => {
             let (icon, color) = match outcome {
                 ToolOutcome::Success => ("OK", Color::Green),
                 ToolOutcome::Error(_) => ("ERR", Color::Red),
                 ToolOutcome::Pending => ("...", Color::Yellow),
+                ToolOutcome::PolicyDenied => ("DENY", Color::Red),
             };
-            let line = Line::from(vec![
+            let mut spans_vec = vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     tool_name.clone(),
@@ -263,18 +297,41 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(format!("[{icon}]"), Style::default().fg(color)),
-            ]);
-            vec![line]
+            ];
+            if debug_mode {
+                if let Some(cost) = token_cost {
+                    spans_vec.push(Span::styled(
+                        format!(" ({cost} tok)"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+            vec![Line::from(spans_vec)]
         }
         Block::SystemNote { text, severity } => {
             let color = match severity {
                 NoteSeverity::Info => Color::DarkGray,
                 NoteSeverity::Warning => Color::Yellow,
+                NoteSeverity::Insight => Color::Cyan,
             };
-            vec![Line::from(vec![Span::styled(
-                format!("  --- {text} ---"),
-                Style::default().fg(color),
-            )])]
+
+            if debug_mode
+                && *severity == NoteSeverity::Info
+                && (text.starts_with("Tick ") || text.contains("tick"))
+            {
+                let separator = "─".repeat(20.min(width as usize / 2));
+                vec![Line::from(vec![Span::styled(
+                    format!("  {separator} {text} {separator}"),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                )])]
+            } else {
+                vec![Line::from(vec![Span::styled(
+                    format!("  --- {text} ---"),
+                    Style::default().fg(color),
+                )])]
+            }
         }
         Block::Diff { summary, full_text } => {
             let header = Line::from(vec![Span::styled(
@@ -312,12 +369,21 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
 /// Widget for rendering the conversation area.
 pub struct ConversationWidget<'a> {
     state: &'a ConversationState,
+    debug_mode: bool,
 }
 
 impl<'a> ConversationWidget<'a> {
     /// Create a new conversation widget.
     pub fn new(state: &'a ConversationState) -> Self {
-        Self { state }
+        Self {
+            state,
+            debug_mode: false,
+        }
+    }
+
+    pub fn with_debug_mode(mut self, debug: bool) -> Self {
+        self.debug_mode = debug;
+        self
     }
 }
 
@@ -328,7 +394,7 @@ impl<'a> Widget for ConversationWidget<'a> {
 
         let mut all_lines: Vec<Line<'static>> = Vec::new();
         for block in self.state.blocks() {
-            let block_lines = render_block_lines(block, inner.width);
+            let block_lines = render_block_lines(block, inner.width, self.debug_mode);
             all_lines.extend(block_lines);
         }
 
@@ -361,10 +427,10 @@ impl<'a> Widget for ConversationWidget<'a> {
 /// This is an approximation used for scroll calculations. The actual height
 /// depends on terminal width and text wrapping, but for plain text in S1
 /// counting newlines is sufficient.
-pub fn estimate_rendered_height(state: &ConversationState, width: u16) -> u16 {
+pub fn estimate_rendered_height(state: &ConversationState, width: u16, debug_mode: bool) -> u16 {
     let mut total: u16 = 0;
     for block in state.blocks() {
-        let lines = render_block_lines(block, width);
+        let lines = render_block_lines(block, width, debug_mode);
         total = total.saturating_add(lines.len() as u16);
     }
     total
@@ -391,6 +457,7 @@ mod tests {
 
         state.add_block(Block::AgentText {
             text: "hello".into(),
+            is_streaming: false,
         });
         assert_eq!(state.len(), 2);
     }
@@ -430,6 +497,7 @@ mod tests {
             args_summary: "src/main.rs".into(),
             outcome: ToolOutcome::Success,
             collapsed: true,
+            token_cost: None,
         };
         match &block {
             Block::ToolCall {
@@ -456,6 +524,7 @@ mod tests {
             args_summary: "cargo test".into(),
             outcome: ToolOutcome::Success,
             collapsed: true,
+            token_cost: None,
         };
         match &block {
             Block::ToolCall {
@@ -504,8 +573,9 @@ mod tests {
     fn render_agent_text_with_markdown() {
         let block = Block::AgentText {
             text: "Here is **bold** and `code`".into(),
+            is_streaming: false,
         };
-        let lines = render_block_lines(&block, 80);
+        let lines = render_block_lines(&block, 80, false);
 
         assert!(
             lines.len() >= 3,
@@ -555,7 +625,7 @@ mod tests {
                 "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,5 @@\n fn main() {\n-    old();\n+    new();\n+    added();\n+    more();\n }".into(),
             ),
         };
-        let lines = render_block_lines(&block, 80);
+        let lines = render_block_lines(&block, 80, false);
 
         let text: String = lines
             .iter()
@@ -572,5 +642,116 @@ mod tests {
                 .any(|span| span.style.fg == Some(Color::Green) && span.content.starts_with('+'))
         });
         assert!(has_green, "added lines should be green");
+    }
+
+    #[test]
+    fn insight_severity_renders_with_distinct_color() {
+        let block = Block::SystemNote {
+            text: "Thread: consider edge cases".into(),
+            severity: NoteSeverity::Insight,
+        };
+        let lines = render_block_lines(&block, 80, false);
+        assert!(!lines.is_empty());
+        let has_cyan = lines.iter().any(|line| {
+            line.spans.iter().any(|span| span.style.fg == Some(Color::Cyan))
+        });
+        assert!(has_cyan, "Insight should render with Cyan color");
+    }
+
+    #[test]
+    fn policy_denied_outcome_renders_with_deny_icon() {
+        let block = Block::ToolCall {
+            tool_name: "shell.exec".into(),
+            args_summary: "cargo test".into(),
+            outcome: ToolOutcome::PolicyDenied,
+            collapsed: true,
+            token_cost: None,
+        };
+        let lines = render_block_lines(&block, 100, false);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("[DENY]"),
+            "PolicyDenied should show [DENY] icon, got: {text}"
+        );
+    }
+
+    #[test]
+    fn tool_call_shows_token_cost_in_debug_mode() {
+        let block = Block::ToolCall {
+            tool_name: "code.read".into(),
+            args_summary: "step 3/25".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+            token_cost: Some(1500),
+        };
+        let debug_lines = render_block_lines(&block, 100, true);
+        let debug_text: String = debug_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            debug_text.contains("1500 tok"),
+            "debug mode should show actual token cost, got: {debug_text}"
+        );
+        let normal_lines = render_block_lines(&block, 100, false);
+        let normal_text: String = normal_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            !normal_text.contains("tok"),
+            "normal mode should not show token annotation, got: {normal_text}"
+        );
+    }
+
+    #[test]
+    fn tool_call_no_token_cost_shows_nothing_in_debug() {
+        let block = Block::ToolCall {
+            tool_name: "code.read".into(),
+            args_summary: "step 3/25".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+            token_cost: None,
+        };
+        let debug_lines = render_block_lines(&block, 100, true);
+        let debug_text: String = debug_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            !debug_text.contains("tok"),
+            "no token cost should show no annotation, got: {debug_text}"
+        );
+    }
+
+    #[test]
+    fn tick_boundary_visible_in_debug_mode() {
+        let block = Block::SystemNote {
+            text: "Tick 47 completed".into(),
+            severity: NoteSeverity::Info,
+        };
+
+        let debug_lines = render_block_lines(&block, 80, true);
+        let debug_text: String = debug_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            debug_text.contains('─'),
+            "debug mode should render tick as boundary line, got: {debug_text}"
+        );
+
+        let normal_lines = render_block_lines(&block, 80, false);
+        let normal_text: String = normal_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            normal_text.contains("---"),
+            "normal mode should use standard format, got: {normal_text}"
+        );
     }
 }

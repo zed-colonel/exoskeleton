@@ -3,6 +3,8 @@
 //! Handles URL normalization, WebSocket URL derivation, initial vessel status
 //! fetch, conversation history loading, and task submission.
 
+use std::time::Duration;
+
 use exoskeleton_core::derive_external_principal_id;
 use serde_json::Value;
 
@@ -71,6 +73,7 @@ pub async fn fetch_vessel_status(client: &DaemonClient, app: &mut App) -> Result
         step_summary: String::new(),
     };
     app.connection = ConnectionStatus::Connected;
+    app.vessel_id = vessel_id.clone();
 
     Ok(vessel_id)
 }
@@ -79,18 +82,41 @@ pub async fn fetch_vessel_status(client: &DaemonClient, app: &mut App) -> Result
 ///
 /// Fetches the most recent conversation and its last N messages,
 /// converting them to Block items in the conversation state.
+#[allow(dead_code)]
 pub async fn load_conversation_history(
     client: &DaemonClient,
     app: &mut App,
     message_limit: usize,
-) -> Result<(), CliError> {
+) -> Result<Option<String>, CliError> {
+    load_conversation_history_for(client, app, message_limit, None).await
+}
+
+/// Load recent conversation history, optionally preferring a specific conversation ID.
+pub async fn load_conversation_history_for(
+    client: &DaemonClient,
+    app: &mut App,
+    message_limit: usize,
+    preferred_conversation_id: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    if let Some(preferred) = preferred_conversation_id {
+        if let Ok(messages) = client.conversation_messages(preferred, message_limit).await {
+            for msg in &messages {
+                if let Some(block) = history_message_to_block(msg) {
+                    app.conversation.add_block(block);
+                }
+            }
+            app.current_conversation_id = preferred.to_string();
+            return Ok(Some(preferred.to_string()));
+        }
+    }
+
     let conversations = client.conversations(1).await?;
     let conversation_id = match conversations.first() {
         Some(conv) => match conv.get("id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
-            None => return Ok(()),
+            None => return Ok(None),
         },
-        None => return Ok(()),
+        None => return Ok(None),
     };
 
     let messages = client
@@ -103,7 +129,9 @@ pub async fn load_conversation_history(
         }
     }
 
-    Ok(())
+    app.current_conversation_id = conversation_id.clone();
+
+    Ok(Some(conversation_id))
 }
 
 /// Convert a historical conversation message (JSON) to a Block.
@@ -117,6 +145,7 @@ fn history_message_to_block(msg: &Value) -> Option<Block> {
             }),
             "assistant" => Some(Block::AgentText {
                 text: content.to_string(),
+                is_streaming: false,
             }),
             "tool" => {
                 let tool_name = msg
@@ -133,6 +162,7 @@ fn history_message_to_block(msg: &Value) -> Option<Block> {
                             .unwrap_or("success"),
                     ),
                     collapsed: true,
+                    token_cost: None,
                 })
             }
             "system" => Some(Block::SystemNote {
@@ -152,6 +182,7 @@ fn history_message_to_block(msg: &Value) -> Option<Block> {
     if is_vessel_reply {
         Some(Block::AgentText {
             text: content.to_string(),
+            is_streaming: false,
         })
     } else {
         Some(Block::UserMessage {
@@ -173,6 +204,7 @@ fn outcome_from_str(outcome: &str) -> ToolOutcome {
     match outcome {
         "success" => ToolOutcome::Success,
         "pending" => ToolOutcome::Pending,
+        "denied" | "policy_denied" => ToolOutcome::PolicyDenied,
         other => ToolOutcome::Error(other.to_string()),
     }
 }
@@ -182,6 +214,21 @@ pub async fn send_message(client: &DaemonClient, content: &str) -> Result<(), Cl
     let principal = cli_principal_id();
     client.send_message(&principal, content).await?;
     Ok(())
+}
+
+/// Reconnect delays for exponential backoff.
+///
+/// Returns the sequence of delays to use: 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+/// Capped at 30 seconds.
+pub fn backoff_delays(max_retries: u32) -> Vec<Duration> {
+    let mut delays = Vec::with_capacity(max_retries as usize);
+    let mut delay = Duration::from_secs(1);
+    let max_delay = Duration::from_secs(30);
+    for _ in 0..max_retries {
+        delays.push(delay);
+        delay = (delay * 2).min(max_delay);
+    }
+    delays
 }
 
 #[cfg(test)]
@@ -255,6 +302,36 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_backoff_delays_double() {
+        let delays = backoff_delays(4);
+        assert_eq!(delays.len(), 4);
+        assert_eq!(delays[0], Duration::from_secs(1));
+        assert_eq!(delays[1], Duration::from_secs(2));
+        assert_eq!(delays[2], Duration::from_secs(4));
+        assert_eq!(delays[3], Duration::from_secs(8));
+    }
+
+    #[test]
+    fn reconnect_backoff_caps_at_30s() {
+        let delays = backoff_delays(10);
+        for delay in &delays {
+            assert!(
+                *delay <= Duration::from_secs(30),
+                "delay should not exceed 30s, got: {delay:?}"
+            );
+        }
+        assert_eq!(delays[5], Duration::from_secs(30));
+        assert_eq!(delays[6], Duration::from_secs(30));
+    }
+
+    #[test]
+    fn reconnect_backoff_returns_first_success() {
+        let delays = backoff_delays(1);
+        assert_eq!(delays.len(), 1);
+        assert_eq!(delays[0], Duration::from_secs(1));
+    }
+
+    #[test]
     fn history_message_to_block_user() {
         let msg = serde_json::json!({
             "role": "user",
@@ -278,7 +355,7 @@ mod tests {
         let block = history_message_to_block(&msg);
         assert!(block.is_some());
         match block.unwrap() {
-            Block::AgentText { text } => assert_eq!(text, "I'll add a test for you."),
+            Block::AgentText { text, .. } => assert_eq!(text, "I'll add a test for you."),
             other => panic!("expected AgentText, got {other:?}"),
         }
     }
