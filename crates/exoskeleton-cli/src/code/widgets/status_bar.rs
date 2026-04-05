@@ -8,26 +8,21 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::code::app::{ActivityState, ConnectionStatus, StatusState, SPINNER_FRAMES};
+use crate::code::app::{ActivityState, ConnectionStatus, StatusState};
 
 /// Widget for the top status bar.
 pub struct StatusBarWidget<'a> {
     status: &'a StatusState,
     connection: &'a ConnectionStatus,
-    activity: &'a ActivityState,
 }
 
 impl<'a> StatusBarWidget<'a> {
     pub fn new(
         status: &'a StatusState,
         connection: &'a ConnectionStatus,
-        activity: &'a ActivityState,
+        _activity: &'a ActivityState,
     ) -> Self {
-        Self {
-            status,
-            connection,
-            activity,
-        }
+        Self { status, connection }
     }
 }
 
@@ -117,21 +112,6 @@ impl<'a> Widget for StatusBarWidget<'a> {
         }
 
         buf.set_line(area.x, area.y, &line, area.width);
-
-        if area.height > 1 && self.activity.is_active && !self.activity.label.is_empty() {
-            let spinner = SPINNER_FRAMES
-                .get(self.activity.spinner_phase)
-                .copied()
-                .unwrap_or(' ');
-            let activity_line = Line::from(vec![
-                Span::styled(format!(" {spinner} "), Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    self.activity.label.clone(),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            buf.set_line(area.x, area.y + 1, &activity_line, area.width);
-        }
     }
 }
 
@@ -154,7 +134,7 @@ mod tests {
             is_active: true,
         };
         let widget = StatusBarWidget::new(&status, &connection, &activity);
-        let area = Rect::new(0, 0, 100, 2);
+        let area = Rect::new(0, 0, 100, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 

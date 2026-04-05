@@ -10,7 +10,9 @@ use ratatui::{
     Frame,
 };
 
-use super::app::App;
+use super::app::{App, UiMode};
+use super::widgets::activity::ActivityWidget;
+use super::widgets::approval::ApprovalWidget;
 use super::widgets::conversation::{estimate_rendered_height, ConversationWidget};
 use super::widgets::input::InputWidget;
 use super::widgets::status_bar::StatusBarWidget;
@@ -19,21 +21,46 @@ use super::widgets::status_bar::StatusBarWidget;
 pub fn view(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
-    let status_height = if app.activity.is_active { 2 } else { 1 };
-    let input_height: u16 = 2;
+    let status_height: u16 = 1;
+    let activity_height: u16 = if ActivityWidget::is_visible(&app.activity) {
+        1
+    } else {
+        0
+    };
+
+    let bottom_height: u16 = match &app.mode {
+        UiMode::Normal => 2,
+        UiMode::Approval(ctx) => {
+            let base = 6 + ctx.options.len() as u16;
+            let plan_lines = ctx
+                .plan_content
+                .as_ref()
+                .map(|c| c.lines().count().min(10) as u16)
+                .unwrap_or(0);
+            (base + plan_lines).min(
+                area.height.saturating_sub(
+                    status_height
+                        .saturating_add(activity_height)
+                        .saturating_add(3),
+                ),
+            )
+        }
+    };
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(status_height),
+            Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(input_height),
+            Constraint::Length(activity_height),
+            Constraint::Length(bottom_height),
         ])
         .split(area);
 
     let status_area = layout[0];
     let conversation_area = layout[1];
-    let input_area = layout[2];
+    let activity_area = layout[2];
+    let bottom_area = layout[3];
 
     let rendered_height = estimate_rendered_height(&app.conversation, conversation_area.width);
     app.conversation
@@ -45,9 +72,24 @@ pub fn view(app: &mut App, frame: &mut Frame) {
     let conversation = ConversationWidget::new(&app.conversation);
     frame.render_widget(conversation, conversation_area);
 
-    let is_connected = app.connection == super::app::ConnectionStatus::Connected;
-    let input = InputWidget::new(&app.input_text, is_connected);
-    frame.render_widget(input, input_area);
+    if activity_height > 0 {
+        let activity = ActivityWidget::new(&app.activity);
+        frame.render_widget(activity, activity_area);
+    }
+
+    match &app.mode {
+        UiMode::Normal => {
+            let is_connected = app.connection == super::app::ConnectionStatus::Connected;
+            let input = InputWidget::new(&app.input_text, is_connected);
+            frame.render_widget(input, bottom_area);
+        }
+        UiMode::Approval(context) => {
+            if let Some(ref state) = app.approval {
+                let approval = ApprovalWidget::new(context, state);
+                frame.render_widget(approval, bottom_area);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +135,50 @@ mod tests {
             text: "Add a test".into(),
             timestamp: chrono::Utc::now(),
         });
+
+        terminal
+            .draw(|frame| {
+                view(&mut app, frame);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn view_renders_with_approval_overlay() {
+        use crate::code::app::UiMode;
+        use crate::code::widgets::approval::{
+            tool_approval_options, ApprovalContext, ApprovalKind, ApprovalState,
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.mode = UiMode::Approval(ApprovalContext {
+            question_id: "q-1".into(),
+            title: "Tool requires approval".into(),
+            description: "shell.exec cargo test".into(),
+            options: tool_approval_options("shell.exec"),
+            kind: ApprovalKind::ToolApproval,
+            plan_content: None,
+            plan_draft_id: None,
+        });
+        app.approval = Some(ApprovalState::new());
+
+        terminal
+            .draw(|frame| {
+                view(&mut app, frame);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn view_renders_with_activity_indicator() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.activity.is_active = true;
+        app.activity.label = "Thinking...".into();
+        app.activity.spinner_phase = 2;
 
         terminal
             .draw(|frame| {

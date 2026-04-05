@@ -7,6 +7,7 @@
 //! in S2.
 
 use chrono::{DateTime, Utc};
+use exoskeleton_core::plan::Plan;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -17,6 +18,7 @@ use ratatui::{
 
 use crate::code::render::diff::{render_diff_summary, render_diff_text, DiffSummaryData};
 use crate::code::widgets::markdown::render_markdown;
+use crate::code::widgets::plan::render_plan_lines;
 
 /// A single visual element in the conversation.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +49,8 @@ pub enum Block {
         /// Full unified diff text (fetched from artifact, may be absent).
         full_text: Option<String>,
     },
+    /// Plan summary display (task list with status icons).
+    PlanSummary { plan: Plan },
 }
 
 /// Outcome of a tool invocation.
@@ -301,6 +305,7 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines
         }
+        Block::PlanSummary { plan } => render_plan_lines(plan),
     }
 }
 

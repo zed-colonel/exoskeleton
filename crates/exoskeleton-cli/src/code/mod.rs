@@ -187,6 +187,73 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                                 },
                             );
                         }
+                        SideEffect::SubmitAnswer {
+                            question_id,
+                            answer,
+                        } => {
+                            let source = connection::cli_principal_id();
+                            if let Err(e) =
+                                client.answer_question(&question_id, &answer, &source).await
+                            {
+                                let _ = app::update(
+                                    &mut app,
+                                    Message::MessageSent(Err(format!(
+                                        "Failed to submit answer: {e}"
+                                    ))),
+                                );
+                            }
+                        }
+                        SideEffect::ApprovePlan { plan_draft_id } => {
+                            if let Err(e) = client.approve_plan(&plan_draft_id).await {
+                                let _ = app::update(
+                                    &mut app,
+                                    Message::MessageSent(Err(format!(
+                                        "Failed to approve plan: {e}"
+                                    ))),
+                                );
+                            }
+                        }
+                        SideEffect::DenyPlan => {
+                            if let Err(e) = client.cancel_plan().await {
+                                let _ = app::update(
+                                    &mut app,
+                                    Message::MessageSent(Err(format!(
+                                        "Failed to cancel plan: {e}"
+                                    ))),
+                                );
+                            }
+                        }
+                        SideEffect::FetchPlanDraft(draft_id) => {
+                            let fetch_result = client.artifact(&draft_id).await;
+                            let content_result = match fetch_result {
+                                Ok(Some(value)) => Ok(value
+                                    .get("content")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string()),
+                                Ok(None) => Err("plan draft not found".into()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = app::update(
+                                &mut app,
+                                Message::PlanContentFetched {
+                                    plan_draft_id: draft_id,
+                                    result: content_result,
+                                },
+                            );
+                        }
+                        SideEffect::FetchPlanStatus => {
+                            let status_result = match client.plan_status().await {
+                                Ok(Some(value)) => Ok(value
+                                    .get("plan_draft_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())),
+                                Ok(None) => Ok(None),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ =
+                                app::update(&mut app, Message::PlanStatusFetched(status_result));
+                        }
                         SideEffect::Quit => {
                             break;
                         }

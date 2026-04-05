@@ -170,6 +170,106 @@ impl DaemonClient {
         Ok(value)
     }
 
+    /// POST /api/v1/questions/:id/answer -> acknowledgment.
+    pub async fn answer_question(
+        &self,
+        question_id: &str,
+        answer: &str,
+        source: &str,
+    ) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}/api/v1/questions/{}/answer", self.base_url, question_id);
+        let body = serde_json::json!({
+            "answer": answer,
+            "source": source,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CliError::Connection(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("<unreadable>"));
+
+        if status >= 400 {
+            return Err(CliError::DaemonError { status, body: text });
+        }
+
+        let value = serde_json::from_str(&text)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// GET /api/v1/plan/status -> PlanStatus or None (204).
+    pub async fn plan_status(&self) -> Result<Option<serde_json::Value>, CliError> {
+        let resp = self.get_raw("/api/v1/plan/status").await?;
+        if resp.status == 204 {
+            return Ok(None);
+        }
+        let value = serde_json::from_str(&resp.body)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(Some(value))
+    }
+
+    /// POST /api/v1/plan/approve -> acknowledgment.
+    pub async fn approve_plan(&self, plan_draft_id: &str) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}/api/v1/plan/approve", self.base_url);
+        let body = serde_json::json!({
+            "plan_draft_id": plan_draft_id,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CliError::Connection(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("<unreadable>"));
+
+        if status >= 400 {
+            return Err(CliError::DaemonError { status, body: text });
+        }
+
+        let value = serde_json::from_str(&text)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
+    /// POST /api/v1/plan/cancel -> acknowledgment.
+    pub async fn cancel_plan(&self) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}/api/v1/plan/cancel", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .send()
+            .await
+            .map_err(|e| CliError::Connection(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("<unreadable>"));
+
+        if status >= 400 {
+            return Err(CliError::DaemonError { status, body: text });
+        }
+
+        let value = serde_json::from_str(&text)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        Ok(value)
+    }
+
     /// GET /api/v1/artifacts/:id -> Artifact or None (404).
     pub async fn artifact(&self, id: &str) -> Result<Option<serde_json::Value>, CliError> {
         let path = format!("/api/v1/artifacts/{id}");
@@ -490,5 +590,21 @@ mod tests {
     fn conversation_messages_endpoint_path() {
         let client = DaemonClient::new("https://example.com:8080/");
         assert_eq!(client.base_url(), "https://example.com:8080");
+    }
+
+    // ── T27: answer_question_endpoint_path ──
+
+    #[test]
+    fn answer_question_endpoint_path() {
+        let client = DaemonClient::new("http://localhost:7600");
+        assert_eq!(client.base_url(), "http://localhost:7600");
+    }
+
+    // ── T28: approve_plan_endpoint_path ──
+
+    #[test]
+    fn approve_plan_endpoint_path() {
+        let client = DaemonClient::new("http://localhost:7600/");
+        assert_eq!(client.base_url(), "http://localhost:7600");
     }
 }

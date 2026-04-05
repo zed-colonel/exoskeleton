@@ -9,6 +9,10 @@ use exoskeleton_core::{EventType, LiveEvent};
 
 use crate::code::render::diff::{DiffFileSummary, DiffSummaryData};
 
+use super::widgets::approval::{
+    plan_approval_options, tool_approval_options, ApprovalAction, ApprovalContext, ApprovalKind,
+    ApprovalOption, ApprovalState,
+};
 use super::widgets::conversation::{Block, ConversationState, NoteSeverity, ToolOutcome};
 
 /// The top-level UI mode.
@@ -16,7 +20,8 @@ use super::widgets::conversation::{Block, ConversationState, NoteSeverity, ToolO
 pub enum UiMode {
     /// Standard conversation view — input area active.
     Normal,
-    // Approval(ApprovalContext) — added in S3
+    /// Approval overlay is active — replaces input area.
+    Approval(ApprovalContext),
 }
 
 /// Connection status to the vessel daemon.
@@ -86,6 +91,8 @@ pub struct App {
     pub connection: ConnectionStatus,
     /// Current UI mode.
     pub mode: UiMode,
+    /// Mutable state for the active approval overlay (if any).
+    pub approval: Option<ApprovalState>,
     /// Terminal dimensions.
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -103,6 +110,7 @@ impl App {
             activity: ActivityState::default(),
             connection: ConnectionStatus::Connecting,
             mode: UiMode::Normal,
+            approval: None,
             terminal_width: 80,
             terminal_height: 24,
             should_quit: false,
@@ -141,6 +149,16 @@ pub enum Message {
         artifact_id: String,
         result: Result<serde_json::Value, String>,
     },
+    /// An approval action was completed (overlay resolved).
+    #[allow(dead_code)]
+    ApprovalResolved(ApprovalAction),
+    /// Plan content was fetched for a plan approval overlay.
+    PlanContentFetched {
+        plan_draft_id: String,
+        result: Result<String, String>,
+    },
+    /// Current plan status was fetched to discover the active draft ID.
+    PlanStatusFetched(Result<Option<String>, String>),
 }
 
 /// Side effects produced by update() for the event loop to execute.
@@ -154,6 +172,16 @@ pub enum SideEffect {
     /// Fetch an artifact by ID via GET /api/v1/artifacts/{id}.
     #[allow(dead_code)]
     FetchArtifact(String),
+    /// Submit an answer to a question via POST /api/v1/questions/{id}/answer.
+    SubmitAnswer { question_id: String, answer: String },
+    /// Approve a plan via POST /api/v1/plan/approve.
+    ApprovePlan { plan_draft_id: String },
+    /// Cancel/deny a plan via POST /api/v1/plan/cancel.
+    DenyPlan,
+    /// Fetch plan draft content via GET /api/v1/artifacts/{id}.
+    FetchPlanDraft(String),
+    /// Fetch current plan status to discover the active draft.
+    FetchPlanStatus,
     /// Exit the TUI.
     Quit,
 }
@@ -196,6 +224,7 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
                     (app.activity.spinner_phase + 1) % SPINNER_FRAMES.len();
             }
         }
+        Message::ApprovalResolved(_action) => {}
         Message::MessageSent(result) => {
             if let Err(err) = result {
                 app.conversation.add_block(Block::SystemNote {
@@ -210,6 +239,15 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
         } => {
             handle_artifact_fetched(app, &artifact_id, result);
         }
+        Message::PlanContentFetched {
+            plan_draft_id,
+            result,
+        } => {
+            handle_plan_content_fetched(app, &plan_draft_id, result);
+        }
+        Message::PlanStatusFetched(result) => {
+            handle_plan_status_fetched(app, result, &mut effects);
+        }
     }
 
     effects
@@ -217,8 +255,9 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
 
 /// Handle keyboard input.
 fn handle_key(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>) {
-    match app.mode {
+    match &app.mode {
         UiMode::Normal => handle_key_normal(app, key, effects),
+        UiMode::Approval(_) => handle_key_approval(app, key, effects),
     }
 }
 
@@ -270,9 +309,203 @@ fn handle_key_normal(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>
     }
 }
 
+/// Handle keyboard input in Approval mode.
+fn handle_key_approval(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>) {
+    let context = match &app.mode {
+        UiMode::Approval(ctx) => ctx.clone(),
+        UiMode::Normal => return,
+    };
+    let is_text_mode = match app.approval.as_ref() {
+        Some(state) => state.is_text_mode,
+        None => return,
+    };
+
+    if is_text_mode {
+        match key.code {
+            KeyCode::Enter => {
+                let (value, appended) = {
+                    let state = app.approval.as_ref().expect("approval state exists");
+                    let value = if context.options.is_empty() {
+                        state.text_input.clone()
+                    } else {
+                        context.options[state.selected_index].value.clone()
+                    };
+                    let appended = if !state.text_input.is_empty() && !context.options.is_empty() {
+                        Some(state.text_input.clone())
+                    } else {
+                        None
+                    };
+                    (value, appended)
+                };
+                resolve_approval(
+                    app,
+                    effects,
+                    ApprovalAction::Selected {
+                        value,
+                        appended_text: appended,
+                    },
+                );
+            }
+            KeyCode::Esc => {
+                if context.options.is_empty() {
+                    resolve_approval(app, effects, ApprovalAction::Cancelled);
+                } else if let Some(s) = app.approval.as_mut() {
+                    s.is_text_mode = false;
+                }
+            }
+            KeyCode::Tab => {
+                if !context.options.is_empty() {
+                    if let Some(s) = app.approval.as_mut() {
+                        s.is_text_mode = false;
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(state) = app.approval.as_mut() {
+                    state.text_input.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(state) = app.approval.as_mut() {
+                    state.text_input.push(c);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Up => {
+            if let Some(state) = app.approval.as_mut() {
+                state.select_prev(context.options.len());
+            }
+        }
+        KeyCode::Down => {
+            if let Some(state) = app.approval.as_mut() {
+                state.select_next(context.options.len());
+            }
+        }
+        KeyCode::Enter => {
+            if !context.options.is_empty() {
+                let selected_index = app
+                    .approval
+                    .as_ref()
+                    .map(|state| state.selected_index)
+                    .unwrap_or(0);
+                let selected = &context.options[selected_index];
+                resolve_approval(
+                    app,
+                    effects,
+                    ApprovalAction::Selected {
+                        value: selected.value.clone(),
+                        appended_text: None,
+                    },
+                );
+            }
+        }
+        KeyCode::Esc => {
+            resolve_approval(app, effects, ApprovalAction::Cancelled);
+        }
+        KeyCode::Tab => {
+            if let Some(s) = app.approval.as_mut() {
+                s.is_text_mode = true;
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(s) = app.approval.as_mut() {
+                s.plan_scroll = s.plan_scroll.saturating_sub(1);
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(s) = app.approval.as_mut() {
+                s.plan_scroll = s.plan_scroll.saturating_add(1);
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(option) = context.options.iter().find(|o| o.hotkey == Some(c)) {
+                resolve_approval(
+                    app,
+                    effects,
+                    ApprovalAction::Selected {
+                        value: option.value.clone(),
+                        appended_text: None,
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve an approval action: transition back to Normal mode and emit side effects.
+fn resolve_approval(app: &mut App, effects: &mut Vec<SideEffect>, action: ApprovalAction) {
+    let context = match &app.mode {
+        UiMode::Approval(ctx) => ctx.clone(),
+        UiMode::Normal => return,
+    };
+
+    match (&context.kind, &action) {
+        (
+            ApprovalKind::PlanApproval,
+            ApprovalAction::Selected {
+                value,
+                appended_text,
+            },
+        ) => {
+            if value == "approve" {
+                if let Some(ref draft_id) = context.plan_draft_id {
+                    effects.push(SideEffect::ApprovePlan {
+                        plan_draft_id: draft_id.clone(),
+                    });
+                }
+            } else if value == "deny" {
+                effects.push(SideEffect::DenyPlan);
+            } else if value == "edit" {
+                let feedback = appended_text.clone().unwrap_or_default();
+                if !feedback.is_empty() {
+                    effects.push(SideEffect::SendMessage(format!(
+                        "Plan feedback: {feedback}"
+                    )));
+                }
+                effects.push(SideEffect::DenyPlan);
+            }
+        }
+        (
+            _,
+            ApprovalAction::Selected {
+                value,
+                appended_text,
+            },
+        ) => {
+            let answer = if let Some(ref text) = appended_text {
+                format!("{value}: {text}")
+            } else {
+                value.clone()
+            };
+            effects.push(SideEffect::SubmitAnswer {
+                question_id: context.question_id.clone(),
+                answer,
+            });
+        }
+        (ApprovalKind::PlanApproval, ApprovalAction::Cancelled) => {
+            effects.push(SideEffect::DenyPlan);
+        }
+        (_, ApprovalAction::Cancelled) => {
+            effects.push(SideEffect::SubmitAnswer {
+                question_id: context.question_id.clone(),
+                answer: "deny".into(),
+            });
+        }
+    }
+
+    app.mode = UiMode::Normal;
+    app.approval = None;
+}
+
 /// Handle a WebSocket LiveEvent.
 fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
-    let effects = Vec::new();
+    let mut effects = Vec::new();
 
     match event.event_type {
         EventType::InnerLoopStarted => {
@@ -362,32 +595,71 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 app.status.vessel_mode = format!("{:?}", snapshot.vessel_mode).to_lowercase();
                 app.status.token_summary =
                     format_token_count(snapshot.budget_status.total_tokens_remaining());
+
+                if let Some(ref plan) = snapshot.plan {
+                    app.conversation
+                        .add_block(Block::PlanSummary { plan: plan.clone() });
+                }
             }
         }
         EventType::QuestionAsked => {
             if let Some(ref detail) = event.question_detail {
-                let mut text = format!("Question: {}", detail.question);
-                if let Some(ref choices) = detail.choices {
-                    for (i, choice) in choices.iter().enumerate() {
-                        text.push_str(&format!("\n  {}. {}", i + 1, choice));
-                    }
-                }
-                text.push_str("\n  (Interactive input available in S3)");
-                app.conversation.add_block(Block::SystemNote {
-                    text,
-                    severity: NoteSeverity::Warning,
-                });
+                let options: Vec<ApprovalOption> = match &detail.choices {
+                    Some(choices) => choices
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| ApprovalOption {
+                            label: c.clone(),
+                            hotkey: None,
+                            value: format!("{i}"),
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+
+                let context = ApprovalContext {
+                    question_id: detail.question_id.clone(),
+                    title: "Agent question".into(),
+                    description: detail.question.clone(),
+                    options: options.clone(),
+                    kind: ApprovalKind::Question,
+                    plan_content: None,
+                    plan_draft_id: None,
+                };
+
+                let state = if options.is_empty() {
+                    ApprovalState::new_text_mode()
+                } else {
+                    ApprovalState::new()
+                };
+
+                app.mode = UiMode::Approval(context);
+                app.approval = Some(state);
             }
         }
         EventType::PolicyApprovalRequired => {
             if let Some(ref detail) = event.policy_detail {
-                app.conversation.add_block(Block::SystemNote {
-                    text: format!(
-                        "Policy: {} requires approval ({})",
-                        detail.tool_name, detail.rule
-                    ),
-                    severity: NoteSeverity::Warning,
-                });
+                if let Some(ref q_detail) = event.question_detail {
+                    let context = ApprovalContext {
+                        question_id: q_detail.question_id.clone(),
+                        title: "Tool requires approval".into(),
+                        description: format!("{}\n{}", detail.tool_name, detail.rule),
+                        options: tool_approval_options(&detail.tool_name),
+                        kind: ApprovalKind::ToolApproval,
+                        plan_content: None,
+                        plan_draft_id: None,
+                    };
+                    app.mode = UiMode::Approval(context);
+                    app.approval = Some(ApprovalState::new());
+                } else {
+                    app.conversation.add_block(Block::SystemNote {
+                        text: format!(
+                            "Policy: {} requires approval ({})",
+                            detail.tool_name, detail.rule
+                        ),
+                        severity: NoteSeverity::Warning,
+                    });
+                }
             }
         }
         EventType::PlanModeTransition => {
@@ -397,6 +669,14 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                     severity: NoteSeverity::Info,
                 });
                 app.status.vessel_mode = detail.to.clone();
+
+                if detail.to == "planning" {
+                    if let Some(ref draft_id) = detail.plan_draft_id {
+                        effects.push(SideEffect::FetchPlanDraft(draft_id.clone()));
+                    } else {
+                        effects.push(SideEffect::FetchPlanStatus);
+                    }
+                }
             }
         }
         _ => {
@@ -439,6 +719,54 @@ fn handle_artifact_fetched(
         }
         Err(err) => {
             tracing::warn!("failed to fetch artifact: {err}");
+        }
+    }
+}
+
+/// Handle fetched plan draft content — triggers plan approval overlay.
+fn handle_plan_content_fetched(app: &mut App, plan_draft_id: &str, result: Result<String, String>) {
+    match result {
+        Ok(content) => {
+            let context = ApprovalContext {
+                question_id: String::new(),
+                title: "Plan approval required".into(),
+                description: String::new(),
+                options: plan_approval_options(),
+                kind: ApprovalKind::PlanApproval,
+                plan_content: Some(content),
+                plan_draft_id: Some(plan_draft_id.to_string()),
+            };
+            app.mode = UiMode::Approval(context);
+            app.approval = Some(ApprovalState::new());
+        }
+        Err(err) => {
+            app.conversation.add_block(Block::SystemNote {
+                text: format!("Failed to fetch plan draft: {err}"),
+                severity: NoteSeverity::Warning,
+            });
+        }
+    }
+}
+
+/// Handle fetched plan status — discover active draft ID when transition events omit it.
+fn handle_plan_status_fetched(
+    app: &mut App,
+    result: Result<Option<String>, String>,
+    effects: &mut Vec<SideEffect>,
+) {
+    match result {
+        Ok(Some(plan_draft_id)) => effects.push(SideEffect::FetchPlanDraft(plan_draft_id)),
+        Ok(None) => {
+            app.conversation.add_block(Block::SystemNote {
+                text: "Planning mode entered, but no plan draft is available yet".into(),
+                severity: NoteSeverity::Warning,
+            });
+        }
+        Err(err) => {
+            app.conversation.add_block(Block::SystemNote {
+                text: format!("Failed to fetch plan status: {err}"),
+                severity: NoteSeverity::Warning,
+            });
         }
     }
 }
@@ -490,6 +818,8 @@ mod tests {
     use exoskeleton_core::{
         CodeDiffOperation, DiffSummary, EventType, FileDiffEntry, InnerLoopStepDetail, LiveEvent,
     };
+
+    use crate::code::widgets::approval::{ApprovalKind, ApprovalState};
 
     use super::*;
 
@@ -844,10 +1174,11 @@ mod tests {
             ..LiveEvent::new(Some(1))
         };
 
-        update(&mut app, Message::WsEvent(event));
+        let effects = update(&mut app, Message::WsEvent(event));
 
         assert_eq!(app.status.vessel_mode, "planning");
         assert_eq!(app.conversation.len(), 1);
+        assert!(matches!(effects.as_slice(), [SideEffect::FetchPlanStatus]));
     }
 
     #[test]
@@ -962,6 +1293,173 @@ mod tests {
                 artifact_id: "nonexistent".into(),
                 result: Err("not found".into()),
             },
+        );
+    }
+
+    // ── T22: question_asked_event_enters_approval_mode ──
+
+    #[test]
+    fn question_asked_event_enters_approval_mode() {
+        let mut app = App::new();
+        let event = LiveEvent {
+            event_type: EventType::QuestionAsked,
+            summary: "Agent question".into(),
+            question_detail: Some(exoskeleton_core::QuestionDetail {
+                question_id: "q-100".into(),
+                question: "Which database?".into(),
+                choices: Some(vec!["PostgreSQL".into(), "SQLite".into()]),
+                status: "pending".into(),
+            }),
+            ..LiveEvent::new(Some(1))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        match &app.mode {
+            UiMode::Approval(ctx) => {
+                assert_eq!(ctx.kind, ApprovalKind::Question);
+                assert_eq!(ctx.question_id, "q-100");
+                assert_eq!(ctx.options.len(), 2);
+            }
+            other => panic!("expected Approval mode, got {other:?}"),
+        }
+        assert!(app.approval.is_some());
+        assert!(!app.approval.as_ref().expect("approval exists").is_text_mode);
+    }
+
+    // ── T23: approval_y_produces_submit_effect ──
+
+    #[test]
+    fn approval_y_produces_submit_effect() {
+        let mut app = App::new();
+        use crate::code::widgets::approval::{tool_approval_options, ApprovalContext};
+
+        app.mode = UiMode::Approval(ApprovalContext {
+            question_id: "q-200".into(),
+            title: "Tool requires approval".into(),
+            description: "shell.exec".into(),
+            options: tool_approval_options("shell.exec"),
+            kind: ApprovalKind::ToolApproval,
+            plan_content: None,
+            plan_draft_id: None,
+        });
+        app.approval = Some(ApprovalState::new());
+
+        let effects = update(&mut app, Message::Key(key(KeyCode::Char('y'))));
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::SubmitAnswer { .. })),
+            "should produce SubmitAnswer side effect, got: {effects:?}"
+        );
+        assert_eq!(app.mode, UiMode::Normal);
+        assert!(app.approval.is_none());
+    }
+
+    // ── T24: approval_returns_to_normal_mode ──
+
+    #[test]
+    fn approval_returns_to_normal_mode() {
+        let mut app = App::new();
+        use crate::code::widgets::approval::{tool_approval_options, ApprovalContext};
+
+        app.mode = UiMode::Approval(ApprovalContext {
+            question_id: "q-300".into(),
+            title: "Approval".into(),
+            description: "test".into(),
+            options: tool_approval_options("test"),
+            kind: ApprovalKind::ToolApproval,
+            plan_content: None,
+            plan_draft_id: None,
+        });
+        app.approval = Some(ApprovalState::new());
+
+        let _effects = update(&mut app, Message::Key(key(KeyCode::Esc)));
+
+        assert_eq!(app.mode, UiMode::Normal);
+        assert!(app.approval.is_none());
+    }
+
+    // ── T25: tick_completed_with_plan_creates_plan_summary ──
+
+    #[test]
+    fn tick_completed_with_plan_creates_plan_summary() {
+        use std::collections::HashMap;
+
+        use exoskeleton_core::{
+            id::{PlanTaskId, VesselId},
+            plan::{Plan, PlanTask, PlanTaskStatus},
+            StateSnapshot,
+        };
+
+        let mut app = App::new();
+
+        let plan = Plan {
+            objective: "Test objective".into(),
+            tasks: vec![
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "Task A".into(),
+                    status: PlanTaskStatus::Completed,
+                    depends_on: Vec::new(),
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+                PlanTask {
+                    id: PlanTaskId::new(),
+                    description: "Task B".into(),
+                    status: PlanTaskStatus::Pending,
+                    depends_on: Vec::new(),
+                    tool_hint: None,
+                    metadata: HashMap::new(),
+                },
+            ],
+            updated_at: chrono::Utc::now(),
+        };
+
+        let mut snapshot = StateSnapshot::initial(VesselId::new(), "mission".into());
+        snapshot.plan = Some(plan);
+
+        let event = LiveEvent {
+            event_type: EventType::TickCompleted,
+            summary: "Tick 5 completed".into(),
+            snapshot: Some(snapshot),
+            ..LiveEvent::new(Some(5))
+        };
+
+        update(&mut app, Message::WsEvent(event));
+
+        let has_plan = app
+            .conversation
+            .blocks()
+            .iter()
+            .any(|b| matches!(b, Block::PlanSummary { .. }));
+        assert!(has_plan, "should have a PlanSummary block");
+    }
+
+    // ── T26: plan_mode_transition_with_draft_triggers_fetch ──
+
+    #[test]
+    fn plan_mode_transition_with_draft_triggers_fetch() {
+        let mut app = App::new();
+        let event = LiveEvent {
+            event_type: EventType::PlanModeTransition,
+            plan_mode_detail: Some(exoskeleton_core::PlanModeDetail {
+                from: "normal".into(),
+                to: "planning".into(),
+                plan_draft_id: Some("draft-abc-123".into()),
+            }),
+            ..LiveEvent::new(Some(1))
+        };
+
+        let effects = update(&mut app, Message::WsEvent(event));
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::FetchPlanDraft(id) if id == "draft-abc-123")),
+            "should produce FetchPlanDraft side effect, got: {effects:?}"
         );
     }
 }
