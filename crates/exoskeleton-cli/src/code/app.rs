@@ -7,6 +7,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use exoskeleton_core::{EventType, LiveEvent};
 
+use crate::code::render::diff::{DiffFileSummary, DiffSummaryData};
+
 use super::widgets::conversation::{Block, ConversationState, NoteSeverity, ToolOutcome};
 
 /// The top-level UI mode.
@@ -134,6 +136,11 @@ pub enum Message {
     SpinnerTick,
     /// Result of submitting a message via the inbox.
     MessageSent(Result<(), String>),
+    /// Result of fetching an artifact.
+    ArtifactFetched {
+        artifact_id: String,
+        result: Result<serde_json::Value, String>,
+    },
 }
 
 /// Side effects produced by update() for the event loop to execute.
@@ -144,6 +151,9 @@ pub enum SideEffect {
     /// Attempt to reconnect the WebSocket.
     #[allow(dead_code)]
     Reconnect,
+    /// Fetch an artifact by ID via GET /api/v1/artifacts/{id}.
+    #[allow(dead_code)]
+    FetchArtifact(String),
     /// Exit the TUI.
     Quit,
 }
@@ -167,7 +177,8 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
             app.terminal_height = h;
         }
         Message::WsEvent(event) => {
-            handle_ws_event(app, event);
+            let ws_effects = handle_ws_event(app, event);
+            effects.extend(ws_effects);
         }
         Message::WsDisconnected => {
             app.connection = ConnectionStatus::Disconnected;
@@ -192,6 +203,12 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
                     severity: NoteSeverity::Warning,
                 });
             }
+        }
+        Message::ArtifactFetched {
+            artifact_id,
+            result,
+        } => {
+            handle_artifact_fetched(app, &artifact_id, result);
         }
     }
 
@@ -254,7 +271,9 @@ fn handle_key_normal(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>
 }
 
 /// Handle a WebSocket LiveEvent.
-fn handle_ws_event(app: &mut App, event: LiveEvent) {
+fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
+    let effects = Vec::new();
+
     match event.event_type {
         EventType::InnerLoopStarted => {
             app.activity.label = "Thinking...".into();
@@ -296,6 +315,30 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) {
                 });
                 app.status.token_summary = format_token_count(detail.tokens_total);
             }
+
+            if let Some(ref diff) = event.diff_summary {
+                let summary = DiffSummaryData {
+                    files_modified: diff.files_modified,
+                    lines_added: diff.lines_added,
+                    lines_removed: diff.lines_removed,
+                    net_delta: diff.net_delta,
+                    files: diff
+                        .files
+                        .iter()
+                        .map(|file| DiffFileSummary {
+                            path: file.path.clone(),
+                            lines_added: file.lines_added,
+                            lines_removed: file.lines_removed,
+                            operation: format!("{:?}", file.operation).to_lowercase(),
+                        })
+                        .collect(),
+                };
+                app.conversation.add_block(Block::Diff {
+                    summary,
+                    full_text: None,
+                });
+            }
+
             app.activity.label = String::new();
             app.activity.is_active = false;
         }
@@ -365,6 +408,39 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) {
             }
         }
     }
+
+    effects
+}
+
+/// Handle a fetched artifact (currently used for CodeDiff full text).
+fn handle_artifact_fetched(
+    app: &mut App,
+    _artifact_id: &str,
+    result: Result<serde_json::Value, String>,
+) {
+    match result {
+        Ok(value) => {
+            let diff_text = value
+                .get("content")
+                .or_else(|| value.get("diff_text"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            if let Some(text) = diff_text {
+                for block in app.conversation.blocks_mut().iter_mut().rev() {
+                    if let Block::Diff { full_text, .. } = block {
+                        if full_text.is_none() {
+                            *full_text = Some(text);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!("failed to fetch artifact: {err}");
+        }
+    }
 }
 
 fn tool_outcome_from_str(outcome: &str) -> ToolOutcome {
@@ -411,7 +487,9 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use exoskeleton_core::{EventType, InnerLoopStepDetail, LiveEvent};
+    use exoskeleton_core::{
+        CodeDiffOperation, DiffSummary, EventType, FileDiffEntry, InnerLoopStepDetail, LiveEvent,
+    };
 
     use super::*;
 
@@ -791,5 +869,99 @@ mod tests {
         update(&mut app, Message::Key(key(KeyCode::End)));
 
         assert!(app.conversation.auto_scroll());
+    }
+
+    // ── T26: handle_inner_loop_completed_with_diff_creates_diff_block ──
+
+    #[test]
+    fn handle_inner_loop_completed_with_diff_creates_diff_block() {
+        let mut app = App::new();
+        let event = LiveEvent {
+            event_type: EventType::InnerLoopCompleted,
+            summary: "Inner loop completed".into(),
+            inner_loop_detail: Some(InnerLoopStepDetail {
+                step_number: 3,
+                max_steps: 25,
+                tool_name: None,
+                tool_outcome: None,
+                tokens_this_step: 0,
+                tokens_total: 2000,
+                completion_reason: Some("agent_complete".into()),
+            }),
+            diff_summary: Some(DiffSummary {
+                files_modified: 1,
+                lines_added: 5,
+                lines_removed: 2,
+                net_delta: 3,
+                files: vec![FileDiffEntry {
+                    path: "src/main.rs".into(),
+                    lines_added: 5,
+                    lines_removed: 2,
+                    operation: CodeDiffOperation::Edit,
+                }],
+            }),
+            ..LiveEvent::new(Some(1))
+        };
+
+        let _effects = update(&mut app, Message::WsEvent(event));
+
+        let has_diff = app
+            .conversation
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, Block::Diff { .. }));
+        assert!(has_diff, "should have a Diff block from DiffSummary");
+
+        let diff_block = app
+            .conversation
+            .blocks()
+            .iter()
+            .find(|block| matches!(block, Block::Diff { .. }));
+        match diff_block {
+            Some(Block::Diff { summary, full_text }) => {
+                assert_eq!(summary.files_modified, 1);
+                assert_eq!(summary.lines_added, 5);
+                assert_eq!(summary.lines_removed, 2);
+                assert!(full_text.is_none(), "full_text should be None initially");
+                assert_eq!(summary.files.len(), 1);
+                assert_eq!(summary.files[0].path, "src/main.rs");
+            }
+            _ => panic!("expected Diff block"),
+        }
+    }
+
+    // ── T27: fetch_artifact_side_effect_infrastructure ──
+
+    #[test]
+    fn fetch_artifact_side_effect_infrastructure() {
+        let effect = SideEffect::FetchArtifact("test-artifact-id".into());
+        match effect {
+            SideEffect::FetchArtifact(id) => assert_eq!(id, "test-artifact-id"),
+            _ => panic!("expected FetchArtifact"),
+        }
+
+        let msg = Message::ArtifactFetched {
+            artifact_id: "test-id".into(),
+            result: Ok(serde_json::json!({"content": "test"})),
+        };
+        match msg {
+            Message::ArtifactFetched {
+                artifact_id,
+                result,
+            } => {
+                assert_eq!(artifact_id, "test-id");
+                assert!(result.is_ok());
+            }
+            _ => panic!("expected ArtifactFetched"),
+        }
+
+        let mut app = App::new();
+        let _effects = update(
+            &mut app,
+            Message::ArtifactFetched {
+                artifact_id: "nonexistent".into(),
+                result: Err("not found".into()),
+            },
+        );
     }
 }

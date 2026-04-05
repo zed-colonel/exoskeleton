@@ -15,6 +15,9 @@ use ratatui::{
     widgets::{Block as RatatuiBlock, Borders, Paragraph, Widget, Wrap},
 };
 
+use crate::code::render::diff::{render_diff_summary, render_diff_text, DiffSummaryData};
+use crate::code::widgets::markdown::render_markdown;
+
 /// A single visual element in the conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
@@ -36,6 +39,13 @@ pub enum Block {
     SystemNote {
         text: String,
         severity: NoteSeverity,
+    },
+    /// Diff visualization (from CodeDiff artifacts or DiffSummary events).
+    Diff {
+        /// Summary data (always available from LiveEvent).
+        summary: DiffSummaryData,
+        /// Full unified diff text (fetched from artifact, may be absent).
+        full_text: Option<String>,
     },
 }
 
@@ -116,6 +126,11 @@ impl ConversationState {
         &self.blocks
     }
 
+    /// Get a mutable reference to all blocks (for updating diff content).
+    pub fn blocks_mut(&mut self) -> &mut Vec<Block> {
+        &mut self.blocks
+    }
+
     /// Whether auto-scroll is currently active.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn auto_scroll(&self) -> bool {
@@ -181,9 +196,8 @@ impl Default for ConversationState {
     }
 }
 
-/// Render a block to ratatui Lines (plain text for S1).
+/// Render a block to ratatui Lines.
 fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
-    let _ = width;
     match block {
         Block::UserMessage { text, timestamp } => {
             let time_str = timestamp.format("%H:%M").to_string();
@@ -210,9 +224,14 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
                     .add_modifier(Modifier::BOLD),
             )]);
             let mut lines = vec![Line::from(""), header];
-            for line in text.lines() {
-                lines.push(Line::from(format!("  {line}")));
+
+            let md_lines = render_markdown(text, width);
+            for md_line in md_lines {
+                let mut indented_spans = vec![Span::raw("  ".to_string())];
+                indented_spans.extend(md_line.spans);
+                lines.push(Line::from(indented_spans));
             }
+
             lines.push(Line::from(""));
             lines
         }
@@ -252,6 +271,35 @@ fn render_block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
                 format!("  --- {text} ---"),
                 Style::default().fg(color),
             )])]
+        }
+        Block::Diff { summary, full_text } => {
+            let header = Line::from(vec![Span::styled(
+                " Diff ",
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+            let mut lines = vec![Line::from(""), header];
+
+            if let Some(diff_text) = full_text {
+                let diff_lines = render_diff_text(diff_text);
+                for diff_line in diff_lines {
+                    let mut indented = vec![Span::raw("  ".to_string())];
+                    indented.extend(diff_line.spans);
+                    lines.push(Line::from(indented));
+                }
+            } else {
+                let summary_lines = render_diff_summary(summary);
+                for summary_line in summary_lines {
+                    let mut indented = vec![Span::raw("  ".to_string())];
+                    indented.extend(summary_line.spans);
+                    lines.push(Line::from(indented));
+                }
+            }
+
+            lines.push(Line::from(""));
+            lines
         }
     }
 }
@@ -443,5 +491,81 @@ mod tests {
         state.scroll_down(200);
         assert!(state.auto_scroll());
         assert!(!state.has_new_content_below());
+    }
+
+    // ── T24: render_agent_text_with_markdown ──
+
+    #[test]
+    fn render_agent_text_with_markdown() {
+        let block = Block::AgentText {
+            text: "Here is **bold** and `code`".into(),
+        };
+        let lines = render_block_lines(&block, 80);
+
+        assert!(
+            lines.len() >= 3,
+            "should have header + markdown lines + trailing blank"
+        );
+
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("bold"), "should contain bold text");
+        assert!(text.contains("code"), "should contain inline code");
+
+        let has_bold = lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("bold")
+                    && span
+                        .style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+            })
+        });
+        assert!(has_bold, "bold text should have BOLD modifier");
+    }
+
+    // ── T25: render_diff_block ──
+
+    #[test]
+    fn render_diff_block() {
+        use crate::code::render::diff::{DiffFileSummary, DiffSummaryData};
+
+        let block = Block::Diff {
+            summary: DiffSummaryData {
+                files_modified: 1,
+                lines_added: 3,
+                lines_removed: 1,
+                net_delta: 2,
+                files: vec![DiffFileSummary {
+                    path: "src/main.rs".into(),
+                    operation: "edit".into(),
+                    lines_added: 3,
+                    lines_removed: 1,
+                }],
+            },
+            full_text: Some(
+                "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,5 @@\n fn main() {\n-    old();\n+    new();\n+    added();\n+    more();\n }".into(),
+            ),
+        };
+        let lines = render_block_lines(&block, 80);
+
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(text.contains("src/main.rs"), "should show file path");
+        assert!(text.contains("+"), "should have added lines");
+
+        let has_green = lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Green) && span.content.starts_with('+'))
+        });
+        assert!(has_green, "added lines should be green");
     }
 }

@@ -7,6 +7,7 @@
 pub mod app;
 pub mod connection;
 pub mod messages;
+pub mod render;
 pub mod view;
 pub mod widgets;
 
@@ -171,6 +172,21 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                                 warn!("reconnection failed: {e}");
                             }
                         },
+                        SideEffect::FetchArtifact(artifact_id) => {
+                            let fetch_result = client.artifact(&artifact_id).await;
+                            let msg_result = match fetch_result {
+                                Ok(Some(value)) => Ok(value),
+                                Ok(None) => Err("artifact not found".into()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = app::update(
+                                &mut app,
+                                Message::ArtifactFetched {
+                                    artifact_id,
+                                    result: msg_result,
+                                },
+                            );
+                        }
                         SideEffect::Quit => {
                             break;
                         }
