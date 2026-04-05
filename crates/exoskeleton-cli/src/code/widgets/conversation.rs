@@ -94,6 +94,8 @@ pub struct ConversationState {
     last_rendered_height: u16,
     /// Viewport height from last render pass.
     last_viewport_height: u16,
+    /// Index of the currently focused block (for collapse/expand). None = no focus.
+    focused_block: Option<usize>,
 }
 
 impl ConversationState {
@@ -106,6 +108,7 @@ impl ConversationState {
             has_new_content_below: false,
             last_rendered_height: 0,
             last_viewport_height: 0,
+            focused_block: None,
         }
     }
 
@@ -224,6 +227,63 @@ impl ConversationState {
         self.auto_scroll = false;
         self.has_new_content_below = false;
     }
+
+    /// Get the currently focused block index.
+    pub fn focused_block(&self) -> Option<usize> {
+        self.focused_block
+    }
+
+    /// Set focus to a specific block index. Clamps to valid range.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_focused_block(&mut self, index: Option<usize>) {
+        self.focused_block = match index {
+            Some(i) if !self.blocks.is_empty() => Some(i.min(self.blocks.len() - 1)),
+            Some(_) => None,
+            None => None,
+        };
+    }
+
+    /// Move focus to the previous block. If no focus, focuses the last block.
+    pub fn focus_prev(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        self.focused_block = Some(match self.focused_block {
+            Some(0) => 0,
+            Some(i) => i - 1,
+            None => self.blocks.len() - 1,
+        });
+    }
+
+    /// Move focus to the next block. If no focus, focuses the first block.
+    pub fn focus_next(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        let max = self.blocks.len() - 1;
+        self.focused_block = Some(match self.focused_block {
+            Some(i) if i >= max => max,
+            Some(i) => i + 1,
+            None => 0,
+        });
+    }
+
+    /// Clear the block focus.
+    pub fn clear_focus(&mut self) {
+        self.focused_block = None;
+    }
+
+    /// Toggle collapsed state on the focused block if it is a ToolCall.
+    /// Returns true if a toggle happened.
+    pub fn toggle_focused_collapse(&mut self) -> bool {
+        if let Some(idx) = self.focused_block {
+            if let Some(Block::ToolCall { collapsed, .. }) = self.blocks.get_mut(idx) {
+                *collapsed = !*collapsed;
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Default for ConversationState {
@@ -275,7 +335,7 @@ fn render_block_lines(block: &Block, width: u16, debug_mode: bool) -> Vec<Line<'
             tool_name,
             args_summary,
             outcome,
-            collapsed: _,
+            collapsed,
             token_cost,
         } => {
             let (icon, color) = match outcome {
@@ -306,7 +366,46 @@ fn render_block_lines(block: &Block, width: u16, debug_mode: bool) -> Vec<Line<'
                     ));
                 }
             }
-            vec![Line::from(spans_vec)]
+            let mut lines = vec![Line::from(spans_vec)];
+
+            if !collapsed {
+                lines.push(Line::from(vec![
+                    Span::styled("    Tool: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        tool_name.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("    Args: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(args_summary.clone(), Style::default().fg(Color::White)),
+                ]));
+                match outcome {
+                    ToolOutcome::Error(msg) => {
+                        lines.push(Line::from(vec![
+                            Span::styled("    Error: ", Style::default().fg(Color::Red)),
+                            Span::styled(msg.clone(), Style::default().fg(Color::Red)),
+                        ]));
+                    }
+                    ToolOutcome::PolicyDenied => {
+                        lines.push(Line::from(vec![Span::styled(
+                            "    Policy denied".to_string(),
+                            Style::default().fg(Color::Red),
+                        )]));
+                    }
+                    _ => {}
+                }
+                if let Some(cost) = token_cost {
+                    lines.push(Line::from(vec![
+                        Span::styled("    Tokens: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{cost}"), Style::default().fg(Color::White)),
+                    ]));
+                }
+            }
+
+            lines
         }
         Block::SystemNote { text, severity } => {
             let color = match severity {
@@ -393,8 +492,20 @@ impl<'a> Widget for ConversationWidget<'a> {
         let inner = border.inner(area);
 
         let mut all_lines: Vec<Line<'static>> = Vec::new();
-        for block in self.state.blocks() {
-            let block_lines = render_block_lines(block, inner.width, self.debug_mode);
+        for (block_idx, block) in self.state.blocks().iter().enumerate() {
+            let mut block_lines = render_block_lines(block, inner.width, self.debug_mode);
+            if self.state.focused_block() == Some(block_idx) {
+                if let Some(first_line) = block_lines.first_mut() {
+                    let mut new_spans = vec![Span::styled(
+                        "\u{25B6} ".to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    new_spans.append(&mut first_line.spans);
+                    first_line.spans = new_spans;
+                }
+            }
             all_lines.extend(block_lines);
         }
 
@@ -753,5 +864,136 @@ mod tests {
             normal_text.contains("---"),
             "normal mode should use standard format, got: {normal_text}"
         );
+    }
+
+    #[test]
+    fn focus_prev_from_none_selects_last() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote { text: "b".into(), severity: NoteSeverity::Info });
+        assert_eq!(state.focused_block(), None);
+        state.focus_prev();
+        assert_eq!(state.focused_block(), Some(1));
+    }
+
+    #[test]
+    fn focus_next_from_none_selects_first() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.add_block(Block::SystemNote { text: "b".into(), severity: NoteSeverity::Info });
+        state.focus_next();
+        assert_eq!(state.focused_block(), Some(0));
+    }
+
+    #[test]
+    fn focus_prev_clamps_at_zero() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.set_focused_block(Some(0));
+        state.focus_prev();
+        assert_eq!(state.focused_block(), Some(0));
+    }
+
+    #[test]
+    fn focus_next_clamps_at_last() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.set_focused_block(Some(0));
+        state.focus_next();
+        assert_eq!(state.focused_block(), Some(0));
+    }
+
+    #[test]
+    fn clear_focus_resets_to_none() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.set_focused_block(Some(0));
+        state.clear_focus();
+        assert_eq!(state.focused_block(), None);
+    }
+
+    #[test]
+    fn toggle_focused_collapse_toggles_tool_call() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::ToolCall {
+            tool_name: "code.read".into(),
+            args_summary: "src/main.rs".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+            token_cost: None,
+        });
+        state.set_focused_block(Some(0));
+        assert!(state.toggle_focused_collapse());
+        match &state.blocks()[0] {
+            Block::ToolCall { collapsed, .. } => assert!(!collapsed),
+            _ => panic!("expected ToolCall"),
+        }
+        assert!(state.toggle_focused_collapse());
+        match &state.blocks()[0] {
+            Block::ToolCall { collapsed, .. } => assert!(collapsed),
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn toggle_focused_collapse_noop_on_non_tool_call() {
+        let mut state = ConversationState::new();
+        state.add_block(Block::SystemNote { text: "a".into(), severity: NoteSeverity::Info });
+        state.set_focused_block(Some(0));
+        assert!(!state.toggle_focused_collapse());
+    }
+
+    #[test]
+    fn focus_on_empty_conversation_is_noop() {
+        let mut state = ConversationState::new();
+        state.focus_next();
+        assert_eq!(state.focused_block(), None);
+        state.focus_prev();
+        assert_eq!(state.focused_block(), None);
+    }
+
+    #[test]
+    fn expanded_tool_call_shows_details() {
+        let block = Block::ToolCall {
+            tool_name: "shell.exec".into(),
+            args_summary: "cargo test".into(),
+            outcome: ToolOutcome::Error("exit code 1".into()),
+            collapsed: false,
+            token_cost: Some(750),
+        };
+        let lines = render_block_lines(&block, 100, false);
+        assert!(lines.len() > 1, "expanded ToolCall should have multiple lines, got {}", lines.len());
+        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert!(text.contains("Tool:"), "should show Tool: label");
+        assert!(text.contains("Args:"), "should show Args: label");
+        assert!(text.contains("exit code 1"), "should show error message");
+        assert!(text.contains("750"), "should show token cost");
+    }
+
+    #[test]
+    fn collapsed_tool_call_is_single_line() {
+        let block = Block::ToolCall {
+            tool_name: "code.read".into(),
+            args_summary: "src/lib.rs".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+            token_cost: Some(300),
+        };
+        let lines = render_block_lines(&block, 100, false);
+        assert_eq!(lines.len(), 1, "collapsed ToolCall should be single line");
+    }
+
+    #[test]
+    fn expanded_policy_denied_shows_denial() {
+        let block = Block::ToolCall {
+            tool_name: "http.request".into(),
+            args_summary: "deny: *".into(),
+            outcome: ToolOutcome::PolicyDenied,
+            collapsed: false,
+            token_cost: None,
+        };
+        let lines = render_block_lines(&block, 100, false);
+        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert!(text.contains("Policy denied"), "should show policy denied message, got: {text}");
     }
 }

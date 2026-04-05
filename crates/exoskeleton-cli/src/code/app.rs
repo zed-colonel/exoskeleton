@@ -411,15 +411,28 @@ fn handle_key_normal(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>
         (KeyCode::F(1), _) => {
             app.debug.visible = !app.debug.visible;
         }
+        (KeyCode::Up, _) if app.input_text.is_empty() => {
+            app.conversation.focus_prev();
+        }
+        (KeyCode::Down, _) if app.input_text.is_empty() => {
+            app.conversation.focus_next();
+        }
+        (KeyCode::Esc, _) => {
+            app.conversation.clear_focus();
+        }
         (KeyCode::Enter, modifiers) if !modifiers.contains(KeyModifiers::SHIFT) => {
-            let text = app.input_text.trim().to_string();
-            if !text.is_empty() {
-                app.conversation.add_block(Block::UserMessage {
-                    text: text.clone(),
-                    timestamp: chrono::Utc::now(),
-                });
-                app.input_text.clear();
-                effects.push(SideEffect::SendMessage(text));
+            if app.conversation.focused_block().is_some() {
+                app.conversation.toggle_focused_collapse();
+            } else {
+                let text = app.input_text.trim().to_string();
+                if !text.is_empty() {
+                    app.conversation.add_block(Block::UserMessage {
+                        text: text.clone(),
+                        timestamp: chrono::Utc::now(),
+                    });
+                    app.input_text.clear();
+                    effects.push(SideEffect::SendMessage(text));
+                }
             }
         }
         (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
@@ -436,6 +449,7 @@ fn handle_key_normal(app: &mut App, key: KeyEvent, effects: &mut Vec<SideEffect>
         }
         (KeyCode::Char(c), modifiers) => {
             if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+                app.conversation.clear_focus();
                 app.input_text.push(c);
             }
         }
@@ -2204,7 +2218,9 @@ mod tests {
         update(&mut app, Message::WsEvent(event));
         assert_eq!(app.conversation.len(), 1);
         match &app.conversation.blocks()[0] {
-            Block::ToolCall { tool_name, outcome, .. } => {
+            Block::ToolCall {
+                tool_name, outcome, ..
+            } => {
                 assert_eq!(tool_name, "shell.exec");
                 assert_eq!(*outcome, ToolOutcome::PolicyDenied);
             }
@@ -2217,8 +2233,7 @@ mod tests {
         use exoskeleton_core::id::VesselId;
 
         let mut app = App::new();
-        let mut snapshot =
-            exoskeleton_core::StateSnapshot::initial(VesselId::new(), "test".into());
+        let mut snapshot = exoskeleton_core::StateSnapshot::initial(VesselId::new(), "test".into());
         snapshot.tick_number = 5;
 
         let event = LiveEvent {
@@ -2244,8 +2259,7 @@ mod tests {
         use exoskeleton_core::snapshot::VesselStatus;
 
         let mut app = App::new();
-        let mut snapshot =
-            exoskeleton_core::StateSnapshot::initial(VesselId::new(), "test".into());
+        let mut snapshot = exoskeleton_core::StateSnapshot::initial(VesselId::new(), "test".into());
         snapshot.tick_number = 5;
         snapshot.status = VesselStatus::Suspended;
 
@@ -2259,5 +2273,90 @@ mod tests {
         update(&mut app, Message::WsEvent(event));
 
         assert!(!app.activity.is_active);
+    }
+
+    #[test]
+    fn up_arrow_activates_block_cursor_when_input_empty() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
+        app.conversation.add_block(Block::ToolCall {
+            tool_name: "code.read".into(),
+            args_summary: "test".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+            token_cost: None,
+        });
+        update(&mut app, Message::Key(key(KeyCode::Up)));
+        assert!(app.conversation.focused_block().is_some());
+    }
+
+    #[test]
+    fn up_arrow_does_nothing_when_input_nonempty() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
+        app.input_text = "typing".into();
+        update(&mut app, Message::Key(key(KeyCode::Up)));
+        assert_eq!(app.conversation.focused_block(), None);
+    }
+
+    #[test]
+    fn enter_on_focused_tool_call_toggles_collapse() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::ToolCall {
+            tool_name: "code.read".into(),
+            args_summary: "test".into(),
+            outcome: ToolOutcome::Success,
+            collapsed: true,
+            token_cost: None,
+        });
+        app.conversation.set_focused_block(Some(0));
+        update(&mut app, Message::Key(key(KeyCode::Enter)));
+        match &app.conversation.blocks()[0] {
+            Block::ToolCall { collapsed, .. } => {
+                assert!(!collapsed, "Enter should expand focused ToolCall");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn enter_sends_message_when_no_focus_and_text_present() {
+        let mut app = App::new();
+        app.input_text = "hello".into();
+        let effects = update(&mut app, Message::Key(key(KeyCode::Enter)));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::SendMessage(_))));
+    }
+
+    #[test]
+    fn esc_clears_block_focus() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
+        app.conversation.set_focused_block(Some(0));
+        update(&mut app, Message::Key(key(KeyCode::Esc)));
+        assert_eq!(app.conversation.focused_block(), None);
+    }
+
+    #[test]
+    fn typing_clears_block_focus() {
+        let mut app = App::new();
+        app.conversation.add_block(Block::SystemNote {
+            text: "a".into(),
+            severity: NoteSeverity::Info,
+        });
+        app.conversation.set_focused_block(Some(0));
+        update(&mut app, Message::Key(key(KeyCode::Char('h'))));
+        assert_eq!(app.conversation.focused_block(), None);
+        assert_eq!(app.input_text, "h");
     }
 }
