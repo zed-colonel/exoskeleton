@@ -89,7 +89,7 @@ pub fn capture_git_state(workspace_root: &Path) -> Option<GitState> {
 
 /// Render a GitState as a section string for context compilation.
 pub fn render_git_context(state: &GitState) -> String {
-    let mut out = String::from("=== GIT CONTEXT ===\n");
+    let mut out = String::new();
     out.push_str(&format!("Branch: {}\n", state.branch));
 
     if state.modified == 0 && state.staged == 0 && state.untracked == 0 {
@@ -163,7 +163,8 @@ mod tests {
             ],
         };
         let rendered = render_git_context(&state);
-        assert!(rendered.contains("=== GIT CONTEXT ==="));
+        // Section header is added by render.rs, not by git_context
+        assert!(!rendered.contains("=== GIT CONTEXT ==="));
         assert!(rendered.contains("Branch: main"));
         assert!(rendered.contains("2 modified"));
         assert!(rendered.contains("1 staged"));

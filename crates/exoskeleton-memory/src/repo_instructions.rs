@@ -43,7 +43,7 @@ pub fn assemble_repo_instructions(
     }
 
     let char_cap = DEFAULT_TOKEN_CAP * CHARS_PER_TOKEN;
-    let mut out = String::from("=== REPO INSTRUCTIONS ===\n\n");
+    let mut out = String::new();
 
     if let Some(mechanical) = mechanical {
         out.push_str("## Project Analysis (factual)\n\n");
@@ -120,7 +120,8 @@ mod tests {
     fn assemble_mechanical_only() {
         let result = assemble_repo_instructions(Some("Language: Rust\nBuild: cargo build"), &[]);
         assert!(result.contains("Language: Rust"));
-        assert!(result.contains("=== REPO INSTRUCTIONS ==="));
+        // Section header is added by render.rs, not by assembly
+        assert!(!result.contains("=== REPO INSTRUCTIONS ==="));
         assert!(!result.contains("advisory"));
     }
 

@@ -651,9 +651,7 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
-            repo_instructions: Some(
-                "=== REPO INSTRUCTIONS ===\nLanguage: Rust\nBuild: cargo build",
-            ),
+            repo_instructions: Some("Language: Rust\nBuild: cargo build"),
             git_context: None,
         };
 
@@ -682,7 +680,7 @@ mod tests {
             resolved_message_content: None,
             system_section_override: None,
             repo_instructions: None,
-            git_context: Some("=== GIT CONTEXT ===\nBranch: main\nWorking tree: clean"),
+            git_context: Some("Branch: main\nWorking tree: clean"),
         };
 
         let result = compiler.compile(&sources).unwrap();

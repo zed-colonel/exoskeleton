@@ -2,6 +2,8 @@
 //!
 //! Merges old episodic memory summaries to free up context budget.
 
+use std::collections::HashSet;
+
 use exoskeleton_core::{EpisodicSummary, ExoError};
 use exoskeleton_memory::MemoryStore;
 
@@ -144,12 +146,14 @@ fn merge_summaries(group: &[EpisodicSummary]) -> EpisodicSummary {
         .collect::<Vec<_>>()
         .join("; ");
 
-    let mut key_events = group
+    // Deduplicate key events while preserving chronological order.
+    let mut seen = HashSet::new();
+    let key_events: Vec<String> = group
         .iter()
         .flat_map(|entry| entry.key_events.iter().cloned())
-        .collect::<Vec<_>>();
-    key_events.dedup();
-    key_events.truncate(10);
+        .filter(|event| seen.insert(event.clone()))
+        .take(10)
+        .collect();
 
     EpisodicSummary::new(
         start_tick,

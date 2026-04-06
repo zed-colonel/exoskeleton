@@ -70,6 +70,16 @@ default = "allow"
 [tool_policy.rules]
 "shell.exec" = "ask"
 "fs.write" = "ask"
+
+# Thread schedules tuned for coding workflow
+[threads.self_critique]
+run_every_n_ticks = 1
+
+[threads.meta_cognition]
+run_every_n_ticks = 5
+
+[threads.creative_synthesis]
+run_every_n_ticks = 15
 "#,
         repo_name = repo_name,
         mission = quote_toml_string(&mission),

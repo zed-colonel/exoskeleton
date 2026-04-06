@@ -284,14 +284,14 @@ pub fn render_conversations(
     s
 }
 
-/// Render pre-assembled repo instructions.
+/// Render pre-assembled repo instructions with section header.
 pub fn render_repo_instructions(section: &str) -> String {
-    section.to_string()
+    format!("=== REPO INSTRUCTIONS ===\n{section}")
 }
 
-/// Render pre-assembled git context.
+/// Render pre-assembled git context with section header.
 pub fn render_git_context(section: &str) -> String {
-    section.to_string()
+    format!("=== GIT CONTEXT ===\n{section}")
 }
 
 #[cfg(test)]

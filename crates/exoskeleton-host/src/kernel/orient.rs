@@ -148,23 +148,58 @@ fn assemble_repo_instruction_text(root_path: &Path) -> Result<String, ExoError> 
     let mechanical_ref = (!mechanical.is_empty()).then_some(mechanical.as_str());
 
     let mut discovered = Vec::new();
-    discover_instruction_files(root_path, root_path, &mut discovered)?;
+    discover_instruction_files(root_path, root_path, &mut discovered, 0);
 
     Ok(assemble_repo_instructions(mechanical_ref, &discovered))
 }
+
+/// Maximum directory depth for instruction file discovery.
+/// Instruction files are typically at root or one subdirectory down.
+const MAX_DISCOVERY_DEPTH: u32 = 3;
+
+/// Directory names to skip during instruction file discovery.
+/// These commonly contain thousands of subdirectories and never
+/// hold project instruction files.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".exo",
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "vendor",
+    "build",
+    "dist",
+    "out",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".next",
+    ".nuxt",
+    ".cargo",
+    ".rustup",
+];
 
 fn discover_instruction_files(
     workspace_root: &Path,
     current_dir: &Path,
     discovered: &mut Vec<DiscoveredInstruction>,
-) -> Result<(), ExoError> {
+    depth: u32,
+) {
+    if depth > MAX_DISCOVERY_DEPTH {
+        return;
+    }
+
     let entries = match std::fs::read_dir(current_dir) {
         Ok(entries) => entries,
         Err(err) => {
-            return Err(ExoError::Storage(format!(
-                "failed to read workspace directory {}: {err}",
-                current_dir.display()
-            )))
+            tracing::warn!(
+                error = %err,
+                path = %current_dir.display(),
+                "failed to read directory during instruction discovery"
+            );
+            return;
         }
     };
 
@@ -174,10 +209,10 @@ fn discover_instruction_files(
         let file_name = file_name.to_string_lossy();
 
         if path.is_dir() {
-            if matches!(file_name.as_ref(), ".git" | "target" | ".exo") {
+            if SKIP_DIRS.contains(&file_name.as_ref()) {
                 continue;
             }
-            discover_instruction_files(workspace_root, &path, discovered)?;
+            discover_instruction_files(workspace_root, &path, discovered, depth + 1);
             continue;
         }
 
@@ -202,8 +237,6 @@ fn discover_instruction_files(
             }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
