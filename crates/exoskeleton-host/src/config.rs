@@ -161,6 +161,10 @@ pub struct InnerLoopConfig {
     /// Maximum wall-clock time (seconds) for the inner loop within one tick.
     #[serde(default = "default_inner_loop_timeout")]
     pub timeout_secs: u64,
+    /// Number of recent tool results to include in full when building
+    /// DecideLite context. Older results are summarized.
+    #[serde(default = "default_inner_loop_context_window_size")]
+    pub context_window_size: u32,
     /// Number of identical consecutive tool calls (same tool + same args)
     /// before doom-loop detection triggers and aborts the inner loop.
     #[serde(default = "default_inner_loop_doom_threshold")]
@@ -176,6 +180,9 @@ fn default_inner_loop_max_tokens() -> u64 {
 fn default_inner_loop_timeout() -> u64 {
     300
 }
+fn default_inner_loop_context_window_size() -> u32 {
+    3
+}
 fn default_inner_loop_doom_threshold() -> u32 {
     3
 }
@@ -187,6 +194,7 @@ impl Default for InnerLoopConfig {
             max_steps_per_tick: 25,
             max_tokens_per_session: 500_000,
             timeout_secs: 300,
+            context_window_size: 3,
             doom_loop_threshold: 3,
         }
     }
@@ -2216,6 +2224,7 @@ max_decide_turns = 0
         assert_eq!(config.max_steps_per_tick, 25);
         assert_eq!(config.max_tokens_per_session, 500_000);
         assert_eq!(config.timeout_secs, 300);
+        assert_eq!(config.context_window_size, 3);
         assert_eq!(config.doom_loop_threshold, 3);
     }
 
@@ -2228,6 +2237,7 @@ max_decide_turns = 0
             max_steps_per_tick: 50,
             max_tokens_per_session: 1_000_000,
             timeout_secs: 600,
+            context_window_size: 4,
             doom_loop_threshold: 5,
         };
         let toml_str = toml::to_string(&config).unwrap();
@@ -2236,6 +2246,7 @@ max_decide_turns = 0
         assert_eq!(parsed.max_steps_per_tick, 50);
         assert_eq!(parsed.max_tokens_per_session, 1_000_000);
         assert_eq!(parsed.timeout_secs, 600);
+        assert_eq!(parsed.context_window_size, 4);
         assert_eq!(parsed.doom_loop_threshold, 5);
 
         // Also verify full vessel config with inner_loop section
@@ -2249,6 +2260,7 @@ enabled = true
 max_steps_per_tick = 30
 max_tokens_per_session = 750000
 timeout_secs = 180
+context_window_size = 6
 doom_loop_threshold = 4
 "#;
         let file: VesselConfigFile = toml::from_str(vessel_toml).unwrap();
@@ -2257,6 +2269,7 @@ doom_loop_threshold = 4
         assert_eq!(vessel_config.inner_loop.max_steps_per_tick, 30);
         assert_eq!(vessel_config.inner_loop.max_tokens_per_session, 750_000);
         assert_eq!(vessel_config.inner_loop.timeout_secs, 180);
+        assert_eq!(vessel_config.inner_loop.context_window_size, 6);
         assert_eq!(vessel_config.inner_loop.doom_loop_threshold, 4);
     }
 

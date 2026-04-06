@@ -612,13 +612,17 @@ async fn inner_loop_token_limit_enforced() {
 async fn inner_loop_doom_loop_detected() {
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         let dir = tempfile::tempdir().unwrap();
-        // Same tool + same args repeated — doom loop after 3 identical calls
+        // Same tool + same args repeated — correction after 3 identical calls,
+        // hard stop after 2 more identical calls.
         let same_action = mock_llm_response(
             r#"{"reasoning":"retry","actions":[{"tool_name":"delay","params":{"duration_ms":1},"rationale":"same thing"}],"memory_notes":[]}"#,
         );
-        // Decide + 3 DecideLite (all same action) + Reflect
+        // Decide + 5 DecideLite (all same action) + Reflect
         let responses = vec![
             mock_llm_response(DECISION_INNER_LOOP_WITH_ACTION),
+            same_action.clone(),
+            same_action.clone(),
+            same_action.clone(),
             same_action.clone(),
             same_action.clone(),
             same_action,

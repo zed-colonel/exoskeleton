@@ -26,7 +26,9 @@ use super::types::{
     OrientationResult, PerceptionResult, SnapshotDelta,
 };
 use super::{act, align, diff_tracker::DiffTracker, KernelContext};
-use crate::budget::session::{SessionBudget, SessionBudgetCheck, SessionCompletionReason};
+use crate::budget::session::{
+    DoomLoopStatus, SessionBudget, SessionBudgetCheck, SessionCompletionReason,
+};
 use crate::cognitive_engine::CognitiveHandler;
 use crate::llm::direct::handler_direct_llm_call;
 
@@ -173,7 +175,11 @@ pub fn run_inner_loop(
 
         // Record tool calls for doom-loop detection
         for exec in &act_result.executions {
-            session.record_tool_call(&exec.action.tool_name, &exec.action.params);
+            session.record_tool_call(
+                &exec.action.tool_name,
+                &exec.action.params,
+                exec.result.as_ref().err().map(String::as_str),
+            );
         }
 
         if act_result
@@ -203,6 +209,45 @@ pub fn run_inner_loop(
             });
         }
 
+        let correction_message = match session.doom_loop_status() {
+            DoomLoopStatus::CorrectionNeeded {
+                tool,
+                count,
+                last_error,
+                ..
+            } => {
+                session.acknowledge_correction();
+                Some(build_doom_loop_correction(
+                    &tool,
+                    count,
+                    last_error.as_deref(),
+                ))
+            }
+            DoomLoopStatus::HardStop { .. } => {
+                broadcast_inner_loop_completed(
+                    kernel,
+                    tick_number,
+                    step,
+                    &session,
+                    &SessionCompletionReason::DoomLoop,
+                    diff_tracker,
+                );
+                return Ok(InnerLoopResult {
+                    executions: {
+                        all_executions.extend(act_result.executions.clone());
+                        all_executions
+                    },
+                    llm_call_records: all_llm_records,
+                    final_decision: current_decision,
+                    completion_reason: SessionCompletionReason::DoomLoop,
+                    steps_taken: step,
+                    relationship_updates: all_relationship_updates,
+                    relationship_snapshot: last_relationship_snapshot,
+                });
+            }
+            DoomLoopStatus::Clear => None,
+        };
+
         // Capture tool summary before extending all_executions
         let tool_summary = act_result.executions.first().map(|e| {
             let outcome = if e.result.is_ok() {
@@ -222,6 +267,7 @@ pub fn run_inner_loop(
             orientation,
             &all_executions,
             &current_decision,
+            correction_message.as_deref(),
             cancellation,
         )?;
 
@@ -276,6 +322,7 @@ fn decide_lite(
     orientation: &OrientationResult,
     previous_executions: &[ActionExecution],
     previous_decision: &DecisionResult,
+    correction_message: Option<&str>,
     cancellation: &CancellationToken,
 ) -> Result<DecisionResult, ExoError> {
     // Build system prompt from inner-loop template
@@ -302,9 +349,16 @@ fn decide_lite(
     });
 
     // Append tool results as user message
+    let mut tool_results = super::context_window::format_windowed_results(
+        previous_executions,
+        kernel.inner_loop_config.context_window_size,
+    );
+    if let Some(correction) = correction_message {
+        tool_results = format!("{correction}\n\n{tool_results}");
+    }
     messages.push(LlmMessage {
         role: LlmRole::User,
-        content: format_tool_results(previous_executions),
+        content: tool_results,
     });
 
     let request = LlmRequest {
@@ -379,35 +433,14 @@ fn format_decision_summary(decision: &DecisionResult) -> String {
     summary
 }
 
-/// Format tool execution results as a user message.
-fn format_tool_results(executions: &[ActionExecution]) -> String {
-    if executions.is_empty() {
-        return "No tool results yet.".into();
-    }
-
-    let mut msg = String::from("## Tool Results\n\n");
-    for exec in executions {
-        let status = if exec.result.is_ok() {
-            "SUCCESS"
-        } else {
-            "FAILED"
-        };
-        msg.push_str(&format!("### {} [{}]\n", exec.action.tool_name, status));
-        match &exec.result {
-            Ok(val) => {
-                let json_str = val.to_string();
-                if json_str.len() > 2000 {
-                    msg.push_str(&format!("Output: {}...\n\n", &json_str[..1997]));
-                } else {
-                    msg.push_str(&format!("Output: {json_str}\n\n"));
-                }
-            }
-            Err(e) => {
-                msg.push_str(&format!("Error: {e}\n\n"));
-            }
-        }
-    }
-    msg
+fn build_doom_loop_correction(tool: &str, count: u32, last_error: Option<&str>) -> String {
+    let error_context = match last_error {
+        Some(error) => format!("Previous attempts failed because: {error}."),
+        None => "Previous attempts are repeating without progress.".into(),
+    };
+    format!(
+        "You have attempted {tool} with the same arguments {count} times. {error_context} Try a different approach: read the file again, change the search pattern, or break the edit into smaller pieces."
+    )
 }
 
 /// Parse a DecideLite response into a DecisionResult.
@@ -660,5 +693,14 @@ mod tests {
         assert_eq!(diff_summary.files_modified, 1);
         assert_eq!(diff_summary.lines_added, 4);
         assert_eq!(diff_summary.lines_removed, 1);
+    }
+
+    #[test]
+    fn doom_loop_correction_message_format() {
+        let msg = build_doom_loop_correction("code.grep", 3, Some("pattern not found"));
+        assert!(msg.contains("code.grep"));
+        assert!(msg.contains("3 times"));
+        assert!(msg.contains("pattern not found"));
+        assert!(msg.contains("different approach"));
     }
 }

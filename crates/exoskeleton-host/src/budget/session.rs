@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config::InnerLoopConfig;
 
@@ -22,8 +23,13 @@ pub struct SessionBudget {
     tokens_consumed: u64,
     started_at: Instant,
     /// Rolling window of recent tool calls for doom-loop detection.
-    /// Stores (tool_name, args_hash) tuples.
-    recent_tool_calls: Vec<(String, u64)>,
+    recent_tool_calls: Vec<ToolCallRecord>,
+    /// Whether a correction prompt has already been issued for the current streak.
+    correction_issued: bool,
+    /// The tool/args streak currently under correction, if any.
+    correction_target: Option<(String, u64, Option<String>)>,
+    /// Number of identical calls observed after a correction was issued.
+    post_correction_identical: u32,
 }
 
 impl SessionBudget {
@@ -35,6 +41,9 @@ impl SessionBudget {
             tokens_consumed: 0,
             started_at: Instant::now(),
             recent_tool_calls: Vec::new(),
+            correction_issued: false,
+            correction_target: None,
+            post_correction_identical: 0,
         }
     }
 
@@ -56,8 +65,11 @@ impl SessionBudget {
         }
 
         // Doom loop detection
-        if let Some(reason) = self.check_doom_loop() {
-            return SessionBudgetCheck::Stop(reason);
+        if let DoomLoopStatus::HardStop { tool, count, .. } = self.doom_loop_status() {
+            return SessionBudgetCheck::Stop(SessionStopReason::DoomLoopDetected {
+                tool_name: tool,
+                consecutive: count,
+            });
         }
 
         SessionBudgetCheck::Continue
@@ -69,15 +81,86 @@ impl SessionBudget {
     }
 
     /// Record a tool invocation for doom-loop detection.
-    pub fn record_tool_call(&mut self, tool_name: &str, args: &serde_json::Value) {
+    pub fn record_tool_call(&mut self, tool_name: &str, args: &Value, error: Option<&str>) {
         if tool_name == "agent.ask_user" {
             self.steps_taken += 1;
             return;
         }
         let args_hash = hash_value(args);
-        self.recent_tool_calls
-            .push((tool_name.to_string(), args_hash));
+        let error = error.map(str::to_owned);
+        self.recent_tool_calls.push(ToolCallRecord {
+            tool_name: tool_name.to_string(),
+            args: args.clone(),
+            args_hash,
+            error: error.clone(),
+        });
+
+        if self.correction_issued {
+            if let Some((target_tool, target_hash, target_error)) = self.correction_target.as_mut()
+            {
+                if *target_tool == tool_name && *target_hash == args_hash {
+                    self.post_correction_identical += 1;
+                    *target_error = error;
+                } else {
+                    self.correction_issued = false;
+                    self.correction_target = None;
+                    self.post_correction_identical = 0;
+                }
+            }
+        }
+
         self.steps_taken += 1;
+    }
+
+    /// Report current doom-loop status without forcing a stop.
+    pub fn doom_loop_status(&self) -> DoomLoopStatus {
+        let threshold = self.config.doom_loop_threshold as usize;
+        if threshold == 0 {
+            return DoomLoopStatus::Clear;
+        }
+
+        if self.correction_issued {
+            if let Some((tool, _, last_error)) = &self.correction_target {
+                if self.post_correction_identical >= 2 {
+                    return DoomLoopStatus::HardStop {
+                        tool: tool.clone(),
+                        count: self.config.doom_loop_threshold + self.post_correction_identical,
+                        last_error: last_error.clone(),
+                    };
+                }
+            }
+            return DoomLoopStatus::Clear;
+        }
+
+        if self.recent_tool_calls.len() < threshold {
+            return DoomLoopStatus::Clear;
+        }
+
+        let recent = &self.recent_tool_calls[self.recent_tool_calls.len() - threshold..];
+        let first = &recent[0];
+        let all_same = recent
+            .iter()
+            .all(|call| call.tool_name == first.tool_name && call.args_hash == first.args_hash);
+        if all_same {
+            DoomLoopStatus::CorrectionNeeded {
+                tool: first.tool_name.clone(),
+                args: first.args.clone(),
+                count: threshold as u32,
+                last_error: recent.iter().rev().find_map(|call| call.error.clone()),
+            }
+        } else {
+            DoomLoopStatus::Clear
+        }
+    }
+
+    /// Mark that the inner loop injected a correction prompt for the current streak.
+    pub fn acknowledge_correction(&mut self) {
+        if let Some(last) = self.recent_tool_calls.last() {
+            self.correction_issued = true;
+            self.correction_target =
+                Some((last.tool_name.clone(), last.args_hash, last.error.clone()));
+            self.post_correction_identical = 0;
+        }
     }
 
     /// Return a summary of why the session ended.
@@ -102,29 +185,14 @@ impl SessionBudget {
     pub fn max_steps(&self) -> u32 {
         self.config.max_steps_per_tick
     }
+}
 
-    /// Check for doom loop: N identical consecutive tool calls.
-    fn check_doom_loop(&self) -> Option<SessionStopReason> {
-        let threshold = self.config.doom_loop_threshold as usize;
-        if threshold == 0 || self.recent_tool_calls.len() < threshold {
-            return None;
-        }
-
-        let recent = &self.recent_tool_calls[self.recent_tool_calls.len() - threshold..];
-        let first = &recent[0];
-        let all_same = recent
-            .iter()
-            .all(|call| call.0 == first.0 && call.1 == first.1);
-
-        if all_same {
-            Some(SessionStopReason::DoomLoopDetected {
-                tool_name: first.0.clone(),
-                consecutive: threshold as u32,
-            })
-        } else {
-            None
-        }
-    }
+#[derive(Debug, Clone)]
+struct ToolCallRecord {
+    tool_name: String,
+    args: Value,
+    args_hash: u64,
+    error: Option<String>,
 }
 
 /// Hash a serde_json::Value for doom-loop comparison.
@@ -142,6 +210,23 @@ pub enum SessionBudgetCheck {
     Continue,
     /// Session should stop — reason provided.
     Stop(SessionStopReason),
+}
+
+/// Status of doom-loop detection for the current session.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DoomLoopStatus {
+    Clear,
+    CorrectionNeeded {
+        tool: String,
+        args: Value,
+        count: u32,
+        last_error: Option<String>,
+    },
+    HardStop {
+        tool: String,
+        count: u32,
+        last_error: Option<String>,
+    },
 }
 
 /// Why the session budget requires stopping.
@@ -216,6 +301,7 @@ mod tests {
             max_steps_per_tick: 5,
             max_tokens_per_session: 1000,
             timeout_secs: 300,
+            context_window_size: 3,
             doom_loop_threshold: 3,
         }
     }
@@ -231,7 +317,7 @@ mod tests {
                 SessionBudgetCheck::Continue,
                 "step {i} should be allowed"
             );
-            session.record_tool_call(&format!("tool_{i}"), &serde_json::json!({"i": i}));
+            session.record_tool_call(&format!("tool_{i}"), &serde_json::json!({"i": i}), None);
         }
         assert_eq!(
             session.can_continue(),
@@ -271,13 +357,13 @@ mod tests {
         let config = test_config();
         let mut session = SessionBudget::new(&config);
         let args = serde_json::json!({"path": "/tmp/test.txt"});
-        session.record_tool_call("fs.read", &args);
-        session.record_tool_call("fs.read", &args);
+        session.record_tool_call("fs.read", &args, Some("not found"));
+        session.record_tool_call("fs.read", &args, Some("not found"));
         assert_eq!(session.can_continue(), SessionBudgetCheck::Continue);
-        session.record_tool_call("fs.read", &args);
+        session.record_tool_call("fs.read", &args, Some("not found"));
         assert!(matches!(
-            session.can_continue(),
-            SessionBudgetCheck::Stop(SessionStopReason::DoomLoopDetected { .. })
+            session.doom_loop_status(),
+            DoomLoopStatus::CorrectionNeeded { .. }
         ));
     }
 
@@ -286,9 +372,9 @@ mod tests {
     fn session_budget_no_doom_loop_different_args() {
         let config = test_config();
         let mut session = SessionBudget::new(&config);
-        session.record_tool_call("fs.read", &serde_json::json!({"path": "/a"}));
-        session.record_tool_call("fs.read", &serde_json::json!({"path": "/b"}));
-        session.record_tool_call("fs.read", &serde_json::json!({"path": "/c"}));
+        session.record_tool_call("fs.read", &serde_json::json!({"path": "/a"}), None);
+        session.record_tool_call("fs.read", &serde_json::json!({"path": "/b"}), None);
+        session.record_tool_call("fs.read", &serde_json::json!({"path": "/c"}), None);
         assert_eq!(session.can_continue(), SessionBudgetCheck::Continue);
     }
 
@@ -308,9 +394,9 @@ mod tests {
         let args = serde_json::json!({"question": "What file?"});
 
         // 3 consecutive identical agent.ask_user calls should NOT trigger doom-loop
-        session.record_tool_call("agent.ask_user", &args);
-        session.record_tool_call("agent.ask_user", &args);
-        session.record_tool_call("agent.ask_user", &args);
+        session.record_tool_call("agent.ask_user", &args, None);
+        session.record_tool_call("agent.ask_user", &args, None);
+        session.record_tool_call("agent.ask_user", &args, None);
 
         // Should still be Continue (not DoomLoopDetected)
         assert_eq!(
@@ -343,7 +429,11 @@ mod tests {
         let mut session = SessionBudget::new(&config);
 
         // Record an agent.ask_user call (like "answered" — just counts as step)
-        session.record_tool_call("agent.ask_user", &serde_json::json!({"status": "answered"}));
+        session.record_tool_call(
+            "agent.ask_user",
+            &serde_json::json!({"status": "answered"}),
+            None,
+        );
 
         // Session should still allow continuation
         assert_eq!(
@@ -351,5 +441,51 @@ mod tests {
             SessionBudgetCheck::Continue,
             "answered question should not stop the session"
         );
+    }
+
+    #[test]
+    fn doom_loop_correction_phase() {
+        let config = test_config();
+        let mut session = SessionBudget::new(&config);
+        let args = serde_json::json!({"path": "/tmp/test.txt"});
+
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+
+        assert!(matches!(
+            session.doom_loop_status(),
+            DoomLoopStatus::CorrectionNeeded {
+                ref tool,
+                count: 3,
+                ref last_error,
+                ..
+            } if tool == "fs.read" && last_error.as_deref() == Some("file not found")
+        ));
+    }
+
+    #[test]
+    fn doom_loop_hard_stop_after_correction() {
+        let config = InnerLoopConfig {
+            max_steps_per_tick: 10,
+            ..test_config()
+        };
+        let mut session = SessionBudget::new(&config);
+        let args = serde_json::json!({"path": "/tmp/test.txt"});
+
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        session.acknowledge_correction();
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        assert_eq!(session.can_continue(), SessionBudgetCheck::Continue);
+        session.record_tool_call("fs.read", &args, Some("file not found"));
+        assert!(matches!(
+            session.can_continue(),
+            SessionBudgetCheck::Stop(SessionStopReason::DoomLoopDetected {
+                ref tool_name,
+                consecutive: 5
+            }) if tool_name == "fs.read"
+        ));
     }
 }

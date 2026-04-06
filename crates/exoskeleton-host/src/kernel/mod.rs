@@ -5,6 +5,7 @@
 pub mod act;
 pub mod align;
 pub mod amend;
+pub mod context_window;
 pub mod decide;
 pub mod diff_tracker;
 pub mod inner_loop;
