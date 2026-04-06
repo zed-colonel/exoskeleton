@@ -66,4 +66,9 @@ pub trait MemoryStore: Send + Sync {
     /// Evicted entries remain as artifacts in the ArtifactStore (I3: audit trail).
     /// Only the MemoryStore row is deleted.
     fn evict_episodic_beyond(&self, capacity: u64) -> Result<u64, ExoError>;
+
+    /// Delete a specific episodic summary by its ArtifactId.
+    ///
+    /// Returns `true` if the entry existed and was deleted, `false` otherwise.
+    fn delete_episodic(&self, id: &ArtifactId) -> Result<bool, ExoError>;
 }

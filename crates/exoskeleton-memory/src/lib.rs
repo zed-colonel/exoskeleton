@@ -14,6 +14,7 @@
 
 pub mod compiler;
 pub mod render;
+pub mod repo_instructions;
 pub mod store;
 pub mod tokens;
 
@@ -76,6 +77,8 @@ mod tests {
                 conversations: &[],
                 resolved_message_content: None,
                 system_section_override: None,
+                repo_instructions: None,
+                git_context: None,
             };
 
             match compiler.compile(&sources) {

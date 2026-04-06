@@ -57,6 +57,10 @@ pub struct ContextSources<'a> {
     /// If Some, used instead of the hardcoded `render_system_section()` output.
     /// The host layer resolves the template and passes the result as data.
     pub system_section_override: Option<&'a str>,
+    /// Pre-assembled repo instructions (mechanical + human-authored).
+    pub repo_instructions: Option<&'a str>,
+    /// Pre-rendered git context (branch, status, recent commits).
+    pub git_context: Option<&'a str>,
 }
 
 /// Result of context compilation.
@@ -130,6 +134,10 @@ pub struct SectionPriorities {
     pub system: SectionAllocation,
     /// Current StateSnapshot rendered as text.
     pub state_snapshot: SectionAllocation,
+    /// Repo instructions: mechanical analysis + discovered human-authored files.
+    pub repo_instructions: SectionAllocation,
+    /// Git state context: branch, status, recent commits.
+    pub git_context: SectionAllocation,
     /// Structured plan with tasks and statuses (E1-S1).
     pub plan: SectionAllocation,
     /// Compiled relationship summary.
@@ -157,7 +165,15 @@ impl Default for SectionPriorities {
             },
             state_snapshot: SectionAllocation {
                 priority: SectionPriority::Critical,
-                target_pct: 0.12,
+                target_pct: 0.10,
+            },
+            repo_instructions: SectionAllocation {
+                priority: SectionPriority::High,
+                target_pct: 0.05,
+            },
+            git_context: SectionAllocation {
+                priority: SectionPriority::Medium,
+                target_pct: 0.03,
             },
             plan: SectionAllocation {
                 priority: SectionPriority::Critical,
@@ -177,19 +193,19 @@ impl Default for SectionPriorities {
             },
             thread_outputs: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.13,
+                target_pct: 0.11,
             },
             recent_events: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.12,
+                target_pct: 0.10,
             },
             episodic_memory: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.12,
+                target_pct: 0.11,
             },
             long_term_memory: SectionAllocation {
                 priority: SectionPriority::Low,
-                target_pct: 0.08,
+                target_pct: 0.07,
             },
         }
     }
@@ -201,6 +217,8 @@ impl SectionPriorities {
         vec![
             ("system", &self.system),
             ("state_snapshot", &self.state_snapshot),
+            ("repo_instructions", &self.repo_instructions),
+            ("git_context", &self.git_context),
             ("plan", &self.plan),
             ("relationship_snapshot", &self.relationship_snapshot),
             ("conversations", &self.conversations),
@@ -485,6 +503,22 @@ impl ContextCompiler {
                 p.state_snapshot.priority,
             ),
             (
+                "repo_instructions",
+                sources
+                    .repo_instructions
+                    .map(render::render_repo_instructions)
+                    .unwrap_or_default(),
+                p.repo_instructions.priority,
+            ),
+            (
+                "git_context",
+                sources
+                    .git_context
+                    .map(render::render_git_context)
+                    .unwrap_or_default(),
+                p.git_context.priority,
+            ),
+            (
                 "plan",
                 sources.plan.map(render::render_plan).unwrap_or_default(),
                 p.plan.priority,
@@ -593,7 +627,111 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         }
+    }
+
+    #[test]
+    fn compile_with_repo_instructions() {
+        let compiler = make_compiler(4000);
+        let snap = StateSnapshot::initial(VesselId::new(), "test".into());
+
+        let sources = ContextSources {
+            vessel_id: snap.vessel_id,
+            mission: &snap.mission,
+            snapshot: &snap,
+            relationship_snapshot: None,
+            thread_contributions: &[],
+            recent_events: &[],
+            episodic_summaries: &[],
+            long_term_notes: &[],
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
+            resolved_message_content: None,
+            system_section_override: None,
+            repo_instructions: Some(
+                "=== REPO INSTRUCTIONS ===\nLanguage: Rust\nBuild: cargo build",
+            ),
+            git_context: None,
+        };
+
+        let result = compiler.compile(&sources).unwrap();
+        assert!(result.prompt.contains("REPO INSTRUCTIONS"));
+        assert!(result.prompt.contains("Language: Rust"));
+    }
+
+    #[test]
+    fn compile_with_git_context() {
+        let compiler = make_compiler(4000);
+        let snap = StateSnapshot::initial(VesselId::new(), "test".into());
+
+        let sources = ContextSources {
+            vessel_id: snap.vessel_id,
+            mission: &snap.mission,
+            snapshot: &snap,
+            relationship_snapshot: None,
+            thread_contributions: &[],
+            recent_events: &[],
+            episodic_summaries: &[],
+            long_term_notes: &[],
+            plan: None,
+            working_memory: &exoskeleton_core::working_memory::WorkingMemory::new(),
+            conversations: &[],
+            resolved_message_content: None,
+            system_section_override: None,
+            repo_instructions: None,
+            git_context: Some("=== GIT CONTEXT ===\nBranch: main\nWorking tree: clean"),
+        };
+
+        let result = compiler.compile(&sources).unwrap();
+        assert!(result.prompt.contains("GIT CONTEXT"));
+        assert!(result.prompt.contains("Branch: main"));
+    }
+
+    #[test]
+    fn section_priorities_sum_to_one() {
+        let priorities = SectionPriorities::default();
+        let total: f64 = priorities
+            .as_ordered_pairs()
+            .iter()
+            .map(|(_, allocation)| allocation.target_pct)
+            .sum();
+        assert!((total - 1.0).abs() < 0.01, "got {total}");
+    }
+
+    #[test]
+    fn section_order_has_repo_instructions_before_plan() {
+        let names: Vec<&str> = SectionPriorities::default()
+            .as_ordered_pairs()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let repo_index = names
+            .iter()
+            .position(|name| *name == "repo_instructions")
+            .unwrap();
+        let plan_index = names.iter().position(|name| *name == "plan").unwrap();
+        assert!(repo_index < plan_index);
+    }
+
+    #[test]
+    fn section_order_has_git_context_after_repo_instructions() {
+        let names: Vec<&str> = SectionPriorities::default()
+            .as_ordered_pairs()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let repo_index = names
+            .iter()
+            .position(|name| *name == "repo_instructions")
+            .unwrap();
+        let git_index = names
+            .iter()
+            .position(|name| *name == "git_context")
+            .unwrap();
+        assert!(git_index > repo_index);
     }
 
     // ── T-5: Context Compiler — Budget Allocation ──
@@ -649,6 +787,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -685,6 +825,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -711,6 +853,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -787,6 +931,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -844,6 +990,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -886,6 +1034,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -940,6 +1090,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -958,11 +1110,13 @@ mod tests {
         let sources = make_full_sources(&snap);
         let result = compiler.compile(&sources).unwrap();
 
-        // Should have entries for all 10 sections
-        assert_eq!(result.sections.len(), 10);
+        // Should have entries for all 12 sections after E10-S2 additions.
+        assert_eq!(result.sections.len(), 12);
         let names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"system"));
         assert!(names.contains(&"state_snapshot"));
+        assert!(names.contains(&"repo_instructions"));
+        assert!(names.contains(&"git_context"));
         assert!(names.contains(&"plan"));
         assert!(names.contains(&"relationship_snapshot"));
         assert!(names.contains(&"conversations"));
@@ -1002,6 +1156,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1045,6 +1201,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
         let result = compiler.compile(&sources).unwrap();
         assert!(!result.prompt.contains("RELATIONSHIPS"));
@@ -1074,6 +1232,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
         let result = compiler.compile(&sources).unwrap();
         assert!(!result.prompt.contains("THREAD OUTPUTS"));
@@ -1166,6 +1326,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1260,6 +1422,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1294,6 +1458,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
         let result1 = compiler.compile(&sources1).unwrap();
 
@@ -1322,6 +1488,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
         let result2 = compiler.compile(&sources2).unwrap();
 
@@ -1361,6 +1529,8 @@ mod tests {
             conversations: &[],
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1407,6 +1577,8 @@ mod tests {
             conversations: &conversations,
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();
@@ -1483,6 +1655,8 @@ mod tests {
             conversations: &conversations,
             resolved_message_content: None,
             system_section_override: None,
+            repo_instructions: None,
+            git_context: None,
         };
 
         let result = compiler.compile(&sources).unwrap();

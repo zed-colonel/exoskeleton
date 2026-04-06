@@ -301,6 +301,20 @@ impl MemoryStore for SqliteMemoryStore {
 
         Ok(to_evict as u64)
     }
+
+    fn delete_episodic(&self, id: &ArtifactId) -> Result<bool, ExoError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM episodic_summaries WHERE id = ?1",
+                rusqlite::params![id.as_str()],
+            )
+            .map_err(|e| ExoError::Storage(format!("delete_episodic: {e}")))?;
+        Ok(deleted > 0)
+    }
 }
 
 /// Intermediate row type for episodic summary deserialization.
@@ -1006,5 +1020,40 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].end_tick, 15); // newest first
         assert_eq!(results[1].end_tick, 10);
+    }
+
+    #[test]
+    fn delete_episodic_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMemoryStore::open(dir.path().join("memory.db")).unwrap();
+
+        let s1 = EpisodicSummary::new(1, 3, "first session".into(), vec!["event1".into()]);
+        let s2 = EpisodicSummary::new(4, 6, "second session".into(), vec!["event2".into()]);
+        let s3 = EpisodicSummary::new(7, 9, "third session".into(), vec!["event3".into()]);
+
+        store.write_episodic(&s1).unwrap();
+        store.write_episodic(&s2).unwrap();
+        store.write_episodic(&s3).unwrap();
+        assert_eq!(store.count_episodic().unwrap(), 3);
+
+        let deleted = store.delete_episodic(&s2.id).unwrap();
+        assert!(deleted);
+        assert_eq!(store.count_episodic().unwrap(), 2);
+
+        let remaining = store.recent_episodic(10).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().any(|s| s.summary == "first session"));
+        assert!(remaining.iter().any(|s| s.summary == "third session"));
+        assert!(!remaining.iter().any(|s| s.summary == "second session"));
+    }
+
+    #[test]
+    fn delete_episodic_nonexistent_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMemoryStore::open(dir.path().join("memory.db")).unwrap();
+
+        let fake_id = ArtifactId::from_content(b"nonexistent");
+        let deleted = store.delete_episodic(&fake_id).unwrap();
+        assert!(!deleted);
     }
 }

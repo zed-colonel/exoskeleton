@@ -27,8 +27,8 @@ pub use cognitive_engine::{
     bootstrap_cognitive_engine_with_backends, CognitiveHandler, CognitivePayload, CognitiveTaskType,
 };
 pub use config::{
-    FrontierModelConfig, FrontierProvider, LlmConfig, LocalApiFormat, LocalModelConfig,
-    VesselConfig, VesselConfigFile,
+    CodingDefaults, FrontierModelConfig, FrontierProvider, LlmConfig, LocalApiFormat,
+    LocalModelConfig, VesselConfig, VesselConfigFile,
 };
 pub use inbox::{FileInbox, InMemoryInbox};
 pub use inspect::VesselInspector;

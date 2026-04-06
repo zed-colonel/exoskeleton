@@ -169,6 +169,9 @@ pub struct InnerLoopConfig {
     /// before doom-loop detection triggers and aborts the inner loop.
     #[serde(default = "default_inner_loop_doom_threshold")]
     pub doom_loop_threshold: u32,
+    /// Workspace root path for repo analysis and git context.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 fn default_inner_loop_max_steps() -> u32 {
@@ -196,6 +199,39 @@ impl Default for InnerLoopConfig {
             timeout_secs: 300,
             context_window_size: 3,
             doom_loop_threshold: 3,
+            workspace_root: None,
+        }
+    }
+}
+
+/// Builder for coding-optimized vessel configuration defaults (E10-S2, W-101).
+pub struct CodingDefaults;
+
+impl CodingDefaults {
+    /// Build an InnerLoopConfig with coding-optimized settings.
+    pub fn inner_loop_config(workspace_root: Option<String>) -> InnerLoopConfig {
+        InnerLoopConfig {
+            enabled: true,
+            max_steps_per_tick: 25,
+            max_tokens_per_session: 500_000,
+            timeout_secs: 300,
+            context_window_size: 3,
+            doom_loop_threshold: 3,
+            workspace_root,
+        }
+    }
+
+    /// Build a ToolPolicyConfig with coding defaults.
+    pub fn tool_policy_config() -> crate::kernel::policy::ToolPolicyConfig {
+        use crate::kernel::policy::{PolicyRule, ToolPolicyConfig};
+
+        let mut rules = std::collections::HashMap::new();
+        rules.insert("shell.exec".into(), PolicyRule::Ask);
+        rules.insert("fs.write".into(), PolicyRule::Ask);
+
+        ToolPolicyConfig {
+            default: PolicyRule::Allow,
+            rules,
         }
     }
 }
@@ -2226,6 +2262,7 @@ max_decide_turns = 0
         assert_eq!(config.timeout_secs, 300);
         assert_eq!(config.context_window_size, 3);
         assert_eq!(config.doom_loop_threshold, 3);
+        assert_eq!(config.workspace_root, None);
     }
 
     // ── E8S1-T17: inner_loop_config_toml_roundtrip ──
@@ -2239,6 +2276,7 @@ max_decide_turns = 0
             timeout_secs: 600,
             context_window_size: 4,
             doom_loop_threshold: 5,
+            workspace_root: None,
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: InnerLoopConfig = toml::from_str(&toml_str).unwrap();
@@ -2248,6 +2286,7 @@ max_decide_turns = 0
         assert_eq!(parsed.timeout_secs, 600);
         assert_eq!(parsed.context_window_size, 4);
         assert_eq!(parsed.doom_loop_threshold, 5);
+        assert_eq!(parsed.workspace_root, None);
 
         // Also verify full vessel config with inner_loop section
         let vessel_toml = r#"
@@ -2271,6 +2310,43 @@ doom_loop_threshold = 4
         assert_eq!(vessel_config.inner_loop.timeout_secs, 180);
         assert_eq!(vessel_config.inner_loop.context_window_size, 6);
         assert_eq!(vessel_config.inner_loop.doom_loop_threshold, 4);
+        assert_eq!(vessel_config.inner_loop.workspace_root, None);
+    }
+
+    #[test]
+    fn coding_inner_loop_enabled() {
+        let config = CodingDefaults::inner_loop_config(None);
+        assert!(config.enabled);
+        assert_eq!(config.max_steps_per_tick, 25);
+        assert_eq!(config.max_tokens_per_session, 500_000);
+    }
+
+    #[test]
+    fn coding_inner_loop_with_workspace() {
+        let config = CodingDefaults::inner_loop_config(Some("/home/user/project".into()));
+        assert_eq!(config.workspace_root.as_deref(), Some("/home/user/project"));
+    }
+
+    #[test]
+    fn coding_tool_policy_allows_code_tools() {
+        let policy = CodingDefaults::tool_policy_config();
+        assert_eq!(
+            policy.rule_for("code.read"),
+            crate::kernel::policy::PolicyRule::Allow
+        );
+        assert_eq!(
+            policy.rule_for("code.edit"),
+            crate::kernel::policy::PolicyRule::Allow
+        );
+    }
+
+    #[test]
+    fn coding_tool_policy_asks_for_shell() {
+        let policy = CodingDefaults::tool_policy_config();
+        assert_eq!(
+            policy.rule_for("shell.exec"),
+            crate::kernel::policy::PolicyRule::Ask
+        );
     }
 
     // ── E8S1-T18: inner_loop_config_env_override ──

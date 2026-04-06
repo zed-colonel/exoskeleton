@@ -284,6 +284,16 @@ pub fn render_conversations(
     s
 }
 
+/// Render pre-assembled repo instructions.
+pub fn render_repo_instructions(section: &str) -> String {
+    section.to_string()
+}
+
+/// Render pre-assembled git context.
+pub fn render_git_context(section: &str) -> String {
+    section.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;

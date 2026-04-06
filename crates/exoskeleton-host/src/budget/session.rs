@@ -303,6 +303,7 @@ mod tests {
             timeout_secs: 300,
             context_window_size: 3,
             doom_loop_threshold: 3,
+            workspace_root: None,
         }
     }
 

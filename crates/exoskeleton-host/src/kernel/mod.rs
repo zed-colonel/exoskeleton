@@ -5,14 +5,17 @@
 pub mod act;
 pub mod align;
 pub mod amend;
+pub mod compaction;
 pub mod context_window;
 pub mod decide;
 pub mod diff_tracker;
+pub mod git_context;
 pub mod inner_loop;
 pub mod orient;
 pub mod perceive;
 pub mod policy;
 pub mod reflect;
+pub mod repo_analysis;
 pub mod threads;
 pub mod types;
 pub mod virtual_tools;
@@ -596,6 +599,31 @@ pub fn run_tick(
             } else {
                 vec![]
             };
+
+            let episodic_count = kernel.memory_store.count_episodic().unwrap_or(0);
+            if compaction::should_compact(
+                &orientation.compiled_context.truncated_sections,
+                episodic_count,
+                kernel.episodic_memory_capacity,
+            ) {
+                match compaction::run_compaction(
+                    kernel.memory_store.as_ref(),
+                    &compaction::CompactionConfig::default(),
+                ) {
+                    Ok(compaction::CompactionResult::Compacted {
+                        entries_merged,
+                        summaries_written,
+                    }) => {
+                        tracing::info!(
+                            entries_merged,
+                            summaries_written,
+                            "session compaction completed"
+                        );
+                    }
+                    Ok(compaction::CompactionResult::NoAction) => {}
+                    Err(e) => tracing::warn!(error = %e, "session compaction failed"),
+                }
+            }
 
             if consumption.is_empty() {
                 if matches!(

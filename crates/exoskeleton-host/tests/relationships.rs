@@ -447,6 +447,8 @@ fn context_compilation_with_relationships() {
         conversations: &[],
         resolved_message_content: None,
         system_section_override: None,
+        repo_instructions: None,
+        git_context: None,
     };
 
     let compiled = compiler.compile(&sources).unwrap();
@@ -602,6 +604,8 @@ fn context_prompt_contains_principal_details() {
         conversations: &[],
         resolved_message_content: None,
         system_section_override: None,
+        repo_instructions: None,
+        git_context: None,
     };
 
     let compiled = compiler.compile(&sources).unwrap();

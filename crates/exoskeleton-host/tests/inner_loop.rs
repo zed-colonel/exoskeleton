@@ -633,6 +633,7 @@ async fn inner_loop_doom_loop_detected() {
         let config = InnerLoopConfig {
             enabled: true,
             doom_loop_threshold: 3,
+            workspace_root: None,
             ..InnerLoopConfig::default()
         };
         let (kernel, handler) =

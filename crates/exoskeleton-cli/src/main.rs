@@ -184,6 +184,17 @@ enum Commands {
         #[arg(long)]
         mission: Option<String>,
     },
+
+    /// Initialize a coding-optimized vessel configuration in the current directory.
+    Init {
+        /// Output path for vessel.toml (default: .exo/vessel.toml).
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Override the vessel mission.
+        #[arg(long)]
+        mission: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,6 +270,8 @@ async fn main() {
             listen,
             log_level,
         } => commands::start::run_start(config, data_dir, mission, listen, log_level).await,
+
+        Commands::Init { output, mission } => commands::init::run_init(output, mission).await,
 
         // All remaining commands are client commands that talk to a running daemon.
         _ => run_client_command(&cli).await,
@@ -374,5 +387,6 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
             unreachable!("serve-bootstrap is handled in main()")
         }
         Commands::Start { .. } => unreachable!("start is handled in main()"),
+        Commands::Init { .. } => unreachable!("init is handled in main()"),
     }
 }

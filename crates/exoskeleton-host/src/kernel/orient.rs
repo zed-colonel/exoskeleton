@@ -1,8 +1,12 @@
 //! Orient step — compile context for the LLM.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use exoskeleton_core::{ArtifactId, ExoError, RelationshipSnapshot, StateSnapshot};
+use exoskeleton_memory::repo_instructions::{
+    assemble_repo_instructions, instruction_file_names, DiscoveredInstruction,
+};
 use exoskeleton_memory::ContextSources;
 
 use super::types::{OrientationResult, PerceptionResult};
@@ -95,6 +99,26 @@ pub fn orient(
         )
         .ok();
 
+    let workspace_root = kernel
+        .inner_loop_config
+        .workspace_root
+        .as_deref()
+        .map(PathBuf::from);
+    let repo_instructions_text = workspace_root
+        .as_deref()
+        .map(assemble_repo_instruction_text)
+        .transpose()?;
+    let git_context_text = workspace_root.as_deref().map(|root| {
+        let state = super::git_context::capture_git_state(root);
+        super::git_context::render_git_context_optional(state.as_ref())
+    });
+    let repo_instructions_ref = repo_instructions_text
+        .as_deref()
+        .filter(|section| !section.is_empty());
+    let git_context_ref = git_context_text
+        .as_deref()
+        .filter(|section| !section.is_empty());
+
     let sources = ContextSources {
         vessel_id: kernel.vessel_id,
         mission: &kernel.mission,
@@ -109,11 +133,77 @@ pub fn orient(
         conversations: &perception.active_conversations,
         resolved_message_content: Some(&resolved_message_content),
         system_section_override: system_section.as_deref(),
+        repo_instructions: repo_instructions_ref,
+        git_context: git_context_ref,
     };
 
     let compiled_context = kernel.context_compiler.compile(&sources)?;
 
     Ok(OrientationResult { compiled_context })
+}
+
+fn assemble_repo_instruction_text(root_path: &Path) -> Result<String, ExoError> {
+    let analysis = super::repo_analysis::analyze_repo(root_path);
+    let mechanical = analysis.render();
+    let mechanical_ref = (!mechanical.is_empty()).then_some(mechanical.as_str());
+
+    let mut discovered = Vec::new();
+    discover_instruction_files(root_path, root_path, &mut discovered)?;
+
+    Ok(assemble_repo_instructions(mechanical_ref, &discovered))
+}
+
+fn discover_instruction_files(
+    workspace_root: &Path,
+    current_dir: &Path,
+    discovered: &mut Vec<DiscoveredInstruction>,
+) -> Result<(), ExoError> {
+    let entries = match std::fs::read_dir(current_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return Err(ExoError::Storage(format!(
+                "failed to read workspace directory {}: {err}",
+                current_dir.display()
+            )))
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+
+        if path.is_dir() {
+            if matches!(file_name.as_ref(), ".git" | "target" | ".exo") {
+                continue;
+            }
+            discover_instruction_files(workspace_root, &path, discovered)?;
+            continue;
+        }
+
+        if !instruction_file_names().contains(&file_name.as_ref()) {
+            continue;
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let relative = path
+                    .strip_prefix(workspace_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                discovered.push(DiscoveredInstruction {
+                    path: relative,
+                    content,
+                });
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, path = %path.display(), "failed to read instruction file");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

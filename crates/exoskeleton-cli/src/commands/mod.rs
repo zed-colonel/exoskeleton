@@ -11,6 +11,7 @@ pub mod engines;
 pub mod events;
 pub mod fork;
 pub mod inbox_history;
+pub mod init;
 pub mod inspect;
 pub mod memory;
 pub mod relationship;
