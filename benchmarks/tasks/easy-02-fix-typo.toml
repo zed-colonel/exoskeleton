@@ -1,0 +1,12 @@
+[task]
+name = "easy-02-fix-typo"
+repo_path = "./benchmarks/repos/sample-rust"
+prompt = """The function calculate_averge in src/lib.rs has a typo in its name.
+Rename it to calculate_average. Update the function name and its doc comment
+to use the correct spelling. Also update any references to the old name."""
+timeout_secs = 300
+max_steps = 25
+
+[verify]
+command = "cargo test --lib && ! grep -q 'averge' src/lib.rs"
+expected_exit_code = 0

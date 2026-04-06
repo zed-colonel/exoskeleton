@@ -1,0 +1,13 @@
+[task]
+name = "easy-01-add-test"
+repo_path = "./benchmarks/repos/sample-rust"
+prompt = """Add a unit test for the parse_config_line function that tests parsing
+a line with no spaces around the equals sign, e.g., 'key=value'.
+The test should be called test_parse_config_no_spaces and verify
+that parse_config_line("key=value") returns Some(("key", "value"))."""
+timeout_secs = 300
+max_steps = 25
+
+[verify]
+command = "grep -q 'test_parse_config_no_spaces' src/lib.rs && cargo test test_parse_config_no_spaces --lib"
+expected_exit_code = 0

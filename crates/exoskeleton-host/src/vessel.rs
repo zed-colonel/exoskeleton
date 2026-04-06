@@ -854,9 +854,9 @@ mod tests {
     // ── E4S1-T17: WI default_registry has built-in connectors ──
 
     #[test]
-    fn default_registry_has_thirteen_connectors() {
+    fn default_registry_has_fourteen_connectors() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 13, "expected 13 built-in connectors");
+        assert_eq!(registry.len(), 14, "expected 14 built-in connectors");
         assert!(registry.get("delay").is_some());
         assert!(registry.get("http.request").is_some());
         assert!(registry.get("fs.read").is_some());
@@ -868,6 +868,7 @@ mod tests {
         assert!(registry.get("code.glob").is_some());
         assert!(registry.get("code.ls").is_some());
         assert!(registry.get("code.apply_patch").is_some());
+        assert!(registry.get("code.git_diff").is_some());
         assert!(registry.get("shell.exec").is_some());
         assert!(registry.get("sandbox.exec").is_some());
     }
@@ -877,7 +878,7 @@ mod tests {
     #[test]
     fn signal_connectors_registered_at_boot() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 13);
+        assert_eq!(registry.len(), 14);
 
         // Simulate the signal connector registration from start_with_registry_and_backends
         let signal_registry = Arc::new(SignalRegistry::new());
@@ -886,7 +887,7 @@ mod tests {
         ))));
         registry.register(Arc::new(SignalEmitConnector::new(signal_registry)));
 
-        assert_eq!(registry.len(), 15);
+        assert_eq!(registry.len(), 16);
         assert!(registry.get("signal.await").is_some());
         assert!(registry.get("signal.emit").is_some());
     }

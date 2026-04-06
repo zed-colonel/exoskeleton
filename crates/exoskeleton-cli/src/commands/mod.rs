@@ -5,6 +5,7 @@
 //! that query a running daemon.
 
 pub mod artifact;
+pub mod bench;
 pub mod budget;
 pub mod config;
 pub mod engines;

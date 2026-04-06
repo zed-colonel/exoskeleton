@@ -195,6 +195,29 @@ enum Commands {
         #[arg(long)]
         mission: Option<String>,
     },
+
+    /// Run coding benchmarks against a task suite.
+    Bench {
+        /// Path to a single task spec TOML file.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Path to a directory of task spec TOML files.
+        #[arg(long)]
+        suite: Option<String>,
+
+        /// Record results with this label (e.g., "baseline-v1").
+        #[arg(long)]
+        record: Option<String>,
+
+        /// Compare results against a previously recorded baseline.
+        #[arg(long)]
+        compare: Option<String>,
+
+        /// Directory for result storage (default: benchmarks/results/).
+        #[arg(long)]
+        results_dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -272,6 +295,14 @@ async fn main() {
         } => commands::start::run_start(config, data_dir, mission, listen, log_level).await,
 
         Commands::Init { output, mission } => commands::init::run_init(output, mission).await,
+
+        Commands::Bench {
+            task,
+            suite,
+            record,
+            compare,
+            results_dir,
+        } => commands::bench::run_bench(task, suite, record, compare, results_dir).await,
 
         // All remaining commands are client commands that talk to a running daemon.
         _ => run_client_command(&cli).await,
@@ -388,5 +419,6 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
         }
         Commands::Start { .. } => unreachable!("start is handled in main()"),
         Commands::Init { .. } => unreachable!("init is handled in main()"),
+        Commands::Bench { .. } => unreachable!("bench is handled in main()"),
     }
 }

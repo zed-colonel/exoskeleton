@@ -26,6 +26,7 @@ rusqlite = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 ts-rs = { workspace = true }
+tempfile = { workspace = true }
 
 # ActionQueue crates — Cognitive AQ engine (direct ownership, I9)
 actionqueue-core = { workspace = true }
@@ -40,5 +41,4 @@ worldinterface-connector = { workspace = true }
 worldinterface-host = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 proptest = { workspace = true }

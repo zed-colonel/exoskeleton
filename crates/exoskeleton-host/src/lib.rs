@@ -10,6 +10,7 @@
 //! not WI adapters. Threads never invoke tools — they produce recommendation
 //! artifacts only.
 
+pub mod benchmark;
 pub mod budget;
 pub mod cognitive_engine;
 pub mod config;
