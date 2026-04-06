@@ -88,7 +88,7 @@ impl SuiteResult {
     }
 
     pub fn median_steps(&self) -> u32 {
-        median_u32(
+        upper_median(
             &self
                 .tasks
                 .iter()
@@ -98,7 +98,7 @@ impl SuiteResult {
     }
 
     pub fn median_tokens(&self) -> u64 {
-        median_u64(
+        upper_median(
             &self
                 .tasks
                 .iter()
@@ -108,7 +108,7 @@ impl SuiteResult {
     }
 
     pub fn median_time(&self) -> f64 {
-        median_f64(
+        upper_median(
             &self
                 .tasks
                 .iter()
@@ -118,31 +118,16 @@ impl SuiteResult {
     }
 }
 
-fn median_u32(values: &[u32]) -> u32 {
+/// Upper-median: for even-length arrays, returns the higher of the two middle
+/// values rather than their average. This is simpler and avoids fractional
+/// results for integer types. For odd-length arrays, returns the true median.
+fn upper_median<T: Clone + Default + PartialOrd>(values: &[T]) -> T {
     if values.is_empty() {
-        return 0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
-}
-
-fn median_u64(values: &[u64]) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
-}
-
-fn median_f64(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
+        return T::default();
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    sorted[sorted.len() / 2]
+    sorted[sorted.len() / 2].clone()
 }
 
 /// Run a verification command in a workspace directory.
@@ -181,6 +166,10 @@ pub fn copy_directory(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 }
 
 /// Load a TaskSpec from a TOML file.
+///
+/// Relative `repo_path` values are resolved relative to the spec file's
+/// parent directory. This makes task specs portable — they work regardless
+/// of the caller's working directory.
 pub fn load_task_spec(path: &Path) -> Result<TaskSpec, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -190,15 +179,7 @@ pub fn load_task_spec(path: &Path) -> Result<TaskSpec, String> {
     let repo_path = PathBuf::from(&spec.task.repo_path);
     if !repo_path.is_absolute() {
         let spec_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let candidate_from_spec = spec_dir.join(&spec.task.repo_path);
-        let resolved = if candidate_from_spec.exists() {
-            candidate_from_spec
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&spec.task.repo_path))
-                .unwrap_or(candidate_from_spec)
-        };
-
+        let resolved = spec_dir.join(&spec.task.repo_path);
         spec.task.repo_path = resolved
             .canonicalize()
             .unwrap_or(resolved)

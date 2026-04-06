@@ -1,6 +1,6 @@
 [task]
 name = "easy-03-add-doc-comment"
-repo_path = "./benchmarks/repos/sample-rust"
+repo_path = "../repos/sample-rust"
 prompt = """Add a module-level doc comment to src/lib.rs describing this crate
 as a utility library for configuration parsing, math helpers, and
 string formatting. The doc comment should use //! syntax at the top of the file."""

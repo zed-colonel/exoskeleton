@@ -1,6 +1,6 @@
 [task]
 name = "easy-02-fix-typo"
-repo_path = "./benchmarks/repos/sample-rust"
+repo_path = "../repos/sample-rust"
 prompt = """The function calculate_averge in src/lib.rs has a typo in its name.
 Rename it to calculate_average. Update the function name and its doc comment
 to use the correct spelling. Also update any references to the old name."""
