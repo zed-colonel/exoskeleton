@@ -68,8 +68,8 @@ fn summarize_code_read(step: usize, execution: &ActionExecution, value: &Value) 
         .unwrap_or("<unknown>");
     let start = value["start_line"].as_u64().unwrap_or(1);
     let end = value["end_line"].as_u64().unwrap_or(start);
-    let total = value["total_lines"].as_u64().unwrap_or(0);
-    format!("Step {step}: code.read {file_path}:{start}-{end} -> {total} lines (success)")
+    let lines_read = if end >= start { end - start + 1 } else { 0 };
+    format!("Step {step}: code.read {file_path}:{start}-{end} -> {lines_read} lines (success)")
 }
 
 fn summarize_code_grep(step: usize, execution: &ActionExecution, value: &Value) -> String {
@@ -175,7 +175,7 @@ mod tests {
 
         let formatted = format_windowed_results(&executions, 2);
         assert!(formatted.contains("### Earlier Steps"));
-        assert!(formatted.contains("Step 1: code.read src/main.rs:1-50 -> 120 lines (success)"));
+        assert!(formatted.contains("Step 1: code.read src/main.rs:1-50 -> 50 lines (success)"));
         assert!(
             formatted.contains("Step 2: code.grep 'fn parse' -> 4 matches in 2 files (success)")
         );
@@ -199,5 +199,31 @@ mod tests {
     #[test]
     fn format_windowed_results_empty() {
         assert_eq!(format_windowed_results(&[], 3), "No tool results yet.");
+    }
+
+    #[test]
+    fn format_windowed_results_all_within_window_shows_full_output_only() {
+        let executions = vec![
+            execution(
+                "code.read",
+                json!({"file_path": "src/main.rs"}),
+                Ok(json!({"content": "line 1", "start_line": 1, "end_line": 1, "total_lines": 10})),
+            ),
+            execution(
+                "code.grep",
+                json!({"pattern": "main"}),
+                Ok(
+                    json!({"content": "src/main.rs:1:fn main()", "total_matches": 1, "files_searched": 1}),
+                ),
+            ),
+        ];
+
+        let formatted = format_windowed_results(&executions, 3);
+
+        assert!(!formatted.contains("### Earlier Steps"));
+        assert!(formatted.contains("### Step 1: code.read [SUCCESS]"));
+        assert!(formatted.contains("### Step 2: code.grep [SUCCESS]"));
+        assert!(formatted.contains("\"content\":\"line 1\""));
+        assert!(formatted.contains("\"content\":\"src/main.rs:1:fn main()\""));
     }
 }

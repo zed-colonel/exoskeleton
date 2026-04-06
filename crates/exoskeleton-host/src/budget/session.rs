@@ -488,4 +488,42 @@ mod tests {
             }) if tool_name == "fs.read"
         ));
     }
+
+    #[test]
+    fn doom_loop_resets_after_correction_and_recovery() {
+        let config = InnerLoopConfig {
+            max_steps_per_tick: 10,
+            ..test_config()
+        };
+        let mut session = SessionBudget::new(&config);
+        let repeated_args = serde_json::json!({"path": "/tmp/test.txt"});
+        let alternate_args = serde_json::json!({"path": "/tmp/other.txt"});
+
+        session.record_tool_call("fs.read", &repeated_args, Some("file not found"));
+        session.record_tool_call("fs.read", &repeated_args, Some("file not found"));
+        session.record_tool_call("fs.read", &repeated_args, Some("file not found"));
+        assert!(matches!(
+            session.doom_loop_status(),
+            DoomLoopStatus::CorrectionNeeded { .. }
+        ));
+
+        session.acknowledge_correction();
+        session.record_tool_call("fs.read", &alternate_args, None);
+        assert_eq!(session.doom_loop_status(), DoomLoopStatus::Clear);
+        assert_eq!(session.can_continue(), SessionBudgetCheck::Continue);
+
+        session.record_tool_call("fs.read", &repeated_args, Some("file not found"));
+        session.record_tool_call("fs.read", &repeated_args, Some("file not found"));
+        assert_eq!(session.doom_loop_status(), DoomLoopStatus::Clear);
+        session.record_tool_call("fs.read", &repeated_args, Some("file not found"));
+        assert!(matches!(
+            session.doom_loop_status(),
+            DoomLoopStatus::CorrectionNeeded {
+                ref tool,
+                count: 3,
+                ref last_error,
+                ..
+            } if tool == "fs.read" && last_error.as_deref() == Some("file not found")
+        ));
+    }
 }
