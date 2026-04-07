@@ -28,13 +28,18 @@ pub struct Plan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct PlanTask {
     /// Unique identity of this task within the plan.
+    /// Lenient deserialization: accepts UUIDs or human-readable strings.
+    /// Non-UUID strings are converted to deterministic UUIDs via UUID v5.
+    #[serde(deserialize_with = "deserialize_plan_task_id_lenient")]
     pub id: PlanTaskId,
     /// Human-readable description of the task.
     pub description: String,
     /// Current status.
     pub status: PlanTaskStatus,
     /// IDs of tasks that must complete before this one can start.
+    /// Lenient deserialization: same as `id` — non-UUID strings are converted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(deserialize_with = "deserialize_plan_task_id_vec_lenient")]
     pub depends_on: Vec<PlanTaskId>,
     /// Optional hint about which tool to use (suggestion, not constraint).
     /// Forward-compatible with W-57 (WASM plugins register new tool names).
@@ -175,6 +180,43 @@ where
             "expected string, object, or null for plan, got: {other}"
         ))),
     }
+}
+
+/// Namespace UUID for deriving PlanTaskIds from non-UUID strings.
+const PLAN_TASK_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x5a, 0x1b, 0x3c, 0x7e, 0x9f, 0x4d, 0x4a, 0x8b, 0xa2, 0x6e, 0x7c, 0x0d, 0x1f, 0x3a, 0x5b,
+    0x9c,
+]);
+
+/// Convert a string to a PlanTaskId: if it's a valid UUID, use it directly;
+/// otherwise generate a deterministic UUID v5 from the string.
+fn plan_task_id_from_str(s: &str) -> PlanTaskId {
+    match s.parse::<PlanTaskId>() {
+        Ok(id) => id,
+        Err(_) => PlanTaskId::from(uuid::Uuid::new_v5(&PLAN_TASK_NAMESPACE, s.as_bytes())),
+    }
+}
+
+/// Lenient deserializer for PlanTaskId: accepts UUID strings or arbitrary strings.
+/// Non-UUID strings are converted to deterministic UUIDs via UUID v5, preserving
+/// the dependency graph (same input string always maps to the same PlanTaskId).
+fn deserialize_plan_task_id_lenient<'de, D>(deserializer: D) -> Result<PlanTaskId, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let s: String = String::deserialize(deserializer)?;
+    Ok(plan_task_id_from_str(&s))
+}
+
+/// Lenient deserializer for Vec<PlanTaskId>.
+fn deserialize_plan_task_id_vec_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PlanTaskId>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let strings: Vec<String> = Vec::deserialize(deserializer)?;
+    Ok(strings.iter().map(|s| plan_task_id_from_str(s)).collect())
 }
 
 #[cfg(test)]
@@ -407,6 +449,35 @@ mod tests {
         let mut h2 = DefaultHasher::new();
         id.hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish());
+    }
+
+    // Pre-E11: PlanTask deserializes with non-UUID string IDs
+    #[test]
+    fn plan_task_deserialize_string_ids() {
+        let json = r#"{
+            "id": "explore-project",
+            "description": "Explore the project",
+            "status": "pending",
+            "depends_on": ["setup-env"]
+        }"#;
+        let task: PlanTask = serde_json::from_str(json).unwrap();
+        assert_eq!(task.description, "Explore the project");
+        assert_eq!(task.depends_on.len(), 1);
+        // Same string always maps to same UUID
+        let again: PlanTask = serde_json::from_str(json).unwrap();
+        assert_eq!(task.id, again.id);
+        assert_eq!(task.depends_on[0], again.depends_on[0]);
+    }
+
+    // Pre-E11: PlanTask still accepts real UUIDs
+    #[test]
+    fn plan_task_deserialize_uuid_ids() {
+        let id = PlanTaskId::new();
+        let json = format!(
+            r#"{{"id": "{id}", "description": "test", "status": "pending"}}"#,
+        );
+        let task: PlanTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(task.id, id);
     }
 
     // ── E1-T20: ts-rs generates valid TypeScript ──

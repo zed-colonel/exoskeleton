@@ -256,18 +256,19 @@ fn upper_median<T: Clone + Default + PartialOrd>(values: &[T]) -> T {
 }
 
 /// Run a verification command in a workspace directory.
+/// Returns (passed, actual_exit_code).
 pub fn run_verification<P: AsRef<Path>>(
     command: &str,
     expected_exit_code: i32,
     workspace: P,
-) -> Result<bool, std::io::Error> {
+) -> Result<(bool, i32), std::io::Error> {
     let output = std::process::Command::new("sh")
         .args(["-c", command])
         .current_dir(workspace)
         .output()?;
 
     let actual = output.status.code().unwrap_or(-1);
-    Ok(actual == expected_exit_code)
+    Ok((actual == expected_exit_code, actual))
 }
 
 /// Recursively copy a directory tree.
@@ -292,24 +293,44 @@ pub fn copy_directory(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 
 /// Load a TaskSpec from a TOML file.
 ///
-/// Relative `repo_path` values are resolved relative to the spec file's
-/// parent directory. This makes task specs portable — they work regardless
-/// of the caller's working directory.
+/// Relative paths (`repo_path`, `test_patch`, `gold_patch`) are resolved
+/// relative to the spec file's parent directory. This makes task specs
+/// portable — they work regardless of the caller's working directory.
 pub fn load_task_spec(path: &Path) -> Result<TaskSpec, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut spec: TaskSpec = toml::from_str(&content)
         .map_err(|e| format!("invalid task spec {}: {e}", path.display()))?;
 
+    let spec_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    // Resolve repo_path relative to spec file
     let repo_path = PathBuf::from(&spec.task.repo_path);
     if !repo_path.is_absolute() {
-        let spec_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let resolved = spec_dir.join(&spec.task.repo_path);
         spec.task.repo_path = resolved
             .canonicalize()
             .unwrap_or(resolved)
             .to_string_lossy()
             .to_string();
+    }
+
+    // Resolve test_patch relative to spec file
+    if let Some(ref patch) = spec.verify.test_patch {
+        let patch_path = PathBuf::from(patch);
+        if !patch_path.is_absolute() {
+            let resolved = spec_dir.join(patch);
+            spec.verify.test_patch = Some(resolved.to_string_lossy().to_string());
+        }
+    }
+
+    // Resolve gold_patch relative to spec file
+    if let Some(ref patch) = spec.task.gold_patch {
+        let patch_path = PathBuf::from(patch);
+        if !patch_path.is_absolute() {
+            let resolved = spec_dir.join(patch);
+            spec.task.gold_patch = Some(resolved.to_string_lossy().to_string());
+        }
     }
 
     Ok(spec)
@@ -458,7 +479,7 @@ impl HeadlessRunner {
 
                 if let Some(rationale) = tick.decision_rationale.as_deref() {
                     let normalized = rationale.to_lowercase();
-                    if normalized.contains("agent_complete") || normalized.contains("complete") {
+                    if normalized.contains("agent_complete") {
                         return Ok("AgentComplete".to_string());
                     }
                     if normalized.contains("step_limit") {
@@ -482,8 +503,9 @@ impl HeadlessRunner {
     /// Extract comprehensive metrics from a completed benchmark run.
     fn extract_metrics(
         inspector: &VesselInspector,
-        _spec: &TaskSpec,
     ) -> Result<MetricsSnapshot, String> {
+        // tick_history() returns newest-first; reverse to iterate oldest-first
+        // so that step numbering and phase token attribution are chronological.
         let mut ticks = inspector
             .tick_history(256)
             .map_err(|e| format!("failed to read tick history: {e}"))?;
@@ -496,9 +518,9 @@ impl HeadlessRunner {
         let mut total_llm_calls: u32 = 0;
         let mut tool_calls: HashMap<String, ToolCallStats> = HashMap::new();
         let mut files_modified: Vec<String> = Vec::new();
-        let total_lines_added: u32 = 0;
-        let total_lines_removed: u32 = 0;
-        let doom_corrections: u32 = 0;
+        let mut total_lines_added: u32 = 0;
+        let mut total_lines_removed: u32 = 0;
+        let mut doom_corrections: u32 = 0;
         let mut model_used = String::new();
         let mut step_trace: Vec<StepTrace> = Vec::new();
         let mut tick_details: Vec<TickMetrics> = Vec::new();
@@ -526,6 +548,11 @@ impl HeadlessRunner {
                 }
             }
 
+            // Phase attribution heuristic: LlmCallRecord does not carry a phase tag,
+            // so we infer from position. In a standard PODAARA tick, the first LLM
+            // call is Decide, the last (if >1 total) is Reflect, and everything in
+            // between is DecideLite (inner loop iterations). This is approximate —
+            // multi-turn Decide introspection queries may skew the count.
             for (i, call) in tick.llm_calls.iter().enumerate() {
                 let phase = if i == 0 {
                     "decide"
@@ -566,10 +593,26 @@ impl HeadlessRunner {
 
                 if matches!(
                     action.action_type.as_str(),
-                    "fs.write" | "code.write" | "code.edit" | "sandbox.exec"
+                    "fs.write" | "code.write" | "code.edit" | "code.apply_patch"
                 ) && !action.target.is_empty()
                 {
                     files_modified.push(action.target.clone());
+                }
+
+                // Extract lines_added/removed from receipt artifacts (CodeDiff data)
+                if let Some(ref receipt_id) = action.receipt_ref {
+                    if let Ok(Some(receipt)) = inspector.artifact(receipt_id) {
+                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&receipt.content) {
+                            if let Some(diff) = val.get("diff") {
+                                if let Some(added) = diff.get("lines_added").and_then(|v| v.as_u64()) {
+                                    total_lines_added += added as u32;
+                                }
+                                if let Some(removed) = diff.get("lines_removed").and_then(|v| v.as_u64()) {
+                                    total_lines_removed += removed as u32;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 global_step += 1;
@@ -588,6 +631,14 @@ impl HeadlessRunner {
             }
 
             total_steps += tick.actions_taken.len() as u32;
+
+            // Count doom-loop corrections from the tick's decision rationale
+            if let Some(ref rationale) = tick.decision_rationale {
+                let normalized = rationale.to_lowercase();
+                if normalized.contains("doom_loop") || normalized.contains("doom loop") {
+                    doom_corrections += 1;
+                }
+            }
 
             let tick_duration = tick
                 .completed_at
@@ -703,7 +754,56 @@ impl HeadlessRunner {
         };
 
         let inspector = vessel.inspector();
-        let metrics = Self::extract_metrics(&inspector, spec).unwrap_or_else(|e| {
+
+        // === Diagnostic logging ===
+        // Dump tick details so we can debug agent behavior.
+        if let Ok(ticks) = inspector.tick_history(32) {
+            eprintln!("  [diag] {} tick(s) recorded", ticks.len());
+            for tick in &ticks {
+                let completed = tick.phase == TickPhase::Amend && tick.completed_at.is_some();
+                eprintln!(
+                    "  [diag] tick #{}: phase={:?} completed={} actions={} llm_calls={}",
+                    tick.tick_number,
+                    tick.phase,
+                    completed,
+                    tick.actions_taken.len(),
+                    tick.llm_calls.len(),
+                );
+                if let Some(ref rationale) = tick.decision_rationale {
+                    // Truncate to first 500 chars for readability
+                    let display = if rationale.len() > 500 {
+                        format!("{}...", &rationale[..500])
+                    } else {
+                        rationale.clone()
+                    };
+                    eprintln!("  [diag]   rationale: {display}");
+                }
+                for (i, call) in tick.llm_calls.iter().enumerate() {
+                    eprintln!(
+                        "  [diag]   llm_call[{}]: model={} in={} out={} cost={:.4}c",
+                        i, call.model, call.tokens_in, call.tokens_out, call.cost_cents,
+                    );
+                }
+                for (i, action) in tick.actions_taken.iter().enumerate() {
+                    eprintln!(
+                        "  [diag]   action[{}]: {} -> {} ({:?})",
+                        i, action.action_type, action.target, action.outcome,
+                    );
+                }
+                // Try to read decision artifact to check inner_loop_requested
+                if let Some(ref snapshot_after) = tick.snapshot_after {
+                    if let Ok(Some(artifact)) = inspector.artifact(snapshot_after) {
+                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&artifact.content) {
+                            if let Some(ilr) = val.get("inner_loop_requested") {
+                                eprintln!("  [diag]   inner_loop_requested: {ilr}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let metrics = Self::extract_metrics(&inspector).unwrap_or_else(|e| {
             tracing::warn!("metrics extraction failed: {e}");
             MetricsSnapshot {
                 ticks_used: 0,
@@ -728,18 +828,9 @@ impl HeadlessRunner {
             .await
             .map_err(|e| format!("vessel shutdown failed: {e}"))?;
 
+        // test_patch is already resolved to an absolute path by load_task_spec()
         if let Some(patch_path) = spec.verify.test_patch.as_deref() {
-            let patch_abs = {
-                let patch = PathBuf::from(patch_path);
-                if patch.is_absolute() {
-                    patch
-                } else {
-                    PathBuf::from(&spec.task.repo_path)
-                        .parent()
-                        .unwrap_or(Path::new("."))
-                        .join(patch)
-                }
-            };
+            let patch_abs = PathBuf::from(patch_path);
             if patch_abs.exists() {
                 let output = std::process::Command::new("git")
                     .args(["apply", &patch_abs.to_string_lossy()])
@@ -755,23 +846,31 @@ impl HeadlessRunner {
             }
         }
 
-        let passed = run_verification(
+        let (passed, actual_exit_code) = run_verification(
             &spec.verify.command,
             spec.verify.expected_exit_code,
             workspace_dir.path(),
         )
         .map_err(|e| format!("verification failed: {e}"))?;
 
-        let verification_exit_code = if passed {
-            spec.verify.expected_exit_code
-        } else {
-            1
-        };
+        // Preserve workspace on failure for post-mortem inspection.
+        // On success, the TempDir drops normally and cleans up.
+        if !passed {
+            let preserved = workspace_dir.keep();
+            eprintln!(
+                "  [diag] task FAILED — workspace preserved at: {}",
+                preserved.display()
+            );
+            eprintln!(
+                "  [diag] vessel data at: {}/.exo-bench/",
+                preserved.display()
+            );
+        }
 
         Ok(TaskResult {
             task_name: spec.task.name.clone(),
             passed,
-            verification_exit_code: Some(verification_exit_code),
+            verification_exit_code: Some(actual_exit_code),
             completion_reason,
             wall_time_secs: start.elapsed().as_secs_f64(),
             steps_taken: metrics.steps_taken,
@@ -1314,23 +1413,23 @@ timeout_secs = 600
 
     #[test]
     fn run_verification_command_success() {
-        let result = run_verification("true", 0, std::env::temp_dir());
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        let (passed, code) = run_verification("true", 0, std::env::temp_dir()).unwrap();
+        assert!(passed);
+        assert_eq!(code, 0);
     }
 
     #[test]
     fn run_verification_command_failure() {
-        let result = run_verification("false", 0, std::env::temp_dir());
-        assert!(result.is_ok());
-        assert!(!result.unwrap());
+        let (passed, code) = run_verification("false", 0, std::env::temp_dir()).unwrap();
+        assert!(!passed);
+        assert_eq!(code, 1);
     }
 
     #[test]
     fn run_verification_custom_exit_code() {
-        let result = run_verification("exit 42", 42, std::env::temp_dir());
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        let (passed, code) = run_verification("exit 42", 42, std::env::temp_dir()).unwrap();
+        assert!(passed);
+        assert_eq!(code, 42);
     }
 
     #[test]
@@ -1475,6 +1574,56 @@ command = "true"
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].1.task.name, "first");
         assert_eq!(specs[1].1.task.name, "second");
+    }
+
+    #[test]
+    fn compiled_context_to_utilization_converts_correctly() {
+        use exoskeleton_memory::compiler::SectionResult;
+
+        let compiled = CompiledContext {
+            prompt: "test prompt".into(),
+            total_tokens: 1800,
+            budget: 3200,
+            sections: vec![
+                SectionResult {
+                    name: "system".into(),
+                    allocated: 1000,
+                    used: 800,
+                    truncated: false,
+                },
+                SectionResult {
+                    name: "plan".into(),
+                    allocated: 1200,
+                    used: 1000,
+                    truncated: true,
+                },
+            ],
+            truncated_sections: vec!["plan".into()],
+        };
+
+        let util = compiled_context_to_utilization(compiled);
+        assert_eq!(util.total_budget_tokens, 3200);
+        assert_eq!(util.total_used_tokens, 1800);
+        assert!((util.utilization_pct - 56.25).abs() < 0.01);
+        assert_eq!(util.sections.len(), 2);
+        assert_eq!(util.sections["system"].budget_tokens, 1000);
+        assert_eq!(util.sections["system"].used_tokens, 800);
+        assert!(!util.sections["system"].truncated);
+        assert!(util.sections["plan"].truncated);
+    }
+
+    #[test]
+    fn compiled_context_to_utilization_zero_budget() {
+        let compiled = CompiledContext {
+            prompt: String::new(),
+            total_tokens: 0,
+            budget: 0,
+            sections: vec![],
+            truncated_sections: vec![],
+        };
+
+        let util = compiled_context_to_utilization(compiled);
+        assert_eq!(util.utilization_pct, 0.0);
     }
 
     fn make_task_result(

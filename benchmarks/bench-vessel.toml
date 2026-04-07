@@ -3,7 +3,7 @@
 # Usage: exo bench --config benchmarks/bench-vessel.toml --suite benchmarks/tasks/
 #
 # LLM Backend:
-#   Set ANTHROPIC_API_KEY in your environment for frontier mode.
+#   Set ANTHROPIC_PLATFORM_API_KEY in your environment for frontier mode.
 #   Or configure [llm.local] for local model testing.
 
 [vessel]
@@ -17,7 +17,7 @@ master_loop_interval_secs = 1
 [llm.frontier]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key_env = "ANTHROPIC_PLATFORM_API_KEY"
 
 # Local (Ollama) — uncomment to use instead of frontier
 # [llm.local]

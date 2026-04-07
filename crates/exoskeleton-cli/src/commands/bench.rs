@@ -164,7 +164,7 @@ async fn run_benchmark_task_dry(
     let temp_dir = prepare_workspace(&repo_path)
         .map_err(|e| CliError::Other(format!("failed to prepare workspace: {e}")))?;
 
-    let passed = run_verification(
+    let (passed, actual_exit_code) = run_verification(
         &spec.verify.command,
         spec.verify.expected_exit_code,
         temp_dir.path(),
@@ -174,11 +174,7 @@ async fn run_benchmark_task_dry(
     Ok(TaskResult {
         task_name: spec.task.name.clone(),
         passed,
-        verification_exit_code: Some(if passed {
-            spec.verify.expected_exit_code
-        } else {
-            1
-        }),
+        verification_exit_code: Some(actual_exit_code),
         completion_reason: "DryRun".into(),
         wall_time_secs: start.elapsed().as_secs_f64(),
         steps_taken: 0,

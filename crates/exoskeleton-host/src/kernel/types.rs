@@ -98,8 +98,34 @@ pub struct PlannedAction {
     pub params: serde_json::Value,
     pub rationale: String,
     /// Optional reference to the plan task this action implements.
+    /// Uses lenient deserialization: non-UUID strings (e.g., human-readable
+    /// task names like "explore-project") are accepted and mapped to `None`
+    /// rather than causing the entire action to fail to parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_plan_task_id_lenient")]
     pub plan_task_id: Option<PlanTaskId>,
+}
+
+/// Lenient deserializer for plan_task_id: accepts UUIDs, maps non-UUID strings to None.
+fn deserialize_plan_task_id_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<PlanTaskId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => match s.parse::<PlanTaskId>() {
+            Ok(id) => Ok(Some(id)),
+            Err(_) => {
+                // LLM sent a human-readable task name instead of a UUID.
+                // Accept it gracefully — the action is still valid.
+                Ok(None)
+            }
+        },
+    }
 }
 
 /// Output of the Decide step.

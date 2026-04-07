@@ -492,7 +492,23 @@ fn parse_decide_turn(response_text: &str) -> DecideTurn {
         return DecideTurn::Decide(protocol);
     }
 
-    // Attempt 3: fallback no-action decision
+    // Attempt 3: LLM returned prose before a bare JSON block (no code fence).
+    // Extract the outermost JSON object by finding the first '{' and last '}'.
+    if let Some(start) = json_text.find('{') {
+        if let Some(end) = json_text.rfind('}') {
+            if end > start {
+                let bare_json = &json_text[start..=end];
+                if let Ok(turn) = serde_json::from_str::<DecideTurn>(bare_json) {
+                    return turn;
+                }
+                if let Ok(protocol) = serde_json::from_str::<DecisionProtocol>(bare_json) {
+                    return DecideTurn::Decide(protocol);
+                }
+            }
+        }
+    }
+
+    // Attempt 4: fallback no-action decision
     tracing::warn!("LLM returned unparseable response, treating as no-action tick");
     DecideTurn::Decide(DecisionProtocol {
         reasoning: response_text.to_string(),
@@ -1304,6 +1320,44 @@ mod tests {
                 assert_eq!(protocol.reasoning, "idle tick");
             }
             other => panic!("expected Decide (fallback), got: {other:?}"),
+        }
+    }
+
+    // Pre-E11: parse_decide_turn handles prose before bare JSON (no code fence)
+    #[test]
+    fn parse_decide_turn_prose_before_json() {
+        let response = r#"Let me explore the environment and complete the task.
+
+{
+  "reasoning": "I need to read the file first",
+  "inner_loop_requested": true,
+  "actions": [
+    {"tool_name": "code.read", "params": {"file_path": "src/lib.rs"}, "rationale": "Read before edit"}
+  ],
+  "memory_notes": []
+}"#;
+        let result = parse_decide_turn(response);
+        match result {
+            DecideTurn::Decide(protocol) => {
+                assert_eq!(protocol.reasoning, "I need to read the file first");
+                assert!(protocol.inner_loop_requested);
+                assert_eq!(protocol.actions.len(), 1);
+                assert_eq!(protocol.actions[0].tool_name, "code.read");
+            }
+            other => panic!("expected Decide, got: {other:?}"),
+        }
+    }
+
+    // Pre-E11: parse_decide_turn handles prose + code-fenced JSON
+    #[test]
+    fn parse_decide_turn_code_fence_with_prose() {
+        let response = "Here is my decision:\n\n```json\n{\"reasoning\":\"test\",\"actions\":[],\"memory_notes\":[]}\n```";
+        let result = parse_decide_turn(response);
+        match result {
+            DecideTurn::Decide(protocol) => {
+                assert_eq!(protocol.reasoning, "test");
+            }
+            other => panic!("expected Decide, got: {other:?}"),
         }
     }
 
