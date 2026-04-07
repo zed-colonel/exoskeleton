@@ -684,35 +684,54 @@ impl VesselConfig {
     pub fn build_thread_overrides(&self) -> Option<exoskeleton_threads::ThreadConfigOverrides> {
         let ts = self.threads.as_ref()?;
         Some(exoskeleton_threads::ThreadConfigOverrides {
-            threat_monitor_schedule: ts
-                .threat_monitor_schedule
-                .as_deref()
-                .and_then(parse_thread_schedule),
+            threat_monitor_schedule: if matches!(ts.threat_monitor_enabled, Some(false)) {
+                Some(exoskeleton_core::ThreadSchedule::OnDemand)
+            } else {
+                ts.threat_monitor_schedule
+                    .as_deref()
+                    .and_then(parse_thread_schedule)
+            },
             threat_monitor_token_budget: ts.threat_monitor_token_budget,
-            self_critique_schedule: ts
-                .self_critique_schedule
-                .as_deref()
-                .and_then(parse_thread_schedule),
+            self_critique_schedule: if matches!(ts.self_critique_enabled, Some(false)) {
+                Some(exoskeleton_core::ThreadSchedule::OnDemand)
+            } else {
+                ts.self_critique_schedule
+                    .as_deref()
+                    .and_then(parse_thread_schedule)
+            },
             self_critique_token_budget: ts.self_critique_token_budget,
-            memory_consolidation_schedule: ts
-                .memory_consolidation_schedule
-                .as_deref()
-                .and_then(parse_thread_schedule),
+            memory_consolidation_schedule: if matches!(ts.memory_consolidation_enabled, Some(false))
+            {
+                Some(exoskeleton_core::ThreadSchedule::OnDemand)
+            } else {
+                ts.memory_consolidation_schedule
+                    .as_deref()
+                    .and_then(parse_thread_schedule)
+            },
             memory_consolidation_token_budget: ts.memory_consolidation_token_budget,
-            meta_cognition_schedule: ts
-                .meta_cognition_schedule
-                .as_deref()
-                .and_then(parse_thread_schedule),
+            meta_cognition_schedule: if matches!(ts.meta_cognition_enabled, Some(false)) {
+                Some(exoskeleton_core::ThreadSchedule::OnDemand)
+            } else {
+                ts.meta_cognition_schedule
+                    .as_deref()
+                    .and_then(parse_thread_schedule)
+            },
             meta_cognition_token_budget: ts.meta_cognition_token_budget,
-            creative_synthesis_schedule: ts
-                .creative_synthesis_schedule
-                .as_deref()
-                .and_then(parse_thread_schedule),
+            creative_synthesis_schedule: if matches!(ts.creative_synthesis_enabled, Some(false)) {
+                Some(exoskeleton_core::ThreadSchedule::OnDemand)
+            } else {
+                ts.creative_synthesis_schedule
+                    .as_deref()
+                    .and_then(parse_thread_schedule)
+            },
             creative_synthesis_token_budget: ts.creative_synthesis_token_budget,
-            initiative_schedule: ts
-                .initiative_schedule
-                .as_deref()
-                .and_then(parse_thread_schedule),
+            initiative_schedule: if matches!(ts.initiative_enabled, Some(false)) {
+                Some(exoskeleton_core::ThreadSchedule::OnDemand)
+            } else {
+                ts.initiative_schedule
+                    .as_deref()
+                    .and_then(parse_thread_schedule)
+            },
             initiative_token_budget: ts.initiative_token_budget,
         })
     }
@@ -903,6 +922,24 @@ impl Default for ToolSection {
 /// All fields are optional — omitted values use the compiled-in defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadsSection {
+    /// Threat Monitor enabled flag. `false` maps to on_demand schedule.
+    #[serde(default)]
+    pub threat_monitor_enabled: Option<bool>,
+    /// Self-Critique enabled flag. `false` maps to on_demand schedule.
+    #[serde(default)]
+    pub self_critique_enabled: Option<bool>,
+    /// Memory Consolidation enabled flag. `false` maps to on_demand schedule.
+    #[serde(default)]
+    pub memory_consolidation_enabled: Option<bool>,
+    /// Meta-Cognition enabled flag. `false` maps to on_demand schedule.
+    #[serde(default)]
+    pub meta_cognition_enabled: Option<bool>,
+    /// Creative Synthesis enabled flag. `false` maps to on_demand schedule.
+    #[serde(default)]
+    pub creative_synthesis_enabled: Option<bool>,
+    /// Initiative enabled flag. `false` maps to on_demand schedule.
+    #[serde(default)]
+    pub initiative_enabled: Option<bool>,
     /// Threat Monitor schedule override. Options: "every_tick", "every_N" (e.g., "every_5"),
     /// "on_demand". Default: "every_tick".
     #[serde(default)]

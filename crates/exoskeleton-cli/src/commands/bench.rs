@@ -7,19 +7,24 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use exoskeleton_host::benchmark::{
-    format_comparison, format_report, load_suite, load_task_spec, prepare_workspace,
-    run_verification, SuiteResult, TaskResult,
+    format_comparison, format_report, format_step_verbose, load_suite, load_task_spec,
+    prepare_workspace, run_verification, ContextUtilization, HeadlessRunner, SuiteResult,
+    TaskResult, TokenMetrics,
 };
 
 use crate::client::CliError;
 
 /// Run the `exo bench` command.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_bench(
     task_path: Option<String>,
     suite_path: Option<String>,
+    config_path: Option<String>,
     record: Option<String>,
     compare: Option<String>,
     results_dir: Option<String>,
+    dry_run: bool,
+    verbose: bool,
 ) -> Result<(), CliError> {
     let results_dir = results_dir
         .map(PathBuf::from)
@@ -37,19 +42,64 @@ pub async fn run_bench(
         ));
     };
 
-    eprintln!("Loaded {} task(s)", specs.len());
+    let live_mode = config_path.is_some() && !dry_run;
+
+    let base_config = if live_mode {
+        let config_file = config_path.as_ref().expect("checked above");
+        let toml_str = std::fs::read_to_string(config_file)
+            .map_err(|e| CliError::Other(format!("cannot read config {config_file}: {e}")))?;
+        let vessel_config_file: exoskeleton_host::VesselConfigFile = toml::from_str(&toml_str)
+            .map_err(|e| CliError::Other(format!("invalid config: {e}")))?;
+        let vessel_config = exoskeleton_host::VesselConfig::try_from(vessel_config_file)
+            .map_err(|e| CliError::Other(format!("config validation failed: {e}")))?;
+        Some(vessel_config)
+    } else {
+        None
+    };
+
+    if live_mode {
+        eprintln!(
+            "Live mode: {} task(s), config: {}",
+            specs.len(),
+            config_path.as_deref().unwrap_or("?")
+        );
+    } else {
+        eprintln!(
+            "Dry-run mode: {} task(s) (no agent, harness validation only)",
+            specs.len()
+        );
+    }
 
     let run_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
     let mut task_results = Vec::new();
 
     for (_path, spec) in &specs {
         eprintln!("\n--- {} ---", spec.task.name);
-        let result = run_benchmark_task(spec, &results_dir).await?;
+
+        let result = if let Some(ref config) = base_config {
+            HeadlessRunner::run_task(spec, config)
+                .await
+                .map_err(CliError::Other)?
+        } else {
+            run_benchmark_task_dry(spec).await?
+        };
+
         let status = if result.passed { "PASS" } else { "FAIL" };
         eprintln!(
-            "  {} ({} steps, {:.1}s, {})",
-            status, result.steps_taken, result.wall_time_secs, result.completion_reason
+            "  {} ({} steps, {:.1}s, {} tok, {})",
+            status,
+            result.steps_taken,
+            result.wall_time_secs,
+            result.tokens.total,
+            result.completion_reason
         );
+
+        if verbose {
+            for step in &result.step_trace {
+                eprintln!("{}", format_step_verbose(step));
+            }
+        }
+
         task_results.push(result);
     }
 
@@ -97,14 +147,10 @@ pub async fn run_bench(
     Ok(())
 }
 
-/// Run a single benchmark task.
-///
-/// This sprint validates the harness infrastructure only:
-/// workspace isolation, verification, metrics, recording, and comparison.
-async fn run_benchmark_task(
+/// Dry-run mode: validate harness without agent execution.
+async fn run_benchmark_task_dry(
     spec: &exoskeleton_host::benchmark::TaskSpec,
-    _results_dir: &Path,
-) -> Result<TaskResult, CliError> {
+) -> Result<exoskeleton_host::benchmark::TaskResult, CliError> {
     let start = std::time::Instant::now();
 
     let repo_path = PathBuf::from(&spec.task.repo_path);
@@ -133,15 +179,27 @@ async fn run_benchmark_task(
         } else {
             1
         }),
-        steps_taken: 0,
-        tokens_consumed: 0,
+        completion_reason: "DryRun".into(),
         wall_time_secs: start.elapsed().as_secs_f64(),
-        completion_reason: "HarnessOnly".into(),
-        files_modified: 0,
+        steps_taken: 0,
+        ticks_used: 0,
+        tokens: TokenMetrics::default(),
+        model_used: String::new(),
+        tool_calls: HashMap::new(),
+        files_modified: vec![],
         lines_added: 0,
         lines_removed: 0,
-        tool_calls: HashMap::new(),
         doom_loop_corrections: 0,
+        llm_cost_cents: 0.0,
+        llm_calls: 0,
+        step_trace: vec![],
+        context_utilization: ContextUtilization::default(),
+        tick_details: vec![],
+        difficulty: spec.task.difficulty.clone(),
+        language: spec.task.language.clone(),
+        tags: spec.task.tags.clone(),
+        source_benchmark: spec.task.source_benchmark.clone(),
+        source_id: spec.task.source_id.clone(),
         timestamp: Utc::now(),
     })
 }
@@ -150,26 +208,47 @@ async fn run_benchmark_task(
 mod tests {
     use super::*;
 
+    fn make_task_result() -> TaskResult {
+        TaskResult {
+            task_name: "add-test".into(),
+            passed: true,
+            verification_exit_code: Some(0),
+            completion_reason: "AgentComplete".into(),
+            wall_time_secs: 3.5,
+            steps_taken: 8,
+            ticks_used: 1,
+            tokens: TokenMetrics {
+                total_in: 1600,
+                total_out: 400,
+                total: 2000,
+                by_phase: HashMap::new(),
+            },
+            model_used: "claude-sonnet-4-20250514".into(),
+            tool_calls: HashMap::new(),
+            files_modified: vec!["src/lib.rs".into()],
+            lines_added: 10,
+            lines_removed: 0,
+            doom_loop_corrections: 0,
+            llm_cost_cents: 1.5,
+            llm_calls: 2,
+            step_trace: vec![],
+            context_utilization: ContextUtilization::default(),
+            tick_details: vec![],
+            difficulty: Some("easy".into()),
+            language: Some("rust".into()),
+            tags: vec![],
+            source_benchmark: None,
+            source_id: None,
+            timestamp: Utc::now(),
+        }
+    }
+
     #[test]
     fn format_report_basic() {
         let suite = SuiteResult {
             run_id: "test-123".into(),
             timestamp: Utc::now(),
-            tasks: vec![TaskResult {
-                task_name: "add-test".into(),
-                passed: true,
-                verification_exit_code: Some(0),
-                steps_taken: 8,
-                tokens_consumed: 2000,
-                wall_time_secs: 3.5,
-                completion_reason: "AgentComplete".into(),
-                files_modified: 1,
-                lines_added: 10,
-                lines_removed: 0,
-                tool_calls: HashMap::new(),
-                doom_loop_corrections: 0,
-                timestamp: Utc::now(),
-            }],
+            tasks: vec![make_task_result()],
         };
 
         let report = format_report(&suite);

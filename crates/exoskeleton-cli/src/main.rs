@@ -206,6 +206,10 @@ enum Commands {
         #[arg(long)]
         suite: Option<String>,
 
+        /// Vessel config for live runs (required for agent execution).
+        #[arg(long)]
+        config: Option<String>,
+
         /// Record results with this label (e.g., "baseline-v1").
         #[arg(long)]
         record: Option<String>,
@@ -217,6 +221,14 @@ enum Commands {
         /// Directory for result storage (default: benchmarks/results/).
         #[arg(long)]
         results_dir: Option<String>,
+
+        /// Dry-run: validate harness without booting the agent.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Verbose: stream per-step output during execution.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -299,10 +311,25 @@ async fn main() {
         Commands::Bench {
             task,
             suite,
+            config,
             record,
             compare,
             results_dir,
-        } => commands::bench::run_bench(task, suite, record, compare, results_dir).await,
+            dry_run,
+            verbose,
+        } => {
+            commands::bench::run_bench(
+                task,
+                suite,
+                config,
+                record,
+                compare,
+                results_dir,
+                dry_run,
+                verbose,
+            )
+            .await
+        }
 
         // All remaining commands are client commands that talk to a running daemon.
         _ => run_client_command(&cli).await,
