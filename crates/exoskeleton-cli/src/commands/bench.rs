@@ -12,7 +12,9 @@ use exoskeleton_host::benchmark::{
     TaskResult, TokenMetrics,
 };
 
-use exoskeleton_host::config::{FrontierModelConfig, FrontierProvider, LocalApiFormat, LocalModelConfig};
+use exoskeleton_host::config::{
+    FrontierModelConfig, FrontierProvider, LocalApiFormat, LocalModelConfig,
+};
 use exoskeleton_host::VesselConfig;
 
 use crate::client::CliError;
@@ -32,10 +34,52 @@ pub async fn run_bench(
     model: Option<String>,
     api_key_env: Option<String>,
     local_endpoint: Option<String>,
+    swe_bench: Option<String>,
+    swe_limit: Option<usize>,
+    swe_instance: Option<String>,
+    export_predictions: Option<String>,
+    refresh: bool,
+    repos_cache: Option<String>,
+    swe_test_timeout: Option<u64>,
 ) -> Result<(), CliError> {
     let results_dir = results_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("benchmarks/results"));
+
+    // SWE-bench mode is mutually exclusive with TOML task/suite mode.
+    if swe_bench.is_some() && (task_path.is_some() || suite_path.is_some()) {
+        return Err(CliError::Other(
+            "--swe-bench cannot be combined with --task or --suite".into(),
+        ));
+    }
+
+    if swe_bench.is_some() && dry_run {
+        return Err(CliError::Other(
+            "--dry-run is not supported with --swe-bench".into(),
+        ));
+    }
+
+    if let Some(ref dataset_name) = swe_bench {
+        return run_swe_bench(
+            dataset_name,
+            config_path,
+            swe_limit,
+            swe_instance,
+            export_predictions,
+            refresh,
+            repos_cache,
+            swe_test_timeout,
+            record,
+            compare,
+            results_dir,
+            verbose,
+            provider,
+            model,
+            api_key_env,
+            local_endpoint,
+        )
+        .await;
+    }
 
     let specs = if let Some(suite) = suite_path {
         load_suite(Path::new(&suite)).map_err(CliError::Other)?
@@ -65,15 +109,17 @@ pub async fn run_bench(
     };
 
     // Apply CLI overrides to LLM config
-    let base_config = base_config.map(|config| {
-        apply_llm_overrides(
-            config,
-            provider.as_deref(),
-            model.as_deref(),
-            api_key_env.as_deref(),
-            local_endpoint.as_deref(),
-        )
-    }).transpose()?;
+    let base_config = base_config
+        .map(|config| {
+            apply_llm_overrides(
+                config,
+                provider.as_deref(),
+                model.as_deref(),
+                api_key_env.as_deref(),
+                local_endpoint.as_deref(),
+            )
+        })
+        .transpose()?;
 
     if live_mode {
         eprintln!(
@@ -340,6 +386,198 @@ async fn run_benchmark_task_dry(
         source_id: spec.task.source_id.clone(),
         timestamp: Utc::now(),
     })
+}
+
+/// Run SWE-bench mode: fetch dataset, execute instances, report results.
+#[allow(clippy::too_many_arguments)]
+async fn run_swe_bench(
+    dataset_name: &str,
+    config_path: Option<String>,
+    swe_limit: Option<usize>,
+    swe_instance: Option<String>,
+    export_predictions: Option<String>,
+    refresh: bool,
+    repos_cache: Option<String>,
+    swe_test_timeout: Option<u64>,
+    record: Option<String>,
+    compare: Option<String>,
+    results_dir: PathBuf,
+    verbose: bool,
+    provider: Option<String>,
+    model: Option<String>,
+    api_key_env: Option<String>,
+    local_endpoint: Option<String>,
+) -> Result<(), CliError> {
+    use exoskeleton_host::swe_bench::{DatasetSource, SweBenchRunner, SweRunOptions};
+
+    let source = match dataset_name {
+        "rustbench" => DatasetSource::RustBench,
+        "multilingual" => DatasetSource::Multilingual,
+        other => {
+            return Err(CliError::Other(format!(
+                "unknown SWE-bench dataset '{other}'. Supported: rustbench, multilingual"
+            )))
+        }
+    };
+
+    let config_file = config_path
+        .ok_or_else(|| CliError::Other("--config is required for SWE-bench mode".into()))?;
+    let toml_str = std::fs::read_to_string(&config_file)
+        .map_err(|e| CliError::Other(format!("cannot read config: {e}")))?;
+    let vessel_config_file: exoskeleton_host::VesselConfigFile =
+        toml::from_str(&toml_str).map_err(|e| CliError::Other(format!("invalid config: {e}")))?;
+    let mut base_config = exoskeleton_host::VesselConfig::try_from(vessel_config_file)
+        .map_err(|e| CliError::Other(format!("config validation failed: {e}")))?;
+
+    base_config = apply_llm_overrides(
+        base_config,
+        provider.as_deref(),
+        model.as_deref(),
+        api_key_env.as_deref(),
+        local_endpoint.as_deref(),
+    )?;
+
+    let defaults = SweRunOptions::default();
+    let options = SweRunOptions {
+        source,
+        limit: swe_limit,
+        instance_filter: swe_instance,
+        refresh_dataset: refresh,
+        verbose,
+        repos_cache: repos_cache
+            .map(PathBuf::from)
+            .unwrap_or(defaults.repos_cache),
+        test_timeout: swe_test_timeout
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(defaults.test_timeout),
+        ..defaults
+    };
+
+    let suite_result = SweBenchRunner::run(&base_config, &options)
+        .await
+        .map_err(CliError::Other)?;
+
+    // Print report
+    eprintln!("\n{}", format_swe_report(&suite_result));
+
+    // Export predictions JSONL
+    if let Some(ref path) = export_predictions {
+        export_predictions_jsonl(&suite_result, path, &base_config)?;
+        eprintln!("Predictions exported to {path}");
+    }
+
+    // Record results
+    if let Some(label) = record {
+        std::fs::create_dir_all(&results_dir)
+            .map_err(|e| CliError::Other(format!("cannot create results dir: {e}")))?;
+        let record_path = results_dir.join(format!("{label}.json"));
+        let json = serde_json::to_string_pretty(&suite_result)
+            .map_err(|e| CliError::Other(format!("serialization failed: {e}")))?;
+        std::fs::write(&record_path, json)
+            .map_err(|e| CliError::Other(format!("write failed: {e}")))?;
+        eprintln!("Recorded to {}", record_path.display());
+    }
+
+    // Compare against baseline
+    if let Some(label) = compare {
+        let baseline_path = results_dir.join(format!("{label}.json"));
+        let baseline_json = std::fs::read_to_string(&baseline_path).map_err(|e| {
+            CliError::Other(format!(
+                "cannot read baseline {}: {e}",
+                baseline_path.display()
+            ))
+        })?;
+        let baseline: exoskeleton_host::swe_bench::SweSuiteResult =
+            serde_json::from_str(&baseline_json)
+                .map_err(|e| CliError::Other(format!("invalid baseline JSON: {e}")))?;
+        let current_rate = suite_result.resolve_rate();
+        let baseline_rate = baseline.resolve_rate();
+        eprintln!(
+            "Baseline: {:.1}%  Current: {:.1}%",
+            baseline_rate * 100.0,
+            current_rate * 100.0,
+        );
+        if current_rate < baseline_rate {
+            return Err(CliError::Other(format!(
+                "REGRESSION: resolve rate dropped from {:.0}% to {:.0}%",
+                baseline_rate * 100.0,
+                current_rate * 100.0,
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Format a human-readable SWE-bench results summary.
+fn format_swe_report(suite: &exoskeleton_host::swe_bench::SweSuiteResult) -> String {
+    let total = suite.results.len();
+    let resolved = suite.results.iter().filter(|r| r.grading.resolved).count();
+    let total_cost: f64 = suite
+        .results
+        .iter()
+        .map(|r| r.task_result.llm_cost_cents)
+        .sum();
+    let total_tokens: u64 = suite
+        .results
+        .iter()
+        .map(|r| r.task_result.tokens.total)
+        .sum();
+
+    format!(
+        "SWE-bench Results ({})\n\
+         ══════════════════════\n\
+         Resolved: {}/{} ({:.1}%)\n\
+         Total tokens: {}\n\
+         Total cost: ${:.4}\n\
+         Run ID: {}",
+        suite.dataset,
+        resolved,
+        total,
+        if total > 0 {
+            resolved as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        },
+        total_tokens,
+        total_cost / 100.0,
+        suite.run_id,
+    )
+}
+
+/// Export predictions in JSONL format for official SWE-bench evaluation.
+fn export_predictions_jsonl(
+    suite: &exoskeleton_host::swe_bench::SweSuiteResult,
+    path: &str,
+    config: &exoskeleton_host::VesselConfig,
+) -> Result<(), CliError> {
+    let model_name = format!(
+        "exoskeleton-{}",
+        config
+            .llm_config
+            .frontier
+            .as_ref()
+            .map(|f| f.model.as_str())
+            .or_else(|| config.llm_config.local.as_ref().map(|l| l.model.as_str()))
+            .unwrap_or("unknown")
+    );
+
+    let mut lines = String::new();
+    for result in &suite.results {
+        let prediction = serde_json::json!({
+            "instance_id": result.instance_id,
+            "model_name_or_path": model_name,
+            "model_patch": result.model_patch,
+        });
+        let line = serde_json::to_string(&prediction)
+            .map_err(|e| CliError::Other(format!("JSON serialization failed: {e}")))?;
+        lines.push_str(&line);
+        lines.push('\n');
+    }
+
+    std::fs::write(path, lines)
+        .map_err(|e| CliError::Other(format!("failed to write predictions: {e}")))?;
+    Ok(())
 }
 
 #[cfg(test)]

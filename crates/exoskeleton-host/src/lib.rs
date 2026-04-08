@@ -22,6 +22,7 @@ pub mod llm;
 pub mod metrics;
 pub mod prompt_loader;
 pub mod storage;
+pub mod swe_bench;
 pub mod vessel;
 
 pub use cognitive_engine::{
@@ -45,5 +46,9 @@ pub use metrics::ExoMetrics;
 pub use storage::{
     SqliteArtifactStore, SqliteBudgetStore, SqliteEventLedger, SqliteMemoryStore,
     SqliteSnapshotStore, SqliteThreadStore, SqliteTickStore, StorageManager,
+};
+pub use swe_bench::{
+    DatasetSource, SweBenchRunner, SweGrading, SweInstance, SweResult, SweSuiteResult,
+    SweRunOptions,
 };
 pub use vessel::{CognitiveEngineSlot, Vessel};

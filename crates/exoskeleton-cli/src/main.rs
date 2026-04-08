@@ -32,6 +32,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Bootstrap a new Vessel: configure LLM, run first-contact conversation.
     Bootstrap {
@@ -247,6 +248,34 @@ enum Commands {
         /// Implies --provider=ollama if --provider is not set.
         #[arg(long)]
         local_endpoint: Option<String>,
+
+        /// SWE-bench dataset to run: "rustbench" or "multilingual".
+        #[arg(long)]
+        swe_bench: Option<String>,
+
+        /// Limit number of SWE-bench instances to run.
+        #[arg(long)]
+        swe_limit: Option<usize>,
+
+        /// Run a single SWE-bench instance by ID.
+        #[arg(long)]
+        swe_instance: Option<String>,
+
+        /// Export predictions JSONL for official SWE-bench evaluation.
+        #[arg(long)]
+        export_predictions: Option<String>,
+
+        /// Re-fetch dataset from HuggingFace (ignore local cache).
+        #[arg(long)]
+        refresh: bool,
+
+        /// Directory for repo clone cache (default: ~/.cache/exo-bench/repos).
+        #[arg(long)]
+        repos_cache: Option<String>,
+
+        /// Timeout in seconds for cargo test during evaluation (default: 300).
+        #[arg(long)]
+        swe_test_timeout: Option<u64>,
     },
 }
 
@@ -339,6 +368,13 @@ async fn main() {
             model,
             api_key_env,
             local_endpoint,
+            swe_bench,
+            swe_limit,
+            swe_instance,
+            export_predictions,
+            refresh,
+            repos_cache,
+            swe_test_timeout,
         } => {
             commands::bench::run_bench(
                 task,
@@ -353,6 +389,13 @@ async fn main() {
                 model,
                 api_key_env,
                 local_endpoint,
+                swe_bench,
+                swe_limit,
+                swe_instance,
+                export_predictions,
+                refresh,
+                repos_cache,
+                swe_test_timeout,
             )
             .await
         }
