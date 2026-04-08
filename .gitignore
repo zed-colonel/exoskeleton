@@ -38,3 +38,4 @@ plans/
 dev-output/
 feedback/
 docs/superpowers/
+.worktrees/
