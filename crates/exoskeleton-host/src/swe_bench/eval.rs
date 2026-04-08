@@ -92,8 +92,6 @@ fn lookup_test(parsed: &HashMap<String, TestOutcome>, name: &str) -> Option<Test
 }
 
 /// Public wrapper around [`lookup_test`] for external callers.
-/// Will be used by SweBenchRunner in Task 6.
-#[allow(dead_code)]
 pub fn lookup_test_pub(parsed: &HashMap<String, TestOutcome>, name: &str) -> Option<TestOutcome> {
     lookup_test(parsed, name)
 }
