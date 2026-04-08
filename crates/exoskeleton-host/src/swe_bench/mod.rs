@@ -125,10 +125,16 @@ impl SweBenchRunner {
         base_config: &VesselConfig,
         options: &SweRunOptions,
     ) -> Result<SweSuiteResult, String> {
-        // 1. Fetch dataset
-        let mut instances =
-            dataset::fetch_dataset(options.source, &options.cache_dir, options.refresh_dataset)
-                .map_err(|e| format!("dataset fetch failed: {e}"))?;
+        // 1. Fetch dataset (blocking HTTP, must run off the async runtime)
+        let source = options.source;
+        let cache_dir = options.cache_dir.clone();
+        let refresh = options.refresh_dataset;
+        let mut instances = tokio::task::spawn_blocking(move || {
+            dataset::fetch_dataset(source, &cache_dir, refresh)
+        })
+        .await
+        .map_err(|e| format!("dataset fetch task panicked: {e}"))?
+        .map_err(|e| format!("dataset fetch failed: {e}"))?;
 
         // 2. Apply filters
         if let Some(ref filter) = options.instance_filter {
