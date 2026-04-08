@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::conversation::InMemoryConversationStore;
-use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse, StopReason};
+use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmRequest, LlmResponse, StopReason};
 use exoskeleton_core::{
     ArtifactStore, EventType, LiveEvent, PromptRegistry, ThreadId, ThreadPriority, ThreadSchedule,
     ThreadSpec, ThreadStatus, VesselId,
@@ -81,7 +81,9 @@ impl LlmHttpBackend for MultiMockBackend {
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
         let content = &self.responses[idx % self.responses.len()];
         Ok(LlmResponse {
-            content: content.clone(),
+            content_blocks: vec![ContentBlock::Text {
+                text: content.clone(),
+            }],
             model: "mock".into(),
             tokens_in: 100,
             tokens_out: 50,
@@ -124,7 +126,9 @@ impl LlmHttpBackend for FailThenSucceedBackend {
             ));
         }
         Ok(LlmResponse {
-            content: self.success_content.clone(),
+            content_blocks: vec![ContentBlock::Text {
+                text: self.success_content.clone(),
+            }],
             model: "mock".into(),
             tokens_in: 100,
             tokens_out: 50,
@@ -546,7 +550,9 @@ async fn thread_output_in_compiled_context() {
                 self.captured_requests.lock().unwrap().push(request.clone());
                 let content = &self.responses[idx % self.responses.len()];
                 Ok(LlmResponse {
-                    content: content.clone(),
+                    content_blocks: vec![ContentBlock::Text {
+                        text: content.clone(),
+                    }],
                     model: "mock".into(),
                     tokens_in: 100,
                     tokens_out: 50,
@@ -593,8 +599,16 @@ async fn thread_output_in_compiled_context() {
             let user_content = decide_request
                 .messages
                 .first()
-                .map(|m| m.content.as_str())
-                .unwrap_or("");
+                .map(|m| {
+                    m.content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
             assert!(
                 user_content.contains("all clear"),
                 "Decide user message should contain \

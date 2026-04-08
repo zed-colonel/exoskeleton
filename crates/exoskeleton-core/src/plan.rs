@@ -184,8 +184,7 @@ where
 
 /// Namespace UUID for deriving PlanTaskIds from non-UUID strings.
 const PLAN_TASK_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x5a, 0x1b, 0x3c, 0x7e, 0x9f, 0x4d, 0x4a, 0x8b, 0xa2, 0x6e, 0x7c, 0x0d, 0x1f, 0x3a, 0x5b,
-    0x9c,
+    0x5a, 0x1b, 0x3c, 0x7e, 0x9f, 0x4d, 0x4a, 0x8b, 0xa2, 0x6e, 0x7c, 0x0d, 0x1f, 0x3a, 0x5b, 0x9c,
 ]);
 
 /// Convert a string to a PlanTaskId: if it's a valid UUID, use it directly;
@@ -473,9 +472,7 @@ mod tests {
     #[test]
     fn plan_task_deserialize_uuid_ids() {
         let id = PlanTaskId::new();
-        let json = format!(
-            r#"{{"id": "{id}", "description": "test", "status": "pending"}}"#,
-        );
+        let json = format!(r#"{{"id": "{id}", "description": "test", "status": "pending"}}"#,);
         let task: PlanTask = serde_json::from_str(&json).unwrap();
         assert_eq!(task.id, id);
     }

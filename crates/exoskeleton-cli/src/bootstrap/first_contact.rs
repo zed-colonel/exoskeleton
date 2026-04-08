@@ -39,23 +39,18 @@ pub async fn run_first_contact(
     let stdin = io::stdin();
 
     // Seed with a user message — Anthropic requires at least one message.
-    messages.push(LlmMessage {
-        role: LlmRole::User,
-        content: "Hello.".into(),
-    });
+    messages.push(LlmMessage::text(LlmRole::User, "Hello."));
 
     // Get the vessel's opening message
     let opening = call_llm(llm_config, &messages, &system_prompt).await?;
     total_tokens_in += opening.tokens_in;
     total_tokens_out += opening.tokens_out;
 
-    let vessel_msg = LlmMessage {
-        role: LlmRole::Assistant,
-        content: opening.content.clone(),
-    };
+    let opening_text = opening.text();
+    let vessel_msg = LlmMessage::text(LlmRole::Assistant, opening_text.clone());
     messages.push(vessel_msg);
 
-    print_vessel_message(&opening.content);
+    print_vessel_message(&opening_text);
     println!();
     println!("  (Type your message and press Enter. Type 'done' or Ctrl+D to finish.)");
     println!();
@@ -81,24 +76,19 @@ pub async fn run_first_contact(
         }
 
         // Add user message
-        messages.push(LlmMessage {
-            role: LlmRole::User,
-            content: input,
-        });
+        messages.push(LlmMessage::text(LlmRole::User, input));
 
         // Get vessel response
         let response = call_llm(llm_config, &messages, &system_prompt).await?;
         total_tokens_in += response.tokens_in;
         total_tokens_out += response.tokens_out;
 
-        let vessel_msg = LlmMessage {
-            role: LlmRole::Assistant,
-            content: response.content.clone(),
-        };
+        let response_text = response.text();
+        let vessel_msg = LlmMessage::text(LlmRole::Assistant, response_text.clone());
         messages.push(vessel_msg);
 
         println!();
-        print_vessel_message(&response.content);
+        print_vessel_message(&response_text);
         println!();
     }
 
@@ -129,6 +119,7 @@ async fn call_llm(
         temperature: Some(0.8),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     direct_llm_call(llm_config, request)

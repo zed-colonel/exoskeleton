@@ -188,14 +188,12 @@ pub async fn verify(
     let request = LlmRequest {
         backend: None,
         system_prompt: None,
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: "Respond with exactly: ok".into(),
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, "Respond with exactly: ok")],
         max_output_tokens: 16,
         temperature: Some(0.0),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     match direct_llm_call(&llm_config, request).await {
@@ -252,10 +250,7 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
     };
 
     // 3. Seed with "Hello." and get vessel greeting
-    let seed = LlmMessage {
-        role: LlmRole::User,
-        content: "Hello.".into(),
-    };
+    let seed = LlmMessage::text(LlmRole::User, "Hello.");
     state.push_message(seed.clone());
 
     let request = LlmRequest {
@@ -266,10 +261,11 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
         temperature: Some(0.8),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     let greeting = match direct_llm_call(&llm_config, request).await {
-        Ok(r) => r.content,
+        Ok(r) => r.text(),
         Err(e) => {
             let _ = socket
                 .send(Message::Text(
@@ -282,10 +278,7 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
     };
 
     // 4. Store greeting and send to client
-    state.push_message(LlmMessage {
-        role: LlmRole::Assistant,
-        content: greeting.clone(),
-    });
+    state.push_message(LlmMessage::text(LlmRole::Assistant, greeting.clone()));
 
     if socket
         .send(Message::Text(
@@ -335,10 +328,7 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
             }
 
             // Store user message
-            state.push_message(LlmMessage {
-                role: LlmRole::User,
-                content: content.clone(),
-            });
+            state.push_message(LlmMessage::text(LlmRole::User, content.clone()));
 
             // Build LLM request with full transcript
             let transcript = state.transcript();
@@ -350,17 +340,16 @@ async fn handle_conversation(state: Arc<BootstrapState>, mut socket: WebSocket) 
                 temperature: Some(0.8),
                 stop_sequences: vec![],
                 stream: false,
+                tools: vec![],
             };
 
             match direct_llm_call(&llm_config, request).await {
                 Ok(response) => {
-                    state.push_message(LlmMessage {
-                        role: LlmRole::Assistant,
-                        content: response.content.clone(),
-                    });
+                    let response_text = response.text();
+                    state.push_message(LlmMessage::text(LlmRole::Assistant, response_text.clone()));
                     let _ = socket
                         .send(Message::Text(
-                            serde_json::json!({ "type": "message", "content": response.content })
+                            serde_json::json!({ "type": "message", "content": response_text })
                                 .to_string(),
                         ))
                         .await;
@@ -413,7 +402,16 @@ pub async fn finalize(
                 LlmRole::Assistant => "Vessel",
                 LlmRole::System => "System",
             };
-            format!("{role}: {}", m.content)
+            format!(
+                "{role}: {}",
+                m.content
+                    .iter()
+                    .filter_map(|block| match block {
+                        exoskeleton_core::llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            )
         })
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -437,14 +435,12 @@ pub async fn finalize(
         system_prompt: Some(
             "You are a precise information extractor. Respond only with valid JSON.".into(),
         ),
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: extraction_prompt,
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, extraction_prompt)],
         max_output_tokens: 512,
         temperature: Some(0.0),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     let response = direct_llm_call(&llm_config, request).await.map_err(|e| {
@@ -455,7 +451,8 @@ pub async fn finalize(
     })?;
 
     // Parse JSON response — strip markdown code fences if present
-    let raw = response.content.trim();
+    let response_text = response.text();
+    let raw = response_text.trim();
     let json_str = extract_json_object(raw).unwrap_or(raw);
 
     let identity: VesselIdentity = serde_json::from_str(json_str).map_err(|e| {

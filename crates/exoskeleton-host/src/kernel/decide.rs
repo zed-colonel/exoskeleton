@@ -60,10 +60,7 @@ pub fn decide(
     let introspection = IntrospectionService::new(kernel);
     let max_turns = kernel.max_decide_turns;
 
-    let mut messages: Vec<LlmMessage> = vec![LlmMessage {
-        role: LlmRole::User,
-        content: user_message,
-    }];
+    let mut messages: Vec<LlmMessage> = vec![LlmMessage::text(LlmRole::User, user_message)];
     let mut llm_records: Vec<LlmCallRecord> = Vec::new();
     let mut all_response_text = String::new();
 
@@ -96,18 +93,20 @@ pub fn decide(
             temperature: Some(0.7),
             stop_sequences: vec![],
             stream: true,
+            tools: vec![],
         };
 
         // Unified LLM call (H-1 pattern, E8-S1)
         let result =
             crate::llm::direct::handler_direct_llm_call(handler, kernel, &request, cancellation)?;
         let llm_response = result.response;
+        let response_text = llm_response.text();
         llm_records.push(result.llm_call_record);
-        all_response_text.push_str(&llm_response.content);
+        all_response_text.push_str(&response_text);
         all_response_text.push('\n');
 
         // Parse this turn
-        let turn_result = parse_decide_turn(&llm_response.content);
+        let turn_result = parse_decide_turn(&response_text);
 
         match turn_result {
             DecideTurn::Query { queries } => {
@@ -130,18 +129,15 @@ pub fn decide(
                 }
 
                 // Append assistant turn + introspection results
-                messages.push(LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: llm_response.content.clone(),
-                });
-                messages.push(LlmMessage {
-                    role: LlmRole::User,
-                    content: format!(
+                messages.push(LlmMessage::text(LlmRole::Assistant, response_text));
+                messages.push(LlmMessage::text(
+                    LlmRole::User,
+                    format!(
                         "Introspection results:\n```json\n{}\n```\n\n\
                          Continue your analysis and provide your final decision.",
                         serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".into()),
                     ),
-                });
+                ));
             }
             DecideTurn::Decide(protocol) => {
                 tracing::info!(
@@ -610,7 +606,7 @@ mod tests {
 
     fn mock_response_with_content(content: String) -> LlmResponse {
         LlmResponse {
-            content,
+            content_blocks: vec![exoskeleton_core::llm::ContentBlock::Text { text: content }],
             model: "mock-model".into(),
             tokens_in: 100,
             tokens_out: 50,

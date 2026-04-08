@@ -14,7 +14,7 @@ use std::time::Duration;
 use actionqueue_executor_local::CancellationToken;
 use common::{test_config, test_registry};
 use exoskeleton_core::conversation::InMemoryConversationStore;
-use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
+use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmResponse, StopReason};
 use exoskeleton_core::{
     ArtifactKind, ArtifactStore, EventType, LiveEvent, PromptRegistry, VesselId,
 };
@@ -43,7 +43,9 @@ const MOCK_DECISION_WITH_ACTION: &str = r#"{"reasoning":"Testing","actions":[{"t
 /// Build a mock LlmResponse with the given content.
 fn mock_llm_response(content: &str) -> LlmResponse {
     LlmResponse {
-        content: content.to_string(),
+        content_blocks: vec![ContentBlock::Text {
+            text: content.to_string(),
+        }],
         model: "mock-model".into(),
         tokens_in: 100,
         tokens_out: 50,

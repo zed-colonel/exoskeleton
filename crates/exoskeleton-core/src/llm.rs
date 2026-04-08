@@ -41,13 +41,66 @@ pub enum LlmRole {
     Assistant,
 }
 
+/// A content block in an LLM message or response.
+///
+/// Provider-agnostic representation of structured content. HTTP backends
+/// translate to/from provider-specific wire formats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    /// Plain text content.
+    Text { text: String },
+    /// A tool invocation requested by the model.
+    ToolUse {
+        /// API-issued call ID (opaque, returned verbatim in ToolResult).
+        id: String,
+        /// Tool name (e.g., "code.read", "update_plan").
+        name: String,
+        /// Tool input parameters as JSON.
+        input: serde_json::Value,
+    },
+    /// Result of a tool invocation, sent back to the model.
+    ToolResult {
+        /// Must match the `id` from the corresponding ToolUse block.
+        tool_use_id: String,
+        /// Tool output (text or JSON string).
+        content: String,
+        /// Whether this result represents an error.
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
+}
+
+/// A tool definition sent to the LLM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Tool name (e.g., "code.read", "introspect_tick_history").
+    pub name: String,
+    /// Human-readable description of what the tool does.
+    pub description: String,
+    /// JSON Schema describing the expected input parameters.
+    pub input_schema: serde_json::Value,
+}
+
 /// One message in an LLM conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmMessage {
     /// Role of the message sender.
     pub role: LlmRole,
-    /// Text content of the message.
-    pub content: String,
+    /// Structured message content.
+    pub content: Vec<ContentBlock>,
+}
+
+impl LlmMessage {
+    /// Create a message containing a single text block.
+    pub fn text(role: LlmRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: vec![ContentBlock::Text {
+                text: content.into(),
+            }],
+        }
+    }
 }
 
 /// Request to invoke an LLM.
@@ -81,6 +134,9 @@ pub struct LlmRequest {
     /// Default: false (complete response returned at once).
     #[serde(default, skip_serializing_if = "is_false")]
     pub stream: bool,
+    /// Structured tool definitions exposed to the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
 }
 
 /// Why the LLM stopped generating.
@@ -93,6 +149,8 @@ pub enum StopReason {
     MaxTokens,
     /// Model encountered a stop sequence.
     StopSequence,
+    /// Model wants to invoke one or more tools.
+    ToolUse,
 }
 
 /// Response from an LLM invocation.
@@ -102,8 +160,8 @@ pub enum StopReason {
 /// in the TickRecord (Sprint 5) references the artifact by ID.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmResponse {
-    /// Generated text content.
-    pub content: String,
+    /// Generated content blocks.
+    pub content_blocks: Vec<ContentBlock>,
     /// Which model produced this response (e.g., "llama3.2:latest", "claude-sonnet-4-20250514").
     pub model: String,
     /// Input tokens consumed (prompt + system message).
@@ -119,6 +177,34 @@ pub struct LlmResponse {
     pub cost_estimate_cents: Option<f64>,
     /// Which backend was used.
     pub backend: LlmBackend,
+}
+
+impl LlmResponse {
+    /// Concatenate all text content blocks.
+    pub fn text(&self) -> String {
+        self.content_blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Extract all ToolUse blocks.
+    pub fn tool_use_blocks(&self) -> Vec<&ContentBlock> {
+        self.content_blocks
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            .collect()
+    }
+
+    /// Whether the response contains any ToolUse blocks.
+    pub fn has_tool_use(&self) -> bool {
+        self.content_blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+    }
 }
 
 #[cfg(test)]
@@ -158,10 +244,107 @@ mod tests {
     }
 
     #[test]
+    fn content_block_text_roundtrip() {
+        let block = ContentBlock::Text {
+            text: "Hello, world!".into(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn content_block_tool_use_roundtrip() {
+        let block = ContentBlock::ToolUse {
+            id: "call_123".into(),
+            name: "code.read".into(),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"tool_use\""));
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn content_block_tool_result_roundtrip() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "call_123".into(),
+            content: "file contents here".into(),
+            is_error: false,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"tool_result\""));
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn content_block_tool_result_error() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "call_456".into(),
+            content: "file not found".into(),
+            is_error: true,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"is_error\":true"));
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn tool_definition_roundtrip() {
+        let tool = ToolDefinition {
+            name: "code.read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"}
+                },
+                "required": ["file_path"]
+            }),
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let parsed: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(tool.name, parsed.name);
+        assert_eq!(tool.description, parsed.description);
+    }
+
+    #[test]
     fn llm_message_roundtrip() {
+        let msg = LlmMessage::text(LlmRole::User, "Hello, world!");
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: LlmMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn llm_message_text_convenience() {
+        let msg = LlmMessage::text(LlmRole::User, "Hello");
+        assert_eq!(msg.role, LlmRole::User);
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Hello"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_message_mixed_content() {
         let msg = LlmMessage {
             role: LlmRole::User,
-            content: "Hello, world!".into(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "Here are the results:".into(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "file contents".into(),
+                    is_error: false,
+                },
+            ],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: LlmMessage = serde_json::from_str(&json).unwrap();
@@ -173,14 +356,16 @@ mod tests {
         let request = LlmRequest {
             backend: Some(LlmBackend::Frontier),
             system_prompt: Some("You are a helpful assistant.".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "What is 2+2?".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "What is 2+2?")],
             max_output_tokens: 1024,
             temperature: Some(0.7),
             stop_sequences: vec!["</answer>".into()],
             stream: false,
+            tools: vec![ToolDefinition {
+                name: "code.read".into(),
+                description: "Read a file".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
         };
         let json = serde_json::to_string(&request).unwrap();
         let parsed: LlmRequest = serde_json::from_str(&json).unwrap();
@@ -192,14 +377,12 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: None,
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 256,
             temperature: None,
             stop_sequences: vec![],
             stream: false,
+            tools: vec![],
         };
         let json = serde_json::to_string(&request).unwrap();
         // Optional fields should be absent
@@ -208,15 +391,17 @@ mod tests {
         assert!(!json.contains("temperature"));
         assert!(!json.contains("stop_sequences"));
         assert!(!json.contains("stream"));
+        assert!(!json.contains("tools"));
         let parsed: LlmRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(request, parsed);
     }
 
     #[test]
     fn llm_request_stream_field_default_false() {
-        let json = r#"{"messages":[{"role":"user","content":"Hi"}],"max_output_tokens":100}"#;
+        let json = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}],"max_output_tokens":100}"#;
         let parsed: LlmRequest = serde_json::from_str(json).unwrap();
         assert!(!parsed.stream);
+        assert!(parsed.tools.is_empty());
     }
 
     #[test]
@@ -224,14 +409,12 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: None,
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
             stream: true,
+            tools: vec![],
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(
@@ -247,14 +430,12 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: None,
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
             stream: false,
+            tools: vec![],
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(
@@ -266,7 +447,9 @@ mod tests {
     #[test]
     fn llm_response_roundtrip() {
         let response = LlmResponse {
-            content: "The answer is 4.".into(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "The answer is 4.".into(),
+            }],
             model: "claude-sonnet-4-20250514".into(),
             tokens_in: 50,
             tokens_out: 10,
@@ -283,7 +466,9 @@ mod tests {
     #[test]
     fn llm_response_no_cost() {
         let response = LlmResponse {
-            content: "Local model response.".into(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "Local model response.".into(),
+            }],
             model: "llama3.2:latest".into(),
             tokens_in: 30,
             tokens_out: 20,
@@ -299,11 +484,64 @@ mod tests {
     }
 
     #[test]
+    fn llm_response_text_concatenates_text_blocks() {
+        let response = LlmResponse {
+            content_blocks: vec![
+                ContentBlock::Text {
+                    text: "Hello".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "code.read".into(),
+                    input: serde_json::json!({"path": "src/lib.rs"}),
+                },
+                ContentBlock::Text {
+                    text: " world".into(),
+                },
+            ],
+            model: "test-model".into(),
+            tokens_in: 1,
+            tokens_out: 2,
+            latency_ms: 3,
+            stop_reason: StopReason::ToolUse,
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        };
+        assert_eq!(response.text(), "Hello world");
+    }
+
+    #[test]
+    fn llm_response_tool_use_helpers_work() {
+        let response = LlmResponse {
+            content_blocks: vec![
+                ContentBlock::Text {
+                    text: "Thinking".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "code.read".into(),
+                    input: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            ],
+            model: "test-model".into(),
+            tokens_in: 1,
+            tokens_out: 2,
+            latency_ms: 3,
+            stop_reason: StopReason::ToolUse,
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        };
+        assert!(response.has_tool_use());
+        assert_eq!(response.tool_use_blocks().len(), 1);
+    }
+
+    #[test]
     fn stop_reason_roundtrip() {
         for reason in [
             StopReason::EndTurn,
             StopReason::MaxTokens,
             StopReason::StopSequence,
+            StopReason::ToolUse,
         ] {
             let json = serde_json::to_string(&reason).unwrap();
             let parsed: StopReason = serde_json::from_str(&json).unwrap();
@@ -324,6 +562,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&StopReason::StopSequence).unwrap(),
             "\"stop_sequence\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StopReason::ToolUse).unwrap(),
+            "\"tool_use\""
         );
     }
 }

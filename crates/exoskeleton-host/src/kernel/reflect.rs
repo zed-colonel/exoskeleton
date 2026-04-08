@@ -131,14 +131,12 @@ fn llm_reflect(
     let request = LlmRequest {
         backend: None,
         system_prompt: Some(system_prompt),
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: user_message,
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, user_message)],
         max_output_tokens: kernel.max_output_tokens / 2,
         temperature: Some(0.3),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     // 4. Unified LLM call (H-1 pattern, E8-S1)
@@ -148,7 +146,7 @@ fn llm_reflect(
     let llm_call_record = result.llm_call_record;
 
     // 5. Parse ReflectProtocol
-    let protocol = parse_reflect_protocol(&response.content);
+    let protocol = parse_reflect_protocol(&response.text());
 
     // 6. Compute heuristic for action_success_rate
     let heuristic = heuristic_reflect(act_result);
@@ -558,7 +556,7 @@ mod tests {
 
     fn mock_response_with_content(content: String) -> LlmResponse {
         LlmResponse {
-            content,
+            content_blocks: vec![exoskeleton_core::llm::ContentBlock::Text { text: content }],
             model: "mock-model".into(),
             tokens_in: 100,
             tokens_out: 50,

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::conversation::InMemoryConversationStore;
-use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
+use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmResponse, StopReason};
 use exoskeleton_core::{ArtifactStore, EventType, LiveEvent, PromptRegistry, VesselId};
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
 use exoskeleton_host::config::InnerLoopConfig;
@@ -49,7 +49,9 @@ const DECISION_NO_INNER_LOOP_WITH_ACTION: &str = r#"{"reasoning":"Normal action"
 /// Build a mock LlmResponse with the given content.
 fn mock_llm_response(content: &str) -> LlmResponse {
     LlmResponse {
-        content: content.to_string(),
+        content_blocks: vec![ContentBlock::Text {
+            text: content.to_string(),
+        }],
         model: "mock-model".into(),
         tokens_in: 100,
         tokens_out: 50,

@@ -75,24 +75,25 @@ pub fn execute_thread(
     let request = LlmRequest {
         backend: Some(handler.default_backend),
         system_prompt: Some(compiled_context.prompt),
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: kernel
+        messages: vec![LlmMessage::text(
+            LlmRole::User,
+            kernel
                 .prompt_registry
                 .get("thread-user-message")
-                .unwrap_or("Analyze the current situation per your charter. Respond with JSON.")
-                .into(),
-        }],
+                .unwrap_or("Analyze the current situation per your charter. Respond with JSON."),
+        )],
         max_output_tokens: thread.token_budget / 4,
         temperature: Some(0.7),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     // 5. Unified LLM call (H-1 pattern, E8-S1)
     let result =
         crate::llm::direct::handler_direct_llm_call(handler, kernel, &request, cancellation)?;
     let llm_response = result.response;
+    let response_text = llm_response.text();
 
     // 5.5 Record thread-specific consumption (Sprint 9)
     if let Some(ref tracker) = kernel.budget_tracker {
@@ -105,9 +106,9 @@ pub fn execute_thread(
     }
 
     // 8. Parse thread response -- try JSON first, fallback to raw text
-    let thread_response = serde_json::from_str::<ThreadResponse>(&llm_response.content)
-        .unwrap_or_else(|_| ThreadResponse {
-            summary: llm_response.content.clone(),
+    let thread_response =
+        serde_json::from_str::<ThreadResponse>(&response_text).unwrap_or_else(|_| ThreadResponse {
+            summary: response_text.clone(),
             recommendations: vec![],
         });
 
@@ -115,7 +116,7 @@ pub fn execute_thread(
     let output = ThreadOutput {
         thread_id: thread.thread_id,
         tick_id,
-        artifact_id: ArtifactId::from_content(llm_response.content.as_bytes()),
+        artifact_id: ArtifactId::from_content(response_text.as_bytes()),
         summary: thread_response.summary,
         recommendations: thread_response.recommendations,
     };
@@ -427,7 +428,7 @@ mod tests {
     use std::sync::Arc;
 
     use exoskeleton_core::conversation::InMemoryConversationStore;
-    use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
+    use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmResponse, StopReason};
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{
         ArtifactKind, ArtifactStore, ThreadId, ThreadPriority, ThreadSchedule, ThreadSpec, VesselId,
@@ -457,7 +458,9 @@ mod tests {
             _cancellation: &CancellationToken,
         ) -> Result<LlmResponse, ExoError> {
             Ok(LlmResponse {
-                content: self.response.clone(),
+                content_blocks: vec![ContentBlock::Text {
+                    text: self.response.clone(),
+                }],
                 model: "mock".into(),
                 tokens_in: 100,
                 tokens_out: 50,
@@ -482,7 +485,9 @@ mod tests {
         ) -> Result<LlmResponse, ExoError> {
             *self.captured.lock().unwrap() = Some(request.clone());
             Ok(LlmResponse {
-                content: r#"{"summary":"ok","recommendations":[]}"#.into(),
+                content_blocks: vec![ContentBlock::Text {
+                    text: r#"{"summary":"ok","recommendations":[]}"#.into(),
+                }],
                 model: "mock".into(),
                 tokens_in: 100,
                 tokens_out: 50,
@@ -780,7 +785,9 @@ mod tests {
         ) -> Result<LlmResponse, ExoError> {
             std::thread::sleep(self.delay);
             Ok(LlmResponse {
-                content: self.response.clone(),
+                content_blocks: vec![ContentBlock::Text {
+                    text: self.response.clone(),
+                }],
                 model: "mock".into(),
                 tokens_in: 100,
                 tokens_out: 50,

@@ -153,14 +153,12 @@ async fn verify_connectivity(llm_config: &LlmConfig) -> Result<(), CliError> {
     let request = LlmRequest {
         backend: None,
         system_prompt: None,
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: "Respond with exactly: ok".into(),
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, "Respond with exactly: ok")],
         max_output_tokens: 16,
         temperature: Some(0.0),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     print!("  Connecting to LLM backend... ");
@@ -199,7 +197,16 @@ async fn extract_identity(
                 LlmRole::Assistant => "Vessel",
                 LlmRole::System => "System",
             };
-            format!("{role}: {}", m.content)
+            format!(
+                "{role}: {}",
+                m.content
+                    .iter()
+                    .filter_map(|block| match block {
+                        exoskeleton_core::llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            )
         })
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -216,14 +223,12 @@ async fn extract_identity(
         system_prompt: Some(
             "You are a precise information extractor. Respond only with valid JSON.".into(),
         ),
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: extraction_prompt,
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, extraction_prompt)],
         max_output_tokens: 512,
         temperature: Some(0.0),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     };
 
     let response = direct_llm_call(llm_config, request)
@@ -231,13 +236,14 @@ async fn extract_identity(
         .map_err(|e| CliError::Other(format!("identity extraction failed: {e}")))?;
 
     // Parse the JSON response — strip markdown code fences if present
-    let raw = response.content.trim();
+    let response_text = response.text();
+    let raw = response_text.trim();
     let json_str = extract_json_object(raw).unwrap_or(raw);
 
     let identity: VesselIdentity = serde_json::from_str(json_str).map_err(|e| {
         CliError::Other(format!(
             "failed to parse identity JSON: {e}\nraw response: {}",
-            response.content
+            response_text
         ))
     })?;
 

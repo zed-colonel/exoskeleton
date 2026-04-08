@@ -501,9 +501,7 @@ impl HeadlessRunner {
     }
 
     /// Extract comprehensive metrics from a completed benchmark run.
-    fn extract_metrics(
-        inspector: &VesselInspector,
-    ) -> Result<MetricsSnapshot, String> {
+    fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, String> {
         // tick_history() returns newest-first; reverse to iterate oldest-first
         // so that step numbering and phase token attribution are chronological.
         let mut ticks = inspector
@@ -602,12 +600,18 @@ impl HeadlessRunner {
                 // Extract lines_added/removed from receipt artifacts (CodeDiff data)
                 if let Some(ref receipt_id) = action.receipt_ref {
                     if let Ok(Some(receipt)) = inspector.artifact(receipt_id) {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&receipt.content) {
+                        if let Ok(val) =
+                            serde_json::from_slice::<serde_json::Value>(&receipt.content)
+                        {
                             if let Some(diff) = val.get("diff") {
-                                if let Some(added) = diff.get("lines_added").and_then(|v| v.as_u64()) {
+                                if let Some(added) =
+                                    diff.get("lines_added").and_then(|v| v.as_u64())
+                                {
                                     total_lines_added += added as u32;
                                 }
-                                if let Some(removed) = diff.get("lines_removed").and_then(|v| v.as_u64()) {
+                                if let Some(removed) =
+                                    diff.get("lines_removed").and_then(|v| v.as_u64())
+                                {
                                     total_lines_removed += removed as u32;
                                 }
                             }
@@ -793,7 +797,9 @@ impl HeadlessRunner {
                 // Try to read decision artifact to check inner_loop_requested
                 if let Some(ref snapshot_after) = tick.snapshot_after {
                     if let Ok(Some(artifact)) = inspector.artifact(snapshot_after) {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&artifact.content) {
+                        if let Ok(val) =
+                            serde_json::from_slice::<serde_json::Value>(&artifact.content)
+                        {
                             if let Some(ilr) = val.get("inner_loop_requested") {
                                 eprintln!("  [diag]   inner_loop_requested: {ilr}");
                             }

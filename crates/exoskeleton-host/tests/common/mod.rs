@@ -6,7 +6,9 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use chrono::Utc;
-use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason};
+use exoskeleton_core::llm::{
+    ContentBlock, LlmBackend, LlmMessage, LlmRequest, LlmResponse, LlmRole, StopReason,
+};
 use exoskeleton_core::{ArtifactId, BudgetStatus, StateSnapshot, TickId, VesselId, VesselStatus};
 use exoskeleton_host::config::{LlmConfig, VesselConfig};
 use worldinterface_connector::connectors::default_registry;
@@ -106,20 +108,20 @@ pub fn test_llm_request() -> LlmRequest {
     LlmRequest {
         backend: None,
         system_prompt: Some("You are a test assistant.".into()),
-        messages: vec![LlmMessage {
-            role: LlmRole::User,
-            content: "What is 2+2?".into(),
-        }],
+        messages: vec![LlmMessage::text(LlmRole::User, "What is 2+2?")],
         max_output_tokens: 256,
         temperature: Some(0.0),
         stop_sequences: vec![],
         stream: false,
+        tools: vec![],
     }
 }
 
 pub fn test_llm_response() -> LlmResponse {
     LlmResponse {
-        content: "The answer is 4.".into(),
+        content_blocks: vec![ContentBlock::Text {
+            text: "The answer is 4.".into(),
+        }],
         model: "mock-model".into(),
         tokens_in: 20,
         tokens_out: 8,

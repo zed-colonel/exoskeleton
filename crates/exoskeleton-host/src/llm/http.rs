@@ -7,7 +7,9 @@ use std::fmt;
 use std::time::Instant;
 
 use actionqueue_executor_local::CancellationToken;
-use exoskeleton_core::llm::{LlmBackend, LlmRequest, LlmResponse, LlmRole, StopReason};
+use exoskeleton_core::llm::{
+    ContentBlock, LlmBackend, LlmRequest, LlmResponse, LlmRole, StopReason, ToolDefinition,
+};
 use exoskeleton_core::ExoError;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +63,23 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 
 fn is_false(v: &bool) -> bool {
     !*v
+}
+
+fn request_text_len(request: &LlmRequest) -> usize {
+    request.messages.iter().map(message_text_len).sum::<usize>()
+        + request.system_prompt.as_deref().map_or(0, str::len)
+}
+
+fn message_text_len(message: &exoskeleton_core::llm::LlmMessage) -> usize {
+    message
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolResult { content, .. } => content.len(),
+            ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+        })
+        .sum()
 }
 
 // ── SSE Streaming Helpers ──
@@ -269,21 +288,15 @@ impl OpenAiCompatBackend {
         if let Some(ref system) = request.system_prompt {
             messages.push(OpenAiMessage {
                 role: "system".into(),
-                content: system.clone(),
+                content: Some(system.clone()),
+                tool_calls: None,
+                tool_call_id: None,
             });
         }
 
-        // User/assistant messages
+        // User/assistant/tool messages
         for msg in &request.messages {
-            let role = match msg.role {
-                LlmRole::System => "system",
-                LlmRole::User => "user",
-                LlmRole::Assistant => "assistant",
-            };
-            messages.push(OpenAiMessage {
-                role: role.into(),
-                content: msg.content.clone(),
-            });
+            append_openai_messages(&mut messages, msg);
         }
 
         OpenAiRequest {
@@ -297,6 +310,24 @@ impl OpenAiCompatBackend {
                 Some(request.stop_sequences.clone())
             },
             stream: request.stream,
+            tools: if request.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| OpenAiToolDefinition {
+                            r#type: "function".into(),
+                            function: OpenAiFunctionDefinition {
+                                name: tool.name.clone(),
+                                description: tool.description.clone(),
+                                parameters: tool.input_schema.clone(),
+                            },
+                        })
+                        .collect(),
+                )
+            },
         }
     }
 }
@@ -315,12 +346,45 @@ struct OpenAiRequest {
     stop: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "is_false")]
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiToolDefinition>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiToolDefinition {
+    r#type: String,
+    function: OpenAiFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiFunctionDefinition {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiToolCall {
+    id: String,
+    r#type: String,
+    function: OpenAiFunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,6 +405,103 @@ struct OpenAiChoice {
 struct OpenAiUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+}
+
+fn append_openai_messages(
+    messages: &mut Vec<OpenAiMessage>,
+    msg: &exoskeleton_core::llm::LlmMessage,
+) {
+    let role = match msg.role {
+        LlmRole::System => "system",
+        LlmRole::User => "user",
+        LlmRole::Assistant => "assistant",
+    };
+
+    let text = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+
+    let tool_calls = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some(OpenAiToolCall {
+                id: id.clone(),
+                r#type: "function".into(),
+                function: OpenAiFunctionCall {
+                    name: name.clone(),
+                    arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                },
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if !text.is_empty() || tool_calls.is_empty() {
+        messages.push(OpenAiMessage {
+            role: role.into(),
+            content: if text.is_empty() { None } else { Some(text) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            tool_call_id: None,
+        });
+    } else if !tool_calls.is_empty() {
+        messages.push(OpenAiMessage {
+            role: role.into(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        });
+    }
+
+    for block in &msg.content {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = block
+        {
+            messages.push(OpenAiMessage {
+                role: "tool".into(),
+                content: Some(content.clone()),
+                tool_calls: None,
+                tool_call_id: Some(tool_use_id.clone()),
+            });
+        }
+    }
+}
+
+fn parse_openai_response_blocks(message: OpenAiMessage) -> Result<Vec<ContentBlock>, ExoError> {
+    let mut blocks = Vec::new();
+    if let Some(content) = message.content {
+        if !content.is_empty() {
+            blocks.push(ContentBlock::Text { text: content });
+        }
+    }
+    if let Some(tool_calls) = message.tool_calls {
+        for call in tool_calls {
+            let input = serde_json::from_str(&call.function.arguments).map_err(|e| {
+                ExoError::LlmInvocation(format!(
+                    "malformed tool call arguments for '{}': {e}",
+                    call.function.name
+                ))
+            })?;
+            blocks.push(ContentBlock::ToolUse {
+                id: call.id,
+                name: call.function.name,
+                input,
+            });
+        }
+    }
+    Ok(blocks)
 }
 
 impl LlmHttpBackend for OpenAiCompatBackend {
@@ -397,11 +558,13 @@ impl LlmHttpBackend for OpenAiCompatBackend {
             .into_iter()
             .next()
             .ok_or_else(|| ExoError::LlmInvocation("empty choices array".into()))?;
+        let content_blocks = parse_openai_response_blocks(choice.message.clone())?;
 
         let stop_reason = match choice.finish_reason.as_deref() {
             Some("stop") => StopReason::EndTurn,
             Some("length") => StopReason::MaxTokens,
             Some("stop_sequence") => StopReason::StopSequence,
+            Some("tool_calls") => StopReason::ToolUse,
             _ => StopReason::EndTurn,
         };
 
@@ -409,13 +572,15 @@ impl LlmHttpBackend for OpenAiCompatBackend {
             Some(usage) => (usage.prompt_tokens, usage.completion_tokens),
             None => {
                 // Estimate using chars/4 heuristic
-                let in_chars: usize = request
-                    .messages
+                let in_chars = request_text_len(request);
+                let out_chars: usize = content_blocks
                     .iter()
-                    .map(|m| m.content.len())
-                    .sum::<usize>()
-                    + request.system_prompt.as_deref().map_or(0, |s| s.len());
-                let out_chars = choice.message.content.len();
+                    .map(|block| match block {
+                        ContentBlock::Text { text } => text.len(),
+                        ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+                        ContentBlock::ToolResult { content, .. } => content.len(),
+                    })
+                    .sum();
                 ((in_chars / 4) as u64, (out_chars / 4) as u64)
             }
         };
@@ -427,7 +592,7 @@ impl LlmHttpBackend for OpenAiCompatBackend {
             .and_then(|_| estimate_openai_cost(&self.model, tokens_in, tokens_out));
 
         Ok(LlmResponse {
-            content: choice.message.content,
+            content_blocks,
             model: parsed.model.unwrap_or_else(|| self.model.clone()),
             tokens_in,
             tokens_out,
@@ -450,6 +615,9 @@ impl LlmHttpBackend for OpenAiCompatBackend {
         on_delta: &dyn Fn(&str),
     ) -> Result<LlmResponse, ExoError> {
         if !request.stream {
+            return self.call(client, request, cancellation);
+        }
+        if !request.tools.is_empty() {
             return self.call(client, request, cancellation);
         }
         if cancellation.is_cancelled() {
@@ -549,16 +717,12 @@ impl LlmHttpBackend for OpenAiCompatBackend {
         let stop_reason = match finish_reason.as_deref() {
             Some("length") => StopReason::MaxTokens,
             Some("stop_sequence") => StopReason::StopSequence,
+            Some("tool_calls") => StopReason::ToolUse,
             _ => StopReason::EndTurn,
         };
 
         if tokens_in == 0 && tokens_out == 0 {
-            let in_chars: usize = request
-                .messages
-                .iter()
-                .map(|m| m.content.len())
-                .sum::<usize>()
-                + request.system_prompt.as_deref().map_or(0, |s| s.len());
+            let in_chars = request_text_len(request);
             tokens_in = (in_chars / 4) as u64;
             tokens_out = (content_buffer.len() / 4) as u64;
         }
@@ -569,7 +733,9 @@ impl LlmHttpBackend for OpenAiCompatBackend {
             .and_then(|_| estimate_openai_cost(&self.model, tokens_in, tokens_out));
 
         Ok(LlmResponse {
-            content: content_buffer,
+            content_blocks: vec![ContentBlock::Text {
+                text: content_buffer,
+            }],
             model: self.model.clone(),
             tokens_in,
             tokens_out,
@@ -632,7 +798,7 @@ impl AnthropicBackend {
                 };
                 AnthropicMessage {
                     role: role.into(),
-                    content: msg.content.clone(),
+                    content: anthropic_content_from_blocks(&msg.content),
                 }
             })
             .collect();
@@ -649,6 +815,21 @@ impl AnthropicBackend {
                 Some(request.stop_sequences.clone())
             },
             stream: request.stream,
+            tools: if request.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| AnthropicToolDefinition {
+                            name: tool.name.clone(),
+                            description: tool.description.clone(),
+                            input_schema: tool.input_schema.clone(),
+                        })
+                        .collect(),
+                )
+            },
         }
     }
 }
@@ -666,12 +847,28 @@ struct AnthropicRequest {
     stop_sequences: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "is_false")]
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicToolDefinition>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: AnthropicContent,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicToolDefinition {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum AnthropicContent {
+    Text(String),
+    Blocks(Vec<AnthropicContentBlock>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -682,9 +879,85 @@ struct AnthropicResponse {
     usage: AnthropicUsage,
 }
 
-#[derive(Debug, Deserialize)]
-struct AnthropicContentBlock {
-    text: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
+}
+
+fn anthropic_content_from_blocks(blocks: &[ContentBlock]) -> AnthropicContent {
+    let all_text = blocks
+        .iter()
+        .all(|block| matches!(block, ContentBlock::Text { .. }));
+    if all_text {
+        let text = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        AnthropicContent::Text(text)
+    } else {
+        AnthropicContent::Blocks(
+            blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => {
+                        AnthropicContentBlock::Text { text: text.clone() }
+                    }
+                    ContentBlock::ToolUse { id, name, input } => AnthropicContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => AnthropicContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                        is_error: *is_error,
+                    },
+                })
+                .collect(),
+        )
+    }
+}
+
+fn parse_anthropic_response_blocks(blocks: Vec<AnthropicContentBlock>) -> Vec<ContentBlock> {
+    blocks
+        .into_iter()
+        .map(|block| match block {
+            AnthropicContentBlock::Text { text } => ContentBlock::Text { text },
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                ContentBlock::ToolUse { id, name, input }
+            }
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            },
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -744,17 +1017,13 @@ impl LlmHttpBackend for AnthropicBackend {
         let parsed: AnthropicResponse = block_on(response.json())
             .map_err(|e| ExoError::LlmInvocation(format!("malformed response body: {e}")))?;
 
-        let content = parsed
-            .content
-            .into_iter()
-            .map(|block| block.text)
-            .collect::<Vec<_>>()
-            .join("");
+        let content_blocks = parse_anthropic_response_blocks(parsed.content);
 
         let stop_reason = match parsed.stop_reason.as_deref() {
             Some("end_turn") => StopReason::EndTurn,
             Some("max_tokens") => StopReason::MaxTokens,
             Some("stop_sequence") => StopReason::StopSequence,
+            Some("tool_use") => StopReason::ToolUse,
             _ => StopReason::EndTurn,
         };
 
@@ -765,7 +1034,7 @@ impl LlmHttpBackend for AnthropicBackend {
         );
 
         Ok(LlmResponse {
-            content,
+            content_blocks,
             model: parsed.model,
             tokens_in: parsed.usage.input_tokens,
             tokens_out: parsed.usage.output_tokens,
@@ -784,6 +1053,9 @@ impl LlmHttpBackend for AnthropicBackend {
         on_delta: &dyn Fn(&str),
     ) -> Result<LlmResponse, ExoError> {
         if !request.stream {
+            return self.call(client, request, cancellation);
+        }
+        if !request.tools.is_empty() {
             return self.call(client, request, cancellation);
         }
         if cancellation.is_cancelled() {
@@ -902,6 +1174,7 @@ impl LlmHttpBackend for AnthropicBackend {
         let stop_reason = match stop_reason_str.as_deref() {
             Some("max_tokens") => StopReason::MaxTokens,
             Some("stop_sequence") => StopReason::StopSequence,
+            Some("tool_use") => StopReason::ToolUse,
             _ => StopReason::EndTurn,
         };
 
@@ -910,7 +1183,9 @@ impl LlmHttpBackend for AnthropicBackend {
             estimate_anthropic_cost(&resolved_model, input_tokens, output_tokens);
 
         Ok(LlmResponse {
-            content: content_buffer,
+            content_blocks: vec![ContentBlock::Text {
+                text: content_buffer,
+            }],
             model: resolved_model,
             tokens_in: input_tokens,
             tokens_out: output_tokens,
@@ -946,6 +1221,54 @@ impl OllamaNativeBackend {
     pub fn new(base_url: String, model: String) -> Self {
         Self { base_url, model }
     }
+
+    fn build_request_body(&self, request: &LlmRequest) -> OllamaRequest {
+        let mut messages = Vec::new();
+
+        if let Some(ref system) = request.system_prompt {
+            messages.push(OllamaMessage {
+                role: "system".into(),
+                content: Some(system.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        for msg in &request.messages {
+            append_ollama_messages(&mut messages, msg);
+        }
+
+        let options = if request.temperature.is_some() || !request.stop_sequences.is_empty() {
+            Some(OllamaOptions {
+                temperature: request.temperature,
+                stop: if request.stop_sequences.is_empty() {
+                    None
+                } else {
+                    Some(request.stop_sequences.clone())
+                },
+            })
+        } else {
+            None
+        };
+
+        OllamaRequest {
+            model: self.model.clone(),
+            messages,
+            stream: false,
+            options,
+            tools: if request.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    request
+                        .tools
+                        .iter()
+                        .map(tool_to_openai_definition)
+                        .collect(),
+                )
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -955,12 +1278,19 @@ struct OllamaRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiToolDefinition>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OllamaMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -981,6 +1311,89 @@ struct OllamaResponse {
     prompt_eval_count: Option<u64>,
 }
 
+fn tool_to_openai_definition(tool: &ToolDefinition) -> OpenAiToolDefinition {
+    OpenAiToolDefinition {
+        r#type: "function".into(),
+        function: OpenAiFunctionDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.input_schema.clone(),
+        },
+    }
+}
+
+fn append_ollama_messages(
+    messages: &mut Vec<OllamaMessage>,
+    msg: &exoskeleton_core::llm::LlmMessage,
+) {
+    let role = match msg.role {
+        LlmRole::System => "system",
+        LlmRole::User => "user",
+        LlmRole::Assistant => "assistant",
+    };
+
+    let text = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+
+    let tool_calls = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some(OpenAiToolCall {
+                id: id.clone(),
+                r#type: "function".into(),
+                function: OpenAiFunctionCall {
+                    name: name.clone(),
+                    arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                },
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if !text.is_empty() || tool_calls.is_empty() {
+        messages.push(OllamaMessage {
+            role: role.into(),
+            content: if text.is_empty() { None } else { Some(text) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            tool_call_id: None,
+        });
+    } else if !tool_calls.is_empty() {
+        messages.push(OllamaMessage {
+            role: role.into(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        });
+    }
+
+    for block in &msg.content {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = block
+        {
+            messages.push(OllamaMessage {
+                role: "tool".into(),
+                content: Some(content.clone()),
+                tool_calls: None,
+                tool_call_id: Some(tool_use_id.clone()),
+            });
+        }
+    }
+}
+
 impl LlmHttpBackend for OllamaNativeBackend {
     fn call(
         &self,
@@ -992,46 +1405,7 @@ impl LlmHttpBackend for OllamaNativeBackend {
             return Err(ExoError::LlmInvocation("cancelled before HTTP call".into()));
         }
 
-        let mut messages = Vec::new();
-
-        if let Some(ref system) = request.system_prompt {
-            messages.push(OllamaMessage {
-                role: "system".into(),
-                content: system.clone(),
-            });
-        }
-
-        for msg in &request.messages {
-            let role = match msg.role {
-                LlmRole::System => "system",
-                LlmRole::User => "user",
-                LlmRole::Assistant => "assistant",
-            };
-            messages.push(OllamaMessage {
-                role: role.into(),
-                content: msg.content.clone(),
-            });
-        }
-
-        let options = if request.temperature.is_some() || !request.stop_sequences.is_empty() {
-            Some(OllamaOptions {
-                temperature: request.temperature,
-                stop: if request.stop_sequences.is_empty() {
-                    None
-                } else {
-                    Some(request.stop_sequences.clone())
-                },
-            })
-        } else {
-            None
-        };
-
-        let body = OllamaRequest {
-            model: self.model.clone(),
-            messages,
-            stream: false,
-            options,
-        };
+        let body = self.build_request_body(request);
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
         let start = Instant::now();
@@ -1061,28 +1435,41 @@ impl LlmHttpBackend for OllamaNativeBackend {
 
         let parsed: OllamaResponse = block_on(response.json())
             .map_err(|e| ExoError::LlmInvocation(format!("malformed response body: {e}")))?;
+        let content_blocks = parse_openai_response_blocks(OpenAiMessage {
+            role: parsed.message.role.clone(),
+            content: parsed.message.content.clone(),
+            tool_calls: parsed.message.tool_calls.clone(),
+            tool_call_id: parsed.message.tool_call_id.clone(),
+        })?;
 
         let tokens_in = parsed.prompt_eval_count.unwrap_or({
-            let in_chars: usize = request
-                .messages
-                .iter()
-                .map(|m| m.content.len())
-                .sum::<usize>()
-                + request.system_prompt.as_deref().map_or(0, |s| s.len());
+            let in_chars = request_text_len(request);
             (in_chars / 4) as u64
         });
-        let tokens_out = parsed
-            .eval_count
-            .unwrap_or((parsed.message.content.len() / 4) as u64);
+        let tokens_out = parsed.eval_count.unwrap_or(
+            (content_blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => text.len(),
+                    ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+                    ContentBlock::ToolResult { content, .. } => content.len(),
+                })
+                .sum::<usize>()
+                / 4) as u64,
+        );
 
         Ok(LlmResponse {
-            content: parsed.message.content,
+            content_blocks,
             model: parsed.model,
             tokens_in,
             tokens_out,
             latency_ms,
-            stop_reason: StopReason::EndTurn, // Ollama doesn't report stop sequences
-            cost_estimate_cents: None,        // Local models have no cost
+            stop_reason: if parsed.message.tool_calls.is_some() {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+            cost_estimate_cents: None, // Local models have no cost
             backend: LlmBackend::Local,
         })
     }
@@ -1149,7 +1536,7 @@ fn estimate_anthropic_cost(model: &str, tokens_in: u64, tokens_out: u64) -> f64 
 
 #[cfg(test)]
 mod tests {
-    use exoskeleton_core::llm::LlmMessage;
+    use exoskeleton_core::llm::{ContentBlock, LlmMessage};
 
     use super::*;
     use crate::llm::mock::MockLlmBackend;
@@ -1250,7 +1637,9 @@ mod tests {
         use exoskeleton_core::llm::{LlmBackend, StopReason};
 
         let response = LlmResponse {
-            content: "streaming fallback".into(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "streaming fallback".into(),
+            }],
             model: "mock".into(),
             tokens_in: 10,
             tokens_out: 5,
@@ -1265,14 +1654,12 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: None,
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
             stream: true,
+            tools: vec![],
         };
 
         let deltas = std::sync::Mutex::new(Vec::new());
@@ -1280,7 +1667,7 @@ mod tests {
             deltas.lock().unwrap().push(chunk.to_string());
         });
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().content, "streaming fallback");
+        assert_eq!(result.unwrap().text(), "streaming fallback");
         assert!(deltas.lock().unwrap().is_empty());
     }
 
@@ -1294,21 +1681,23 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("You are helpful.".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hello".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hello")],
             max_output_tokens: 1024,
             temperature: Some(0.7),
             stop_sequences: vec!["</answer>".into()],
             stream: false,
+            tools: vec![],
         };
         let body = backend.build_request_body(&request);
         assert_eq!(body.model, "llama3.2:latest");
         assert_eq!(body.messages.len(), 2); // system + user
         assert_eq!(body.messages[0].role, "system");
-        assert_eq!(body.messages[0].content, "You are helpful.");
+        assert_eq!(
+            body.messages[0].content.as_deref(),
+            Some("You are helpful.")
+        );
         assert_eq!(body.messages[1].role, "user");
+        assert_eq!(body.messages[1].content.as_deref(), Some("Hello"));
         assert_eq!(body.max_completion_tokens, 1024);
         assert_eq!(body.temperature, Some(0.7));
         assert_eq!(body.stop, Some(vec!["</answer>".into()]));
@@ -1325,7 +1714,10 @@ mod tests {
             "model": "llama3.2:latest"
         }"#;
         let parsed: OpenAiResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.choices[0].message.content, "Hello there!");
+        assert_eq!(
+            parsed.choices[0].message.content.as_deref(),
+            Some("Hello there!")
+        );
         assert_eq!(parsed.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = parsed.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
@@ -1339,19 +1731,17 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("Be concise.".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
             stream: false,
+            tools: vec![],
         };
         let body = backend.build_request_body(&request);
         // System prompt becomes the first message with role "system"
         assert_eq!(body.messages[0].role, "system");
-        assert_eq!(body.messages[0].content, "Be concise.");
+        assert_eq!(body.messages[0].content.as_deref(), Some("Be concise."));
     }
 
     #[test]
@@ -1364,14 +1754,12 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("You are helpful.".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hello".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hello")],
             max_output_tokens: 2048,
             temperature: Some(0.5),
             stop_sequences: vec!["STOP".into()],
             stream: false,
+            tools: vec![],
         };
         let body = backend.build_request_body(&request);
         assert_eq!(body.model, "claude-sonnet-4-20250514");
@@ -1392,7 +1780,10 @@ mod tests {
             "usage": {"input_tokens": 20, "output_tokens": 8}
         }"#;
         let parsed: AnthropicResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.content[0].text, "I'm Claude.");
+        assert!(matches!(
+            parsed.content[0],
+            AnthropicContentBlock::Text { ref text } if text == "I'm Claude."
+        ));
         assert_eq!(parsed.model, "claude-sonnet-4-20250514");
         assert_eq!(parsed.stop_reason.as_deref(), Some("end_turn"));
         assert_eq!(parsed.usage.input_tokens, 20);
@@ -1409,14 +1800,12 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("System instruction".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
             stream: false,
+            tools: vec![],
         };
         let body = backend.build_request_body(&request);
         // System should be a top-level field
@@ -1447,44 +1836,14 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("Be helpful.".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hello".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hello")],
             max_output_tokens: 1024,
             temperature: Some(0.8),
             stop_sequences: vec!["END".into()],
             stream: false,
+            tools: vec![],
         };
-
-        // The backend builds the request internally — we test via serialization format
-        let mut messages = Vec::new();
-        if let Some(ref system) = request.system_prompt {
-            messages.push(OllamaMessage {
-                role: "system".into(),
-                content: system.clone(),
-            });
-        }
-        for msg in &request.messages {
-            let role = match msg.role {
-                LlmRole::System => "system",
-                LlmRole::User => "user",
-                LlmRole::Assistant => "assistant",
-            };
-            messages.push(OllamaMessage {
-                role: role.into(),
-                content: msg.content.clone(),
-            });
-        }
-        let body = OllamaRequest {
-            model: "llama3.2:latest".into(),
-            messages,
-            stream: false,
-            options: Some(OllamaOptions {
-                temperature: Some(0.8),
-                stop: Some(vec!["END".into()]),
-            }),
-        };
+        let body = _backend.build_request_body(&request);
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["model"], "llama3.2:latest");
         assert_eq!(json["stream"], false);
@@ -1501,7 +1860,10 @@ mod tests {
             "prompt_eval_count": 25
         }"#;
         let parsed: OllamaResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.message.content, "Hello from Ollama!");
+        assert_eq!(
+            parsed.message.content.as_deref(),
+            Some("Hello from Ollama!")
+        );
         assert_eq!(parsed.model, "llama3.2:latest");
         assert_eq!(parsed.eval_count, Some(15));
         assert_eq!(parsed.prompt_eval_count, Some(25));

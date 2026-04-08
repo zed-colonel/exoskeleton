@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use actionqueue_executor_local::CancellationToken;
-use exoskeleton_core::llm::LlmResponse;
+use exoskeleton_core::llm::{ContentBlock, LlmResponse};
 use exoskeleton_core::ExoError;
 
 use super::http::LlmHttpBackend;
@@ -89,7 +89,9 @@ pub fn default_mock_response() -> LlmResponse {
     use exoskeleton_core::llm::{LlmBackend, StopReason};
 
     LlmResponse {
-        content: "Mock LLM response.".into(),
+        content_blocks: vec![ContentBlock::Text {
+            text: "Mock LLM response.".into(),
+        }],
         model: "mock-model".into(),
         tokens_in: 10,
         tokens_out: 5,
@@ -151,7 +153,9 @@ impl LlmHttpBackend for MockSequenceLlmBackend {
 
 #[cfg(test)]
 mod tests {
-    use exoskeleton_core::llm::{LlmBackend, LlmMessage, LlmRequest, LlmRole, StopReason};
+    use exoskeleton_core::llm::{
+        ContentBlock, LlmBackend, LlmMessage, LlmRequest, LlmRole, StopReason,
+    };
 
     use super::*;
 
@@ -159,14 +163,12 @@ mod tests {
         LlmRequest {
             backend: None,
             system_prompt: None,
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "Hi".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "Hi")],
             max_output_tokens: 100,
             temperature: None,
             stop_sequences: vec![],
             stream: false,
+            tools: vec![],
         }
     }
 
@@ -177,7 +179,9 @@ mod tests {
     #[test]
     fn mock_backend_returns_canned_response() {
         let response = LlmResponse {
-            content: "Custom response".into(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "Custom response".into(),
+            }],
             model: "test-model".into(),
             tokens_in: 20,
             tokens_out: 10,
@@ -190,7 +194,7 @@ mod tests {
         let client = reqwest::Client::new();
         let token = test_cancellation_token();
         let result = mock.call(&client, &test_request(), &token).unwrap();
-        assert_eq!(result.content, "Custom response");
+        assert_eq!(result.text(), "Custom response");
         assert_eq!(result.model, "test-model");
     }
 

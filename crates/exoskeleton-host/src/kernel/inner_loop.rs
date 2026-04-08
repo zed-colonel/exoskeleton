@@ -337,16 +337,16 @@ fn decide_lite(
     )?;
 
     // Build messages: original context + decision summary + tool results
-    let mut messages = vec![LlmMessage {
-        role: LlmRole::User,
-        content: orientation.compiled_context.prompt.clone(),
-    }];
+    let mut messages = vec![LlmMessage::text(
+        LlmRole::User,
+        orientation.compiled_context.prompt.clone(),
+    )];
 
     // Append previous decision's reasoning as assistant message
-    messages.push(LlmMessage {
-        role: LlmRole::Assistant,
-        content: format_decision_summary(previous_decision),
-    });
+    messages.push(LlmMessage::text(
+        LlmRole::Assistant,
+        format_decision_summary(previous_decision),
+    ));
 
     // Append tool results as user message
     let mut tool_results = super::context_window::format_windowed_results(
@@ -356,10 +356,7 @@ fn decide_lite(
     if let Some(correction) = correction_message {
         tool_results = format!("{correction}\n\n{tool_results}");
     }
-    messages.push(LlmMessage {
-        role: LlmRole::User,
-        content: tool_results,
-    });
+    messages.push(LlmMessage::text(LlmRole::User, tool_results));
 
     let request = LlmRequest {
         backend: None,
@@ -369,6 +366,7 @@ fn decide_lite(
         temperature: Some(0.3),
         stop_sequences: vec![],
         stream: true,
+        tools: vec![],
     };
 
     // Use unified handler_direct_llm_call
@@ -376,7 +374,7 @@ fn decide_lite(
 
     // Parse response into DecisionResult
     parse_decide_lite_response(
-        &result.response.content,
+        &result.response.text(),
         result.llm_call_record,
         result.artifact_id,
     )

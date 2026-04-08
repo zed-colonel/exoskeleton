@@ -107,9 +107,7 @@ pub struct PlannedAction {
 }
 
 /// Lenient deserializer for plan_task_id: accepts UUIDs, maps non-UUID strings to None.
-fn deserialize_plan_task_id_lenient<'de, D>(
-    deserializer: D,
-) -> Result<Option<PlanTaskId>, D::Error>
+fn deserialize_plan_task_id_lenient<'de, D>(deserializer: D) -> Result<Option<PlanTaskId>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

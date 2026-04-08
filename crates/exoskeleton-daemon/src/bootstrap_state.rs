@@ -250,18 +250,22 @@ mod tests {
     #[test]
     fn push_message_accumulates() {
         let (_dir, state) = test_state();
-        state.push_message(LlmMessage {
-            role: LlmRole::User,
-            content: "Hello".into(),
-        });
-        state.push_message(LlmMessage {
-            role: LlmRole::Assistant,
-            content: "Hi there".into(),
-        });
+        state.push_message(LlmMessage::text(LlmRole::User, "Hello"));
+        state.push_message(LlmMessage::text(LlmRole::Assistant, "Hi there"));
         let transcript = state.transcript();
         assert_eq!(transcript.len(), 2);
-        assert_eq!(transcript[0].content, "Hello");
-        assert_eq!(transcript[1].content, "Hi there");
+        assert_eq!(
+            transcript[0].content[0],
+            exoskeleton_core::llm::ContentBlock::Text {
+                text: "Hello".into()
+            }
+        );
+        assert_eq!(
+            transcript[1].content[0],
+            exoskeleton_core::llm::ContentBlock::Text {
+                text: "Hi there".into()
+            }
+        );
     }
 
     // EO3-T6: BootstrapState: llm_config returns error when not configured

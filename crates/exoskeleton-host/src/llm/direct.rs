@@ -326,7 +326,7 @@ mod tests {
     // ── handler_direct_llm_call tests (E8S1-T1 through T6) ──
 
     use exoskeleton_core::conversation::InMemoryConversationStore;
-    use exoskeleton_core::llm::{LlmMessage, LlmRole, StopReason};
+    use exoskeleton_core::llm::{ContentBlock, LlmMessage, LlmRole, StopReason};
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{ArtifactStore, LiveEvent, VesselId};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
@@ -340,7 +340,9 @@ mod tests {
 
     fn mock_response() -> LlmResponse {
         LlmResponse {
-            content: "test response".into(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "test response".into(),
+            }],
             model: "mock-model".into(),
             tokens_in: 100,
             tokens_out: 50,
@@ -355,14 +357,12 @@ mod tests {
         LlmRequest {
             backend: None,
             system_prompt: Some("system".into()),
-            messages: vec![LlmMessage {
-                role: LlmRole::User,
-                content: "test".into(),
-            }],
+            messages: vec![LlmMessage::text(LlmRole::User, "test")],
             max_output_tokens: 256,
             temperature: Some(0.0),
             stop_sequences: vec![],
             stream: false,
+            tools: vec![],
         }
     }
 
@@ -573,7 +573,7 @@ mod tests {
 
         // Verify the frontier mock was called (escalation worked)
         assert_eq!(mock_clone.call_count(), 1);
-        assert_eq!(result.response.content, "test response");
+        assert_eq!(result.response.text(), "test response");
     }
 
     // ── E8S1-T5: direct_llm_call_no_backend_errors ──
@@ -676,7 +676,7 @@ mod tests {
         request.stream = true;
 
         let result = handler_direct_llm_call(&handler, &kernel, &request, &token).unwrap();
-        assert_eq!(result.response.content, "test response");
+        assert_eq!(result.response.text(), "test response");
 
         let mut delta_count = 0;
         while let Ok(event) = rx.try_recv() {
@@ -698,7 +698,7 @@ mod tests {
         request.stream = true;
 
         let result = handler_direct_llm_call(&handler, &kernel, &request, &token).unwrap();
-        assert_eq!(result.response.content, "test response");
+        assert_eq!(result.response.text(), "test response");
 
         let artifact = kernel
             .artifact_store

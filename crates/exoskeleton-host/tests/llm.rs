@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{test_config, test_llm_request, test_llm_response};
-use exoskeleton_core::llm::{LlmBackend, LlmResponse, StopReason};
+use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmResponse, StopReason};
 use exoskeleton_core::{ArtifactKind, ArtifactStore};
 use exoskeleton_host::cognitive_engine::{
     bootstrap_cognitive_engine_with_backends, CognitivePayload, CognitiveTaskType,
@@ -80,7 +80,7 @@ async fn handler_llm_call_succeeds() {
         let attempts = projection.get_attempt_history(&run.id()).unwrap();
         let output = attempts.last().unwrap().output().unwrap();
         let response: LlmResponse = serde_json::from_slice(output).unwrap();
-        assert_eq!(response.content, "The answer is 4.");
+        assert_eq!(response.text(), "The answer is 4.");
     }
 
     // Clean shutdown
@@ -457,7 +457,7 @@ async fn llm_response_stored_as_artifact() {
         .expect("artifact should exist");
     assert_eq!(artifact.kind, ArtifactKind::LlmResponse);
     let stored_response: LlmResponse = serde_json::from_slice(&artifact.content).unwrap();
-    assert_eq!(stored_response.content, "The answer is 4.");
+    assert_eq!(stored_response.text(), "The answer is 4.");
 
     let engine = engine_slot.lock().await.take();
     if let Some(engine) = engine {
@@ -731,7 +731,9 @@ async fn empty_response_content() {
     let artifact_store: Arc<dyn ArtifactStore> = storage.artifact_store().clone();
 
     let response = LlmResponse {
-        content: String::new(),
+        content_blocks: vec![ContentBlock::Text {
+            text: String::new(),
+        }],
         model: "mock".into(),
         tokens_in: 10,
         tokens_out: 0,
@@ -802,7 +804,9 @@ async fn unicode_in_response() {
     let artifact_store: Arc<dyn ArtifactStore> = storage.artifact_store().clone();
 
     let response = LlmResponse {
-        content: "你好世界 🌍 مرحبا".into(),
+        content_blocks: vec![ContentBlock::Text {
+            text: "你好世界 🌍 مرحبا".into(),
+        }],
         model: "mock".into(),
         tokens_in: 10,
         tokens_out: 5,
@@ -857,8 +861,9 @@ async fn unicode_in_response() {
         let attempts = projection.get_attempt_history(&run.id()).unwrap();
         let output = attempts.last().unwrap().output().unwrap();
         let llm_response: LlmResponse = serde_json::from_slice(output).unwrap();
-        assert!(llm_response.content.contains("你好世界"));
-        assert!(llm_response.content.contains("🌍"));
+        let text = llm_response.text();
+        assert!(text.contains("你好世界"));
+        assert!(text.contains("🌍"));
     }
 
     let engine = engine_slot.lock().await.take();
@@ -955,7 +960,7 @@ mod sprint4_proptest {
     }
 
     fn arb_message() -> impl Strategy<Value = LlmMessage> {
-        (arb_role(), ".*").prop_map(|(role, content)| LlmMessage { role, content })
+        (arb_role(), ".*").prop_map(|(role, content)| LlmMessage::text(role, content))
     }
 
     fn arb_request() -> impl Strategy<Value = LlmRequest> {
@@ -984,6 +989,7 @@ mod sprint4_proptest {
                         temperature,
                         stop_sequences,
                         stream: false,
+                        tools: vec![],
                     }
                 },
             )
@@ -1012,7 +1018,7 @@ mod sprint4_proptest {
                     backend,
                 )| {
                     LlmResponse {
-                        content,
+                        content_blocks: vec![ContentBlock::Text { text: content }],
                         model,
                         tokens_in,
                         tokens_out,
@@ -1033,6 +1039,7 @@ mod sprint4_proptest {
             && a.max_output_tokens == b.max_output_tokens
             && a.stop_sequences == b.stop_sequences
             && a.stream == b.stream
+            && a.tools == b.tools
             && match (a.temperature, b.temperature) {
                 (None, None) => true,
                 (Some(x), Some(y)) => (x - y).abs() < 1e-10,
@@ -1042,7 +1049,7 @@ mod sprint4_proptest {
 
     /// Check approximate equality for LlmResponse (f64 cost may lose precision).
     fn response_approx_eq(a: &LlmResponse, b: &LlmResponse) -> bool {
-        a.content == b.content
+        a.content_blocks == b.content_blocks
             && a.model == b.model
             && a.tokens_in == b.tokens_in
             && a.tokens_out == b.tokens_out
