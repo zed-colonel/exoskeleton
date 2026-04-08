@@ -22,6 +22,7 @@ pub mod llm;
 pub mod metrics;
 pub mod prompt_loader;
 pub mod storage;
+pub mod swe_bench;
 pub mod vessel;
 
 pub use cognitive_engine::{
