@@ -47,4 +47,8 @@ pub use storage::{
     SqliteArtifactStore, SqliteBudgetStore, SqliteEventLedger, SqliteMemoryStore,
     SqliteSnapshotStore, SqliteThreadStore, SqliteTickStore, StorageManager,
 };
+pub use swe_bench::{
+    DatasetSource, SweBenchRunner, SweGrading, SweInstance, SweResult, SweSuiteResult,
+    SweRunOptions,
+};
 pub use vessel::{CognitiveEngineSlot, Vessel};
