@@ -392,6 +392,308 @@ impl Drop for CurrentDirGuard {
     }
 }
 
+/// Boot a Vessel from a VesselConfig. Shared by HeadlessRunner and SweBenchRunner.
+pub async fn boot_vessel(config: VesselConfig) -> Result<Vessel, String> {
+    Vessel::start(config)
+        .await
+        .map_err(|e| format!("vessel boot failed: {e}"))
+}
+
+/// Format the benchmark task prompt with workspace context.
+pub fn format_task_prompt(workspace_path: &Path, prompt: &str) -> String {
+    format!(
+        "You are working on a benchmark task.\n\
+The ONLY repository you should inspect or modify is this workspace copy:\n\
+{}\n\n\
+Use that workspace as the repo root for all code.* tool paths.\n\
+Do not read or edit similarly named files outside this workspace.\n\
+Verification will run inside this workspace copy, so only changes there count.\n\n\
+Task:\n{}",
+        workspace_path.display(),
+        prompt
+    )
+}
+
+/// Inject a task prompt and poll for completion. Returns (completion_reason, inspector).
+pub async fn inject_and_poll(
+    vessel: &Vessel,
+    prompt: &str,
+    workspace_path: &Path,
+    timeout: std::time::Duration,
+    max_ticks: Option<u32>,
+) -> Result<(String, VesselInspector), String> {
+    let artifact_store = vessel.storage().artifact_store().clone();
+    HeadlessRunner::submit_task_prompt(
+        vessel.inbox().as_ref(),
+        artifact_store.as_ref(),
+        prompt,
+        workspace_path,
+    )?;
+
+    let poll_result = tokio::time::timeout(timeout, async {
+        HeadlessRunner::poll_for_completion_inner(vessel, max_ticks).await
+    })
+    .await;
+
+    let completion_reason = match poll_result {
+        Ok(Ok(reason)) => reason,
+        Ok(Err(e)) => format!("PollError: {e}"),
+        Err(_) => "Timeout".to_string(),
+    };
+
+    Ok((completion_reason, vessel.inspector()))
+}
+
+/// Extract comprehensive metrics from a completed benchmark run.
+pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, String> {
+    // tick_history() returns newest-first; reverse to iterate oldest-first
+    // so that step numbering and phase token attribution are chronological.
+    let mut ticks = inspector
+        .tick_history(256)
+        .map_err(|e| format!("failed to read tick history: {e}"))?;
+    ticks.reverse();
+
+    let mut total_steps: u32 = 0;
+    let mut total_tokens_in: u64 = 0;
+    let mut total_tokens_out: u64 = 0;
+    let mut total_cost_cents: f64 = 0.0;
+    let mut total_llm_calls: u32 = 0;
+    let mut tool_calls: HashMap<String, ToolCallStats> = HashMap::new();
+    let mut files_modified: Vec<String> = Vec::new();
+    let mut total_lines_added: u32 = 0;
+    let mut total_lines_removed: u32 = 0;
+    let mut doom_corrections: u32 = 0;
+    let mut model_used = String::new();
+    let mut step_trace: Vec<StepTrace> = Vec::new();
+    let mut tick_details: Vec<TickMetrics> = Vec::new();
+    let mut phase_tokens: HashMap<String, PhaseTokens> = HashMap::new();
+    let mut global_step: u32 = 0;
+
+    for tick in &ticks {
+        if !(tick.phase == TickPhase::Amend && tick.completed_at.is_some()) {
+            continue;
+        }
+
+        let tick_tokens_in: u64 = tick.llm_calls.iter().map(|c| c.tokens_in).sum();
+        let tick_tokens_out: u64 = tick.llm_calls.iter().map(|c| c.tokens_out).sum();
+        let tick_cost: f64 = tick.llm_calls.iter().map(|c| c.cost_cents).sum();
+        let tick_llm_calls = tick.llm_calls.len() as u32;
+
+        total_tokens_in += tick_tokens_in;
+        total_tokens_out += tick_tokens_out;
+        total_cost_cents += tick_cost;
+        total_llm_calls += tick_llm_calls;
+
+        if model_used.is_empty() {
+            if let Some(call) = tick.llm_calls.first() {
+                model_used = call.model.clone();
+            }
+        }
+
+        // Phase attribution heuristic: LlmCallRecord does not carry a phase tag,
+        // so we infer from position. In a standard PODAARA tick, the first LLM
+        // call is Decide, the last (if >1 total) is Reflect, and everything in
+        // between is DecideLite (inner loop iterations). This is approximate —
+        // multi-turn Decide introspection queries may skew the count.
+        for (i, call) in tick.llm_calls.iter().enumerate() {
+            let phase = if i == 0 {
+                "decide"
+            } else if i == tick.llm_calls.len() - 1 && tick.llm_calls.len() > 1 {
+                "reflect"
+            } else {
+                "decide_lite"
+            };
+            let entry = phase_tokens
+                .entry(phase.to_string())
+                .or_insert(PhaseTokens {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                });
+            entry.tokens_in += call.tokens_in;
+            entry.tokens_out += call.tokens_out;
+        }
+
+        let mut tick_actions_succeeded: u32 = 0;
+        for action in &tick.actions_taken {
+            let entry = tool_calls
+                .entry(action.action_type.clone())
+                .or_insert(ToolCallStats {
+                    calls: 0,
+                    successes: 0,
+                    failures: 0,
+                });
+            entry.calls += 1;
+            match action.outcome {
+                ActionOutcome::Success => {
+                    entry.successes += 1;
+                    tick_actions_succeeded += 1;
+                }
+                _ => {
+                    entry.failures += 1;
+                }
+            }
+
+            if matches!(
+                action.action_type.as_str(),
+                "fs.write" | "code.write" | "code.edit" | "code.apply_patch"
+            ) && !action.target.is_empty()
+            {
+                files_modified.push(action.target.clone());
+            }
+
+            // Extract lines_added/removed from receipt artifacts (CodeDiff data)
+            if let Some(ref receipt_id) = action.receipt_ref {
+                if let Ok(Some(receipt)) = inspector.artifact(receipt_id) {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&receipt.content) {
+                        if let Some(diff) = val.get("diff") {
+                            if let Some(added) = diff.get("lines_added").and_then(|v| v.as_u64()) {
+                                total_lines_added += added as u32;
+                            }
+                            if let Some(removed) =
+                                diff.get("lines_removed").and_then(|v| v.as_u64())
+                            {
+                                total_lines_removed += removed as u32;
+                            }
+                        }
+                    }
+                }
+            }
+
+            global_step += 1;
+            // NOTE: Per-step token attribution is not yet implemented. Token counts
+            // are only available at the tick level (from LlmCallRecord), not per
+            // individual tool call. Step trace tokens are always 0 for now.
+            step_trace.push(StepTrace {
+                step: global_step,
+                tick: tick.tick_number as u32,
+                tool_name: action.action_type.clone(),
+                tool_params: serde_json::Value::Null,
+                outcome: format!("{:?}", action.outcome),
+                output_summary: action.target.clone(),
+                reasoning: String::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                latency_ms: 0,
+            });
+        }
+
+        total_steps += tick.actions_taken.len() as u32;
+
+        // Count doom-loop corrections from the tick's decision rationale
+        if let Some(ref rationale) = tick.decision_rationale {
+            let normalized = rationale.to_lowercase();
+            if normalized.contains("doom_loop") || normalized.contains("doom loop") {
+                doom_corrections += 1;
+            }
+        }
+
+        let tick_duration = tick
+            .completed_at
+            .map(|c| (c - tick.started_at).num_milliseconds() as f64 / 1000.0)
+            .unwrap_or(0.0);
+
+        let tick_reason = tick
+            .decision_rationale
+            .as_deref()
+            .unwrap_or("Unknown")
+            .to_string();
+        tick_details.push(TickMetrics {
+            tick_number: tick.tick_number,
+            duration_secs: tick_duration,
+            inner_loop_steps: tick.actions_taken.len() as u32,
+            llm_calls: tick_llm_calls,
+            tokens_in: tick_tokens_in,
+            tokens_out: tick_tokens_out,
+            actions_taken: tick.actions_taken.len() as u32,
+            actions_succeeded: tick_actions_succeeded,
+            completion_reason: tick_reason,
+        });
+    }
+
+    files_modified.sort();
+    files_modified.dedup();
+
+    let context_utilization = ticks
+        .iter()
+        .find_map(|tick| tick.context_breakdown_ref.as_ref())
+        .and_then(|id| inspector.artifact(id).ok().flatten())
+        .and_then(|artifact| serde_json::from_slice::<CompiledContext>(&artifact.content).ok())
+        .map(compiled_context_to_utilization)
+        .unwrap_or_default();
+
+    Ok(MetricsSnapshot {
+        ticks_used: tick_details.len() as u32,
+        steps_taken: total_steps,
+        tokens: TokenMetrics {
+            total_in: total_tokens_in,
+            total_out: total_tokens_out,
+            total: total_tokens_in + total_tokens_out,
+            by_phase: phase_tokens,
+        },
+        model_used,
+        tool_calls,
+        files_modified,
+        lines_added: total_lines_added,
+        lines_removed: total_lines_removed,
+        doom_loop_corrections: doom_corrections,
+        llm_cost_cents: total_cost_cents,
+        llm_calls: total_llm_calls,
+        step_trace,
+        context_utilization,
+        tick_details,
+    })
+}
+
+/// Log diagnostic information about completed ticks.
+pub fn log_diagnostics(inspector: &VesselInspector) {
+    if let Ok(ticks) = inspector.tick_history(32) {
+        eprintln!("  [diag] {} tick(s) recorded", ticks.len());
+        for tick in &ticks {
+            let completed = tick.phase == TickPhase::Amend && tick.completed_at.is_some();
+            eprintln!(
+                "  [diag] tick #{}: phase={:?} completed={} actions={} llm_calls={}",
+                tick.tick_number,
+                tick.phase,
+                completed,
+                tick.actions_taken.len(),
+                tick.llm_calls.len(),
+            );
+            if let Some(ref rationale) = tick.decision_rationale {
+                // Truncate to first 500 chars for readability
+                let display = if rationale.len() > 500 {
+                    format!("{}...", &rationale[..500])
+                } else {
+                    rationale.clone()
+                };
+                eprintln!("  [diag]   rationale: {display}");
+            }
+            for (i, call) in tick.llm_calls.iter().enumerate() {
+                eprintln!(
+                    "  [diag]   llm_call[{}]: model={} in={} out={} cost={:.4}c",
+                    i, call.model, call.tokens_in, call.tokens_out, call.cost_cents,
+                );
+            }
+            for (i, action) in tick.actions_taken.iter().enumerate() {
+                eprintln!(
+                    "  [diag]   action[{}]: {} -> {} ({:?})",
+                    i, action.action_type, action.target, action.outcome,
+                );
+            }
+            // Try to read decision artifact to check inner_loop_requested
+            if let Some(ref snapshot_after) = tick.snapshot_after {
+                if let Ok(Some(artifact)) = inspector.artifact(snapshot_after) {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&artifact.content)
+                    {
+                        if let Some(ilr) = val.get("inner_loop_requested") {
+                            eprintln!("  [diag]   inner_loop_requested: {ilr}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Headless benchmark runner. Boots a Vessel per task, runs the agent,
 /// and extracts metrics.
 pub struct HeadlessRunner;
@@ -470,21 +772,6 @@ impl HeadlessRunner {
         config
     }
 
-    /// Format the benchmark task prompt with workspace context.
-    fn format_task_prompt(workspace_path: &Path, prompt: &str) -> String {
-        format!(
-            "You are working on a benchmark task.\n\
-The ONLY repository you should inspect or modify is this workspace copy:\n\
-{}\n\n\
-Use that workspace as the repo root for all code.* tool paths.\n\
-Do not read or edit similarly named files outside this workspace.\n\
-Verification will run inside this workspace copy, so only changes there count.\n\n\
-Task:\n{}",
-            workspace_path.display(),
-            prompt
-        )
-    }
-
     /// Submit a task prompt to the vessel's inbox as a HumanMessage envelope.
     fn submit_task_prompt(
         inbox: &dyn Inbox,
@@ -492,7 +779,7 @@ Task:\n{}",
         prompt: &str,
         workspace_path: &Path,
     ) -> Result<EnvelopeId, String> {
-        let benchmark_prompt = Self::format_task_prompt(workspace_path, prompt);
+        let benchmark_prompt = format_task_prompt(workspace_path, prompt);
         let artifact = Artifact::new(
             ArtifactKind::Envelope,
             benchmark_prompt.as_bytes().to_vec(),
@@ -521,8 +808,13 @@ Task:\n{}",
     }
 
     /// Poll for task completion by watching tick history.
-    async fn poll_for_completion(vessel: &Vessel, spec: &TaskSpec) -> Result<String, String> {
-        let max_ticks = spec.task.max_ticks;
+    ///
+    /// Accepts `max_ticks` directly so callers without a `TaskSpec` (e.g.
+    /// `SweBenchRunner`) can use this through `inject_and_poll`.
+    pub(crate) async fn poll_for_completion_inner(
+        vessel: &Vessel,
+        max_ticks: Option<u32>,
+    ) -> Result<String, String> {
         let mut last_seen_tick: u64 = 0;
         let poll_interval = std::time::Duration::from_millis(200);
         let inspector = vessel.inspector();
@@ -567,210 +859,6 @@ Task:\n{}",
         }
     }
 
-    /// Extract comprehensive metrics from a completed benchmark run.
-    fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, String> {
-        // tick_history() returns newest-first; reverse to iterate oldest-first
-        // so that step numbering and phase token attribution are chronological.
-        let mut ticks = inspector
-            .tick_history(256)
-            .map_err(|e| format!("failed to read tick history: {e}"))?;
-        ticks.reverse();
-
-        let mut total_steps: u32 = 0;
-        let mut total_tokens_in: u64 = 0;
-        let mut total_tokens_out: u64 = 0;
-        let mut total_cost_cents: f64 = 0.0;
-        let mut total_llm_calls: u32 = 0;
-        let mut tool_calls: HashMap<String, ToolCallStats> = HashMap::new();
-        let mut files_modified: Vec<String> = Vec::new();
-        let mut total_lines_added: u32 = 0;
-        let mut total_lines_removed: u32 = 0;
-        let mut doom_corrections: u32 = 0;
-        let mut model_used = String::new();
-        let mut step_trace: Vec<StepTrace> = Vec::new();
-        let mut tick_details: Vec<TickMetrics> = Vec::new();
-        let mut phase_tokens: HashMap<String, PhaseTokens> = HashMap::new();
-        let mut global_step: u32 = 0;
-
-        for tick in &ticks {
-            if !(tick.phase == TickPhase::Amend && tick.completed_at.is_some()) {
-                continue;
-            }
-
-            let tick_tokens_in: u64 = tick.llm_calls.iter().map(|c| c.tokens_in).sum();
-            let tick_tokens_out: u64 = tick.llm_calls.iter().map(|c| c.tokens_out).sum();
-            let tick_cost: f64 = tick.llm_calls.iter().map(|c| c.cost_cents).sum();
-            let tick_llm_calls = tick.llm_calls.len() as u32;
-
-            total_tokens_in += tick_tokens_in;
-            total_tokens_out += tick_tokens_out;
-            total_cost_cents += tick_cost;
-            total_llm_calls += tick_llm_calls;
-
-            if model_used.is_empty() {
-                if let Some(call) = tick.llm_calls.first() {
-                    model_used = call.model.clone();
-                }
-            }
-
-            // Phase attribution heuristic: LlmCallRecord does not carry a phase tag,
-            // so we infer from position. In a standard PODAARA tick, the first LLM
-            // call is Decide, the last (if >1 total) is Reflect, and everything in
-            // between is DecideLite (inner loop iterations). This is approximate —
-            // multi-turn Decide introspection queries may skew the count.
-            for (i, call) in tick.llm_calls.iter().enumerate() {
-                let phase = if i == 0 {
-                    "decide"
-                } else if i == tick.llm_calls.len() - 1 && tick.llm_calls.len() > 1 {
-                    "reflect"
-                } else {
-                    "decide_lite"
-                };
-                let entry = phase_tokens
-                    .entry(phase.to_string())
-                    .or_insert(PhaseTokens {
-                        tokens_in: 0,
-                        tokens_out: 0,
-                    });
-                entry.tokens_in += call.tokens_in;
-                entry.tokens_out += call.tokens_out;
-            }
-
-            let mut tick_actions_succeeded: u32 = 0;
-            for action in &tick.actions_taken {
-                let entry = tool_calls
-                    .entry(action.action_type.clone())
-                    .or_insert(ToolCallStats {
-                        calls: 0,
-                        successes: 0,
-                        failures: 0,
-                    });
-                entry.calls += 1;
-                match action.outcome {
-                    ActionOutcome::Success => {
-                        entry.successes += 1;
-                        tick_actions_succeeded += 1;
-                    }
-                    _ => {
-                        entry.failures += 1;
-                    }
-                }
-
-                if matches!(
-                    action.action_type.as_str(),
-                    "fs.write" | "code.write" | "code.edit" | "code.apply_patch"
-                ) && !action.target.is_empty()
-                {
-                    files_modified.push(action.target.clone());
-                }
-
-                // Extract lines_added/removed from receipt artifacts (CodeDiff data)
-                if let Some(ref receipt_id) = action.receipt_ref {
-                    if let Ok(Some(receipt)) = inspector.artifact(receipt_id) {
-                        if let Ok(val) =
-                            serde_json::from_slice::<serde_json::Value>(&receipt.content)
-                        {
-                            if let Some(diff) = val.get("diff") {
-                                if let Some(added) =
-                                    diff.get("lines_added").and_then(|v| v.as_u64())
-                                {
-                                    total_lines_added += added as u32;
-                                }
-                                if let Some(removed) =
-                                    diff.get("lines_removed").and_then(|v| v.as_u64())
-                                {
-                                    total_lines_removed += removed as u32;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                global_step += 1;
-                // NOTE: Per-step token attribution is not yet implemented. Token counts
-                // are only available at the tick level (from LlmCallRecord), not per
-                // individual tool call. Step trace tokens are always 0 for now.
-                step_trace.push(StepTrace {
-                    step: global_step,
-                    tick: tick.tick_number as u32,
-                    tool_name: action.action_type.clone(),
-                    tool_params: serde_json::Value::Null,
-                    outcome: format!("{:?}", action.outcome),
-                    output_summary: action.target.clone(),
-                    reasoning: String::new(),
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    latency_ms: 0,
-                });
-            }
-
-            total_steps += tick.actions_taken.len() as u32;
-
-            // Count doom-loop corrections from the tick's decision rationale
-            if let Some(ref rationale) = tick.decision_rationale {
-                let normalized = rationale.to_lowercase();
-                if normalized.contains("doom_loop") || normalized.contains("doom loop") {
-                    doom_corrections += 1;
-                }
-            }
-
-            let tick_duration = tick
-                .completed_at
-                .map(|c| (c - tick.started_at).num_milliseconds() as f64 / 1000.0)
-                .unwrap_or(0.0);
-
-            let tick_reason = tick
-                .decision_rationale
-                .as_deref()
-                .unwrap_or("Unknown")
-                .to_string();
-            tick_details.push(TickMetrics {
-                tick_number: tick.tick_number,
-                duration_secs: tick_duration,
-                inner_loop_steps: tick.actions_taken.len() as u32,
-                llm_calls: tick_llm_calls,
-                tokens_in: tick_tokens_in,
-                tokens_out: tick_tokens_out,
-                actions_taken: tick.actions_taken.len() as u32,
-                actions_succeeded: tick_actions_succeeded,
-                completion_reason: tick_reason,
-            });
-        }
-
-        files_modified.sort();
-        files_modified.dedup();
-
-        let context_utilization = ticks
-            .iter()
-            .find_map(|tick| tick.context_breakdown_ref.as_ref())
-            .and_then(|id| inspector.artifact(id).ok().flatten())
-            .and_then(|artifact| serde_json::from_slice::<CompiledContext>(&artifact.content).ok())
-            .map(compiled_context_to_utilization)
-            .unwrap_or_default();
-
-        Ok(MetricsSnapshot {
-            ticks_used: tick_details.len() as u32,
-            steps_taken: total_steps,
-            tokens: TokenMetrics {
-                total_in: total_tokens_in,
-                total_out: total_tokens_out,
-                total: total_tokens_in + total_tokens_out,
-                by_phase: phase_tokens,
-            },
-            model_used,
-            tool_calls,
-            files_modified,
-            lines_added: total_lines_added,
-            lines_removed: total_lines_removed,
-            doom_loop_corrections: doom_corrections,
-            llm_cost_cents: total_cost_cents,
-            llm_calls: total_llm_calls,
-            step_trace,
-            context_utilization,
-            tick_details,
-        })
-    }
-
     /// Run a single benchmark task end-to-end.
     pub async fn run_task(
         spec: &TaskSpec,
@@ -805,100 +893,23 @@ Task:\n{}",
             .map_err(|e| format!("failed to create bench data dir: {e}"))?;
         let config = Self::build_vessel_config(base_config, spec, workspace_dir.path(), &data_dir);
 
-        let vessel = Vessel::start(config)
-            .await
-            .map_err(|e| format!("vessel boot failed: {e}"))?;
-
-        let artifact_store = vessel.storage().artifact_store().clone();
-        Self::submit_task_prompt(
-            vessel.inbox().as_ref(),
-            artifact_store.as_ref(),
-            &spec.task.prompt,
-            workspace_dir.path(),
-        )?;
+        let vessel = boot_vessel(config).await?;
 
         let timeout = std::time::Duration::from_secs(spec.task.timeout_secs);
-        let poll_result = tokio::time::timeout(timeout, async {
-            Self::poll_for_completion(&vessel, spec).await
-        })
-        .await;
+        let (completion_reason, inspector) = inject_and_poll(
+            &vessel,
+            &spec.task.prompt,
+            workspace_dir.path(),
+            timeout,
+            spec.task.max_ticks,
+        )
+        .await?;
 
-        let completion_reason = match poll_result {
-            Ok(Ok(reason)) => reason,
-            Ok(Err(e)) => format!("PollError: {e}"),
-            Err(_) => "Timeout".to_string(),
-        };
+        log_diagnostics(&inspector);
 
-        let inspector = vessel.inspector();
-
-        // === Diagnostic logging ===
-        // Dump tick details so we can debug agent behavior.
-        if let Ok(ticks) = inspector.tick_history(32) {
-            eprintln!("  [diag] {} tick(s) recorded", ticks.len());
-            for tick in &ticks {
-                let completed = tick.phase == TickPhase::Amend && tick.completed_at.is_some();
-                eprintln!(
-                    "  [diag] tick #{}: phase={:?} completed={} actions={} llm_calls={}",
-                    tick.tick_number,
-                    tick.phase,
-                    completed,
-                    tick.actions_taken.len(),
-                    tick.llm_calls.len(),
-                );
-                if let Some(ref rationale) = tick.decision_rationale {
-                    // Truncate to first 500 chars for readability
-                    let display = if rationale.len() > 500 {
-                        format!("{}...", &rationale[..500])
-                    } else {
-                        rationale.clone()
-                    };
-                    eprintln!("  [diag]   rationale: {display}");
-                }
-                for (i, call) in tick.llm_calls.iter().enumerate() {
-                    eprintln!(
-                        "  [diag]   llm_call[{}]: model={} in={} out={} cost={:.4}c",
-                        i, call.model, call.tokens_in, call.tokens_out, call.cost_cents,
-                    );
-                }
-                for (i, action) in tick.actions_taken.iter().enumerate() {
-                    eprintln!(
-                        "  [diag]   action[{}]: {} -> {} ({:?})",
-                        i, action.action_type, action.target, action.outcome,
-                    );
-                }
-                // Try to read decision artifact to check inner_loop_requested
-                if let Some(ref snapshot_after) = tick.snapshot_after {
-                    if let Ok(Some(artifact)) = inspector.artifact(snapshot_after) {
-                        if let Ok(val) =
-                            serde_json::from_slice::<serde_json::Value>(&artifact.content)
-                        {
-                            if let Some(ilr) = val.get("inner_loop_requested") {
-                                eprintln!("  [diag]   inner_loop_requested: {ilr}");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let metrics = Self::extract_metrics(&inspector).unwrap_or_else(|e| {
+        let metrics = extract_metrics(&inspector).unwrap_or_else(|e| {
             tracing::warn!("metrics extraction failed: {e}");
-            MetricsSnapshot {
-                ticks_used: 0,
-                steps_taken: 0,
-                tokens: TokenMetrics::default(),
-                model_used: String::new(),
-                tool_calls: HashMap::new(),
-                files_modified: vec![],
-                lines_added: 0,
-                lines_removed: 0,
-                doom_loop_corrections: 0,
-                llm_cost_cents: 0.0,
-                llm_calls: 0,
-                step_trace: vec![],
-                context_utilization: ContextUtilization::default(),
-                tick_details: vec![],
-            }
+            MetricsSnapshot::default()
         });
 
         vessel
@@ -975,7 +986,8 @@ Task:\n{}",
     }
 }
 
-struct MetricsSnapshot {
+/// Snapshot of metrics extracted from a completed benchmark run.
+pub struct MetricsSnapshot {
     pub ticks_used: u32,
     pub steps_taken: u32,
     pub tokens: TokenMetrics,
@@ -990,6 +1002,27 @@ struct MetricsSnapshot {
     pub step_trace: Vec<StepTrace>,
     pub context_utilization: ContextUtilization,
     pub tick_details: Vec<TickMetrics>,
+}
+
+impl Default for MetricsSnapshot {
+    fn default() -> Self {
+        Self {
+            ticks_used: 0,
+            steps_taken: 0,
+            tokens: TokenMetrics::default(),
+            model_used: String::new(),
+            tool_calls: HashMap::new(),
+            files_modified: vec![],
+            lines_added: 0,
+            lines_removed: 0,
+            doom_loop_corrections: 0,
+            llm_cost_cents: 0.0,
+            llm_calls: 0,
+            step_trace: vec![],
+            context_utilization: ContextUtilization::default(),
+            tick_details: vec![],
+        }
+    }
 }
 
 fn compiled_context_to_utilization(compiled: CompiledContext) -> ContextUtilization {
@@ -1726,8 +1759,7 @@ command = "true"
 
     #[test]
     fn format_task_prompt_includes_workspace_path() {
-        let prompt =
-            HeadlessRunner::format_task_prompt(Path::new("/tmp/workspace"), "Fix the bug in main.rs");
+        let prompt = format_task_prompt(Path::new("/tmp/workspace"), "Fix the bug in main.rs");
         assert!(prompt.contains("/tmp/workspace"));
         assert!(prompt.contains("Fix the bug in main.rs"));
     }
