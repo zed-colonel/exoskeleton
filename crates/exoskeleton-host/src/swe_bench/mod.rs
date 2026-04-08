@@ -6,6 +6,7 @@
 
 pub mod dataset;
 pub mod eval;
+pub mod repo;
 
 use std::path::PathBuf;
 
