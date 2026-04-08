@@ -229,6 +229,24 @@ enum Commands {
         /// Verbose: stream per-step output during execution.
         #[arg(long)]
         verbose: bool,
+
+        /// LLM provider override (e.g., "anthropic", "openai", "ollama").
+        /// Overrides the config file's frontier/local settings.
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Model name override (e.g., "claude-sonnet-4-20250514", "llama3.2:latest").
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Environment variable name for the API key (e.g., "ANTHROPIC_PLATFORM_API_KEY").
+        #[arg(long)]
+        api_key_env: Option<String>,
+
+        /// Local model endpoint URL (e.g., "http://localhost:11434").
+        /// Implies --provider=ollama if --provider is not set.
+        #[arg(long)]
+        local_endpoint: Option<String>,
     },
 }
 
@@ -317,6 +335,10 @@ async fn main() {
             results_dir,
             dry_run,
             verbose,
+            provider,
+            model,
+            api_key_env,
+            local_endpoint,
         } => {
             commands::bench::run_bench(
                 task,
@@ -327,6 +349,10 @@ async fn main() {
                 results_dir,
                 dry_run,
                 verbose,
+                provider,
+                model,
+                api_key_env,
+                local_endpoint,
             )
             .await
         }
