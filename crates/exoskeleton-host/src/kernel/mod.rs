@@ -559,6 +559,7 @@ pub fn run_tick(
         &act_result,
         &reflection,
         context_breakdown_ref,
+        inner_loop_completion.as_ref(),
     );
 
     // Record success/failure for consecutive failure tracking (Sprint 9)

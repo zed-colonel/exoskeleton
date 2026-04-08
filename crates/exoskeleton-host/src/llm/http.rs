@@ -65,6 +65,39 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+fn effective_stream(request: &LlmRequest) -> bool {
+    request.stream && request.tools.is_empty()
+}
+
+fn encode_anthropic_tool_name(name: &str) -> String {
+    let mut encoded = String::from("tool_");
+    for byte in name.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn decode_anthropic_tool_name(name: &str) -> String {
+    let Some(hex) = name.strip_prefix("tool_") else {
+        return name.to_string();
+    };
+    if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return name.to_string();
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        let pair = &hex[i..i + 2];
+        let Ok(byte) = u8::from_str_radix(pair, 16) else {
+            return name.to_string();
+        };
+        bytes.push(byte);
+    }
+
+    String::from_utf8(bytes).unwrap_or_else(|_| name.to_string())
+}
+
 fn request_text_len(request: &LlmRequest) -> usize {
     request.messages.iter().map(message_text_len).sum::<usize>()
         + request.system_prompt.as_deref().map_or(0, str::len)
@@ -309,7 +342,7 @@ impl OpenAiCompatBackend {
             } else {
                 Some(request.stop_sequences.clone())
             },
-            stream: request.stream,
+            stream: effective_stream(request),
             tools: if request.tools.is_empty() {
                 None
             } else {
@@ -822,7 +855,7 @@ impl AnthropicBackend {
             } else {
                 Some(request.stop_sequences.clone())
             },
-            stream: request.stream,
+            stream: effective_stream(request),
             tools: if request.tools.is_empty() {
                 None
             } else {
@@ -831,7 +864,7 @@ impl AnthropicBackend {
                         .tools
                         .iter()
                         .map(|tool| AnthropicToolDefinition {
-                            name: tool.name.clone(),
+                            name: encode_anthropic_tool_name(&tool.name),
                             description: tool.description.clone(),
                             input_schema: tool.input_schema.clone(),
                         })
@@ -929,7 +962,7 @@ fn anthropic_content_from_blocks(blocks: &[ContentBlock]) -> AnthropicContent {
                     }
                     ContentBlock::ToolUse { id, name, input } => AnthropicContentBlock::ToolUse {
                         id: id.clone(),
-                        name: name.clone(),
+                        name: encode_anthropic_tool_name(name),
                         input: input.clone(),
                     },
                     ContentBlock::ToolResult {
@@ -953,7 +986,11 @@ fn parse_anthropic_response_blocks(blocks: Vec<AnthropicContentBlock>) -> Vec<Co
         .map(|block| match block {
             AnthropicContentBlock::Text { text } => ContentBlock::Text { text },
             AnthropicContentBlock::ToolUse { id, name, input } => {
-                ContentBlock::ToolUse { id, name, input }
+                ContentBlock::ToolUse {
+                    id,
+                    name: decode_anthropic_tool_name(&name),
+                    input,
+                }
             }
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
@@ -1022,8 +1059,14 @@ impl LlmHttpBackend for AnthropicBackend {
             )));
         }
 
-        let parsed: AnthropicResponse = block_on(response.json())
-            .map_err(|e| ExoError::LlmInvocation(format!("malformed response body: {e}")))?;
+        let response_text = block_on(response.text())
+            .map_err(|e| ExoError::LlmInvocation(format!("failed to read response body: {e}")))?;
+        let parsed: AnthropicResponse = serde_json::from_str(&response_text).map_err(|e| {
+            let snippet: String = response_text.chars().take(600).collect();
+            ExoError::LlmInvocation(format!(
+                "malformed response body: {e}; body={snippet}"
+            ))
+        })?;
 
         let content_blocks = parse_anthropic_response_blocks(parsed.content);
 
@@ -1973,7 +2016,7 @@ mod tests {
     #[test]
     fn anthropic_tool_definition_serialization() {
         let tool_def = AnthropicToolDefinition {
-            name: "code.read".into(),
+            name: encode_anthropic_tool_name("code.read"),
             description: "Read a file".into(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1982,9 +2025,31 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&tool_def).unwrap();
-        assert!(json.contains("\"name\":\"code.read\""));
+        assert!(json.contains("\"name\":\"tool_636f64652e72656164\""));
         assert!(json.contains("\"input_schema\""));
         assert!(json.contains("\"description\":\"Read a file\""));
+    }
+
+    #[test]
+    fn anthropic_tool_name_roundtrip_preserves_canonical_name() {
+        let encoded = encode_anthropic_tool_name("agent.ask_user");
+        assert_eq!(encoded, "tool_6167656e742e61736b5f75736572");
+        assert_eq!(decode_anthropic_tool_name(&encoded), "agent.ask_user");
+        assert_eq!(decode_anthropic_tool_name("update_plan"), "update_plan");
+    }
+
+    #[test]
+    fn parse_anthropic_response_blocks_decodes_tool_names() {
+        let blocks = parse_anthropic_response_blocks(vec![AnthropicContentBlock::ToolUse {
+            id: "toolu_01ABC".into(),
+            name: encode_anthropic_tool_name("code.read"),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+        }]);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::ToolUse { id, name, input }
+                if id == "toolu_01ABC" && name == "code.read" && input["file_path"] == "src/lib.rs"
+        ));
     }
 
     #[test]
@@ -2073,5 +2138,54 @@ mod tests {
         assert!(json.contains("\"type\":\"function\""));
         assert!(json.contains("\"name\":\"code.read\""));
         assert!(json.contains("\"parameters\""));
+    }
+
+    #[test]
+    fn anthropic_request_disables_streaming_when_tools_present() {
+        let backend = AnthropicBackend::new(
+            "https://api.anthropic.com".into(),
+            "claude-sonnet-4-20250514".into(),
+            "test-key".into(),
+        );
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("test".into()),
+            messages: vec![exoskeleton_core::llm::LlmMessage::text(LlmRole::User, "hello")],
+            max_output_tokens: 256,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: true,
+            tools: vec![ToolDefinition {
+                name: "code.read".into(),
+                description: "Read a file".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        };
+
+        let body = backend.build_request_body(&request);
+        assert!(!body.stream);
+    }
+
+    #[test]
+    fn openai_request_disables_streaming_when_tools_present() {
+        let backend =
+            OpenAiCompatBackend::new("https://api.openai.com".into(), "gpt-4o".into(), None);
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some("test".into()),
+            messages: vec![exoskeleton_core::llm::LlmMessage::text(LlmRole::User, "hello")],
+            max_output_tokens: 256,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: true,
+            tools: vec![ToolDefinition {
+                name: "code.read".into(),
+                description: "Read a file".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        };
+
+        let body = backend.build_request_body(&request);
+        assert!(!body.stream);
     }
 }

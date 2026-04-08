@@ -33,7 +33,7 @@ timeout_secs = 120
 # --- Inner Loop ---
 [inner_loop]
 enabled = true
-max_steps_per_tick = 25
+max_steps_per_tick = 35
 max_tokens_per_session = 500000
 timeout_secs = 300
 context_window_size = 3
@@ -53,5 +53,5 @@ threat_monitor_enabled = false
 meta_cognition_enabled = false
 creative_synthesis_enabled = false
 initiative_enabled = false
-self_critique_enabled = true
-memory_consolidation_enabled = true
+self_critique_enabled = false
+memory_consolidation_enabled = false

@@ -19,6 +19,7 @@ use crate::config::VesselConfig;
 use crate::inspect::VesselInspector;
 use crate::kernel::policy::{PolicyRule, ToolPolicyConfig};
 use crate::vessel::Vessel;
+use crate::budget::session::SessionCompletionReason;
 
 /// A benchmark task specification parsed from TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,11 +362,57 @@ pub fn prepare_workspace(repo_path: &Path) -> Result<tempfile::TempDir, std::io:
     Ok(temp_dir)
 }
 
+struct CurrentDirGuard {
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn enter(path: &Path) -> Result<Self, String> {
+        let previous = std::env::current_dir()
+            .map_err(|e| format!("failed to read current directory: {e}"))?;
+        std::env::set_current_dir(path)
+            .map_err(|e| format!("failed to enter workspace {}: {e}", path.display()))?;
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        if let Err(e) = std::env::set_current_dir(&self.previous) {
+            tracing::warn!(
+                error = %e,
+                path = %self.previous.display(),
+                "failed to restore current directory after benchmark task"
+            );
+        }
+    }
+}
+
 /// Headless benchmark runner. Boots a Vessel per task, runs the agent,
 /// and extracts metrics.
 pub struct HeadlessRunner;
 
 impl HeadlessRunner {
+    fn completion_reason_from_rationale(rationale: &str) -> Option<&'static str> {
+        let normalized = rationale.to_lowercase();
+        let known = [
+            (SessionCompletionReason::AgentComplete.to_string(), "AgentComplete"),
+            (SessionCompletionReason::StepLimit.to_string(), "StepLimit"),
+            (SessionCompletionReason::TokenBudget.to_string(), "TokenBudget"),
+            (SessionCompletionReason::Timeout.to_string(), "InnerLoopTimeout"),
+            (SessionCompletionReason::DoomLoop.to_string(), "DoomLoop"),
+            (SessionCompletionReason::Cancelled.to_string(), "Cancelled"),
+            (
+                SessionCompletionReason::AwaitingInput.to_string(),
+                "AwaitingInput",
+            ),
+        ];
+
+        known
+            .iter()
+            .find_map(|(needle, result)| normalized.contains(needle).then_some(*result))
+    }
+
     /// Build a VesselConfig for a benchmark task by merging the base config
     /// with task-specific and forced overrides.
     pub fn build_vessel_config(
@@ -411,10 +458,22 @@ impl HeadlessRunner {
         inbox: &dyn Inbox,
         artifact_store: &dyn ArtifactStore,
         prompt: &str,
+        workspace_path: &Path,
     ) -> Result<EnvelopeId, String> {
+        let benchmark_prompt = format!(
+            "You are working on a benchmark task.\n\
+The ONLY repository you should inspect or modify is this workspace copy:\n\
+{}\n\n\
+Use that workspace as the repo root for all code.* tool paths.\n\
+Do not read or edit similarly named files outside this workspace.\n\
+Verification will run inside this workspace copy, so only changes there count.\n\n\
+Task:\n{}",
+            workspace_path.display(),
+            prompt
+        );
         let artifact = Artifact::new(
             ArtifactKind::Envelope,
-            prompt.as_bytes().to_vec(),
+            benchmark_prompt.as_bytes().to_vec(),
             "text/plain".to_string(),
         );
         let artifact_id = artifact.id.clone();
@@ -478,23 +537,9 @@ impl HeadlessRunner {
                 }
 
                 if let Some(rationale) = tick.decision_rationale.as_deref() {
-                    let normalized = rationale.to_lowercase();
-                    if normalized.contains("agent_complete") {
-                        return Ok("AgentComplete".to_string());
+                    if let Some(reason) = Self::completion_reason_from_rationale(rationale) {
+                        return Ok(reason.to_string());
                     }
-                    if normalized.contains("step_limit") {
-                        return Ok("StepLimit".to_string());
-                    }
-                    if normalized.contains("doom_loop") {
-                        return Ok("DoomLoop".to_string());
-                    }
-                    if normalized.contains("awaiting_input") {
-                        return Ok("AwaitingInput".to_string());
-                    }
-                }
-
-                if tick.actions_taken.is_empty() {
-                    return Ok("AgentComplete".to_string());
                 }
             }
         }
@@ -714,6 +759,7 @@ impl HeadlessRunner {
         }
         let workspace_dir = prepare_workspace(&repo_path)
             .map_err(|e| format!("workspace preparation failed: {e}"))?;
+        let _cwd_guard = CurrentDirGuard::enter(workspace_dir.path())?;
 
         if let Some(commit) = spec.task.base_commit.as_deref() {
             let output = std::process::Command::new("git")
@@ -743,6 +789,7 @@ impl HeadlessRunner {
             vessel.inbox().as_ref(),
             artifact_store.as_ref(),
             &spec.task.prompt,
+            workspace_dir.path(),
         )?;
 
         let timeout = std::time::Duration::from_secs(spec.task.timeout_secs);
@@ -1630,6 +1677,34 @@ command = "true"
 
         let util = compiled_context_to_utilization(compiled);
         assert_eq!(util.utilization_pct, 0.0);
+    }
+
+    #[test]
+    fn completion_reason_from_rationale_detects_known_inner_loop_reasons() {
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_rationale(
+                "Finished work\n\n[completion: agent_complete]"
+            ),
+            Some("AgentComplete")
+        );
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_rationale("notes [completion: step_limit]"),
+            Some("StepLimit")
+        );
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_rationale(
+                "waiting for user [completion: awaiting_input]"
+            ),
+            Some("AwaitingInput")
+        );
+    }
+
+    #[test]
+    fn completion_reason_from_rationale_ignores_plain_reasoning() {
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_rationale("The task is done."),
+            None
+        );
     }
 
     fn make_task_result(

@@ -16,6 +16,9 @@ You have access to code tools for reading, searching, editing, and writing files
 - Check .gitignore compliance — tools enforce this automatically
 - Run tests after making changes to verify correctness
 - Review diffs in tool output to confirm changes are as intended
+- Work only inside the active task workspace or repo root provided in context
+- Treat files outside that workspace as out of scope unless explicitly requested
+- After the requested change is verified, stop instead of continuing exploratory reads or searches
 
 ### Plan Awareness
 {{plan_section}}

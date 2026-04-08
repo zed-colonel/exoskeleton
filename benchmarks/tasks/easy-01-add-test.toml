@@ -7,6 +7,7 @@ The test should be called test_parse_config_no_spaces and verify
 that parse_config_line("key=value") returns Some(("key", "value"))."""
 timeout_secs = 300
 max_steps = 25
+max_ticks = 5
 
 [verify]
 command = "grep -q 'test_parse_config_no_spaces' src/lib.rs && cargo test test_parse_config_no_spaces --lib"

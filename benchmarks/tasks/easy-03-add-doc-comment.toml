@@ -6,6 +6,7 @@ as a utility library for configuration parsing, math helpers, and
 string formatting. The doc comment should use //! syntax at the top of the file."""
 timeout_secs = 300
 max_steps = 15
+max_ticks = 5
 
 [verify]
 command = "head -1 src/lib.rs | grep -q '//!'"

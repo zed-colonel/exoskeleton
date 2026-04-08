@@ -23,10 +23,30 @@ use exoskeleton_memory::approximate_token_count;
 use exoskeleton_threads::builtin::memory_consolidation;
 use exoskeleton_threads::MEMORY_CONSOLIDATION_ID;
 
+use crate::budget::session::SessionCompletionReason;
 use super::types::{
     ActResult, AlignmentResult, DecisionResult, PerceptionResult, ReflectionResult,
 };
 use super::KernelContext;
+
+/// Format the decision rationale for the tick record.
+///
+/// When an inner loop completion reason is present, append it to the rationale
+/// so that the benchmark harness's `poll_for_completion` can detect completion
+/// by searching for known strings (e.g., "agent_complete", "step_limit").
+///
+/// CONTRACT: `poll_for_completion` in benchmark.rs searches `decision_rationale`
+/// for `SessionCompletionReason` Display strings. If those Display strings change
+/// (in budget/session.rs), update the poll detection logic too.
+fn format_decision_rationale(
+    reasoning: &str,
+    inner_loop_completion: Option<&SessionCompletionReason>,
+) -> String {
+    match inner_loop_completion {
+        Some(reason) => format!("{reasoning}\n\n[completion: {reason}]"),
+        None => reasoning.to_string(),
+    }
+}
 
 /// Execute the Amend step.
 ///
@@ -50,6 +70,7 @@ pub fn amend(
     act_result: &ActResult,
     reflection: &ReflectionResult,
     context_breakdown_ref: Option<ArtifactId>,
+    inner_loop_completion: Option<&SessionCompletionReason>,
 ) -> Result<HandlerOutput, ExoError> {
     // 1. Build new snapshot from old + SnapshotDelta
     let mut new_snapshot = snapshot_before.clone();
@@ -335,7 +356,10 @@ pub fn amend(
             }
             calls
         },
-        decision_rationale: Some(decision.reasoning.clone()),
+        decision_rationale: Some(format_decision_rationale(
+            &decision.reasoning,
+            inner_loop_completion,
+        )),
         context_breakdown_ref,
     };
 
@@ -704,6 +728,28 @@ mod tests {
     // ── T-9 Tests: Amend Step ──
 
     #[test]
+    fn tick_record_includes_inner_loop_completion_in_rationale() {
+        let rationale = format_decision_rationale(
+            "The task is done",
+            Some(&crate::budget::session::SessionCompletionReason::AgentComplete),
+        );
+        assert!(
+            rationale.contains("agent_complete"),
+            "rationale should contain completion reason"
+        );
+        assert!(
+            rationale.contains("The task is done"),
+            "rationale should contain original reasoning"
+        );
+    }
+
+    #[test]
+    fn tick_record_rationale_without_inner_loop_is_just_reasoning() {
+        let rationale = format_decision_rationale("Simple reasoning", None);
+        assert_eq!(rationale, "Simple reasoning");
+    }
+
+    #[test]
     fn amend_increments_tick_number() {
         let dir = tempfile::tempdir().unwrap();
         let (kernel, _inbox) = test_kernel(dir.path());
@@ -726,6 +772,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -759,6 +806,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -796,6 +844,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -826,6 +875,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -863,6 +913,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -898,6 +949,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -943,6 +995,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -998,6 +1051,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1040,6 +1094,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1073,6 +1128,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -1139,6 +1195,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1201,6 +1258,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -1272,6 +1330,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1329,6 +1388,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1359,6 +1419,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -1436,6 +1497,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1497,6 +1559,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1556,6 +1619,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1595,6 +1659,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -1648,6 +1713,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1682,6 +1748,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();
@@ -1734,6 +1801,7 @@ mod tests {
             &act_result,
             &reflection,
             None,
+            None,
         )
         .unwrap();
 
@@ -1771,6 +1839,7 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
+            None,
             None,
         )
         .unwrap();

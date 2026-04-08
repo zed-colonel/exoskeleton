@@ -25,6 +25,8 @@ Use native tool calls instead of JSON blobs.
 - Use introspection tools when you need to inspect vessel state before committing to external actions.
 - Use external WI and virtual tools when work must cross the I9 boundary.
 - Assistant text is treated as reasoning. Keep it concise and operational.
+- If the task prompt identifies a workspace or repo root, treat that path as the only in-scope codebase.
+- Do not inspect or modify similarly named files outside the active task workspace unless the user explicitly asks.
 
 ## Interactive Tools
 
