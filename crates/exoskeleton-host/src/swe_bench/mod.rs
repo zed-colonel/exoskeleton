@@ -4,6 +4,7 @@
 //! (43 Rust tasks from 7 repos). Tasks are fetched from HuggingFace, repos are
 //! cached as bare clones, and each instance gets an isolated git worktree.
 
+pub mod dataset;
 pub mod eval;
 
 use std::path::PathBuf;
