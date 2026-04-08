@@ -22,9 +22,11 @@ use exoskeleton_core::RelationshipSnapshot;
 use exoskeleton_core::{DiffSummary, EventType, ExoError, LiveEvent, RelationshipRecord};
 use super::types::{
     ActionExecution, DecisionResult, OrientationResult, PerceptionResult, PlannedAction,
-    SnapshotDelta,
 };
-use super::tools::{build_inner_loop_tools, is_cognitive_tool, process_cognitive_tool};
+use super::tools::{
+    accumulate_cognitive_outcome, build_inner_loop_tools, is_cognitive_tool, process_cognitive_tool,
+    CognitiveAccumulator,
+};
 use super::{act, align, diff_tracker::DiffTracker, KernelContext};
 use crate::budget::session::{
     DoomLoopStatus, SessionBudget, SessionBudgetCheck, SessionCompletionReason,
@@ -340,7 +342,7 @@ fn decide_lite(
     let start = previous_executions.len().saturating_sub(window_size);
     let windowed = &previous_executions[start..];
 
-    for execution in windowed {
+    for (i, execution) in windowed.iter().enumerate() {
         messages.push(LlmMessage {
             role: LlmRole::Assistant,
             content: assistant_blocks_for_action(&execution.action),
@@ -349,9 +351,7 @@ fn decide_lite(
             role: LlmRole::User,
             content: user_blocks_for_tool_result(
                 execution.tool_result.clone(),
-                correction_message.filter(|_| {
-                    std::ptr::eq(execution, windowed.last().unwrap_or(execution))
-                }),
+                correction_message.filter(|_| i == windowed.len() - 1),
             ),
         });
     }
@@ -366,7 +366,7 @@ fn decide_lite(
     let tools = build_inner_loop_tools(kernel);
     let mut llm_records = Vec::new();
     let mut last_artifact_id = None;
-    let mut accumulator = LiteDecisionAccumulator::default();
+    let mut accumulator = CognitiveAccumulator::default();
 
     for _ in 0..kernel.max_decide_turns {
         let request = LlmRequest {
@@ -422,6 +422,9 @@ fn decide_lite(
         llm_call_record,
         response_artifact_id: artifact_id,
         watch_proposals: accumulator.watch_proposals,
+        // Always false for DecideLite — the inner loop is already running, so
+        // re-requesting it is meaningless. Loop continuation is controlled by
+        // the run_inner_loop() caller checking actions.is_empty() instead.
         inner_loop_requested: false,
         vessel_mode_request: accumulator.vessel_mode_request,
     })
@@ -503,21 +506,9 @@ fn build_doom_loop_correction(tool: &str, count: u32, last_error: Option<&str>) 
     )
 }
 
-/// Parse a DecideLite response into a DecisionResult.
-#[derive(Default)]
-struct LiteDecisionAccumulator {
-    reasoning_parts: Vec<String>,
-    reply: Option<String>,
-    actions: Vec<PlannedAction>,
-    snapshot_delta: SnapshotDelta,
-    memory_notes: Vec<String>,
-    watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
-    vessel_mode_request: Option<exoskeleton_core::VesselMode>,
-}
-
 fn accumulate_lite_response(
     response: &exoskeleton_core::llm::LlmResponse,
-    accumulator: &mut LiteDecisionAccumulator,
+    accumulator: &mut CognitiveAccumulator,
 ) -> Vec<ContentBlock> {
     let mut inline_tool_results = Vec::new();
     let response_text = response.text();
@@ -530,28 +521,7 @@ fn accumulate_lite_response(
             if is_cognitive_tool(name) {
                 match process_cognitive_tool(name, input) {
                     Ok(result) => {
-                        if let Some(plan_update) = result.plan_update {
-                            accumulator.snapshot_delta.plan_update = Some(plan_update);
-                        }
-                        if !result.working_memory_ops.is_empty() {
-                            accumulator
-                                .snapshot_delta
-                                .working_memory_ops
-                                .get_or_insert_with(Vec::new)
-                                .extend(result.working_memory_ops);
-                        }
-                        if let Some(note) = result.memory_note {
-                            accumulator.memory_notes.push(note);
-                        }
-                        if let Some(watch) = result.watch_proposal {
-                            accumulator.watch_proposals.push(watch);
-                        }
-                        if let Some(mode) = result.vessel_mode_request {
-                            accumulator.vessel_mode_request = Some(mode);
-                        }
-                        if let Some(message) = result.reply {
-                            accumulator.reply = Some(message);
-                        }
+                        accumulate_cognitive_outcome(accumulator, result);
                         inline_tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: "ok".into(),

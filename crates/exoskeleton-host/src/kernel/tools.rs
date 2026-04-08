@@ -157,8 +157,14 @@ pub fn cognitive_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "name": { "type": "string" },
                     "description": { "type": "string" },
-                    "watch_type": { "type": "object" },
-                    "schedule": { "type": "object" }
+                    "watch_type": {
+                        "type": "object",
+                        "description": "Tagged watch type (field \"type\" selects variant). Threshold example: {\"type\": \"threshold\", \"metric\": {\"metric\": \"budget_remaining\", \"dimension\": \"frontier_tokens\"}, \"condition\": {\"op\": \"below\", \"value\": 100}}. Poll example: {\"type\": \"poll\", \"connector\": \"http.request\", \"params\": {\"url\": \"https://example.com/health\"}, \"extract\": \"status\", \"condition\": {\"op\": \"above\", \"value\": 500}}. Metric variants: trust_level (principal_id), budget_remaining (dimension), consecutive_failures, tick_duration, event_count (event_type, lookback_ticks). Condition ops: above (value), below (value), changed."
+                    },
+                    "schedule": {
+                        "type": "object",
+                        "description": "Tagged schedule (field \"type\" selects variant). Examples: {\"type\": \"every_n_ticks\", \"n\": 5} or {\"type\": \"once\"}."
+                    }
                 }
             }),
         },
@@ -376,6 +382,50 @@ pub fn process_cognitive_tool(name: &str, input: &Value) -> Result<CognitiveTool
     }
 }
 
+/// Shared accumulator state for cognitive tool results.
+///
+/// Used by both Decide (full) and DecideLite (inner loop) to avoid duplicating
+/// the cognitive outcome folding logic.
+#[derive(Default)]
+pub struct CognitiveAccumulator {
+    pub reasoning_parts: Vec<String>,
+    pub reply: Option<String>,
+    pub actions: Vec<super::types::PlannedAction>,
+    pub snapshot_delta: super::types::SnapshotDelta,
+    pub memory_notes: Vec<String>,
+    pub watch_proposals: Vec<WatchProposal>,
+    pub vessel_mode_request: Option<VesselMode>,
+}
+
+/// Fold a single cognitive tool result into the shared accumulator.
+pub fn accumulate_cognitive_outcome(
+    accumulator: &mut CognitiveAccumulator,
+    result: CognitiveToolResult,
+) {
+    if let Some(plan_update) = result.plan_update {
+        accumulator.snapshot_delta.plan_update = Some(plan_update);
+    }
+    if !result.working_memory_ops.is_empty() {
+        accumulator
+            .snapshot_delta
+            .working_memory_ops
+            .get_or_insert_with(Vec::new)
+            .extend(result.working_memory_ops);
+    }
+    if let Some(note) = result.memory_note {
+        accumulator.memory_notes.push(note);
+    }
+    if let Some(watch) = result.watch_proposal {
+        accumulator.watch_proposals.push(watch);
+    }
+    if let Some(mode) = result.vessel_mode_request {
+        accumulator.vessel_mode_request = Some(mode);
+    }
+    if let Some(message) = result.reply {
+        accumulator.reply = Some(message);
+    }
+}
+
 pub fn build_decide_tools(kernel: &KernelContext) -> Vec<ToolDefinition> {
     let mut tools = connector_tool_definitions(kernel);
     tools.extend(
@@ -511,6 +561,22 @@ mod tests {
     }
 
     #[test]
+    fn introspection_tool_to_query_memory_search_with_tags() {
+        let q = introspection_tool_to_query(
+            "introspect_memory_search",
+            &json!({"topic": "deployment", "tags": ["ops", "infra"]}),
+        )
+        .unwrap();
+        match q {
+            exoskeleton_core::introspection::IntrospectionQuery::MemorySearch { topic, tags } => {
+                assert_eq!(topic, Some("deployment".into()));
+                assert_eq!(tags, Some(vec!["ops".into(), "infra".into()]));
+            }
+            other => panic!("expected MemorySearch, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn process_cognitive_tool_reply_to_user() {
         let result = process_cognitive_tool("reply_to_user", &json!({"message": "hi"})).unwrap();
         assert_eq!(result.reply.as_deref(), Some("hi"));
@@ -524,5 +590,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.working_memory_ops.len(), 1);
+    }
+
+    #[test]
+    fn process_cognitive_tool_update_plan_patch() {
+        let task_id = "00000000-0000-0000-0000-000000000001";
+        let input = json!({
+            "type": "patch",
+            "operations": [
+                {"op": "update_status", "task_id": task_id, "new_status": "completed"}
+            ]
+        });
+        let result = process_cognitive_tool("update_plan", &input).unwrap();
+        match result.plan_update {
+            Some(exoskeleton_core::plan::PlanUpdate::Patch { operations }) => {
+                assert_eq!(operations.len(), 1);
+            }
+            other => panic!("expected PlanUpdate::Patch, got: {other:?}"),
+        }
     }
 }

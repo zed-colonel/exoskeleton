@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::conversation::InMemoryConversationStore;
-use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmResponse, StopReason};
+use exoskeleton_core::llm::LlmBackend;
 use exoskeleton_core::{ArtifactStore, EventType, LiveEvent, PromptRegistry, VesselId};
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
 use exoskeleton_host::config::InnerLoopConfig;
@@ -43,75 +43,7 @@ const DECISION_INNER_LOOP_WITH_ACTION: &str = r#"{"reasoning":"Coding task","inn
 const DECISION_INNER_LOOP_NO_ACTIONS: &str =
     r#"{"reasoning":"Done coding","inner_loop_requested":true,"actions":[],"memory_notes":[]}"#;
 
-/// Build a mock LlmResponse, upgrading legacy JSON fixtures into content blocks.
-fn mock_llm_response(content: &str) -> LlmResponse {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
-        let reasoning = value
-            .get("reasoning")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let actions = value
-            .get("actions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let memory_notes = value
-            .get("memory_notes")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut content_blocks = Vec::new();
-        if !reasoning.is_empty() {
-            content_blocks.push(ContentBlock::Text { text: reasoning });
-        }
-        for (idx, note) in memory_notes.iter().enumerate() {
-            if let Some(note) = note.as_str() {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: format!("memory_note_{idx}"),
-                    name: "save_memory_note".into(),
-                    input: serde_json::json!({ "note": note }),
-                });
-            }
-        }
-        for (idx, action) in actions.iter().enumerate() {
-            content_blocks.push(ContentBlock::ToolUse {
-                id: format!("call_{idx}"),
-                name: action["tool_name"].as_str().unwrap_or("unknown").to_string(),
-                input: action["params"].clone(),
-            });
-        }
-
-        return LlmResponse {
-            content_blocks,
-            model: "mock-model".into(),
-            tokens_in: 100,
-            tokens_out: 50,
-            latency_ms: 10,
-            stop_reason: if actions.is_empty() {
-                StopReason::EndTurn
-            } else {
-                StopReason::ToolUse
-            },
-            cost_estimate_cents: None,
-            backend: LlmBackend::Local,
-        };
-    }
-
-    LlmResponse {
-        content_blocks: vec![ContentBlock::Text {
-            text: content.to_string(),
-        }],
-        model: "mock-model".into(),
-        tokens_in: 100,
-        tokens_out: 50,
-        latency_ms: 10,
-        stop_reason: StopReason::EndTurn,
-        cost_estimate_cents: None,
-        backend: LlmBackend::Local,
-    }
-}
+use common::mock_llm_response;
 
 /// Clone a KernelContext for sending to a blocking thread.
 fn send_kernel(kernel: &KernelContext) -> KernelContext {

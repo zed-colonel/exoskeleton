@@ -14,24 +14,13 @@ use exoskeleton_core::{Artifact, ArtifactKind, ArtifactId, ExoError};
 use serde_json::json;
 
 use super::tools::{
-    build_decide_tools, introspection_tool_to_query, is_cognitive_tool, is_introspection_tool,
-    process_cognitive_tool,
+    accumulate_cognitive_outcome, build_decide_tools, introspection_tool_to_query,
+    is_cognitive_tool, is_introspection_tool, process_cognitive_tool, CognitiveAccumulator,
 };
-use super::types::{DecisionResult, OrientationResult, PlannedAction, SnapshotDelta};
+use super::types::{DecisionResult, OrientationResult, PlannedAction};
 use super::KernelContext;
 use crate::cognitive_engine::CognitiveHandler;
 use crate::introspection::IntrospectionService;
-
-#[derive(Default)]
-struct DecisionAccumulator {
-    reasoning_parts: Vec<String>,
-    reply: Option<String>,
-    actions: Vec<PlannedAction>,
-    snapshot_delta: SnapshotDelta,
-    memory_notes: Vec<String>,
-    watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
-    vessel_mode_request: Option<exoskeleton_core::VesselMode>,
-}
 
 /// Execute the Decide step using native tool_use / function-calling.
 pub fn decide(
@@ -57,7 +46,7 @@ pub fn decide(
         orientation.compiled_context.prompt.clone(),
     )];
     let mut llm_records = Vec::new();
-    let mut accumulator = DecisionAccumulator::default();
+    let mut accumulator = CognitiveAccumulator::default();
     let mut last_response_artifact_id: Option<ArtifactId> = None;
 
     for turn in 0..max_turns {
@@ -143,6 +132,10 @@ pub fn decide(
         }
 
         if has_external_actions {
+            // When the LLM emits both cognitive and WI tools in a single turn, we break
+            // immediately to pass WI actions to the Act step. The cognitive "ok" acknowledgments
+            // are accumulated in messages but never sent back — this is intentional because the
+            // Decide loop is ending and the inner loop (if activated) takes over from here.
             break;
         }
 
@@ -194,32 +187,11 @@ fn resolve_cognitive_tool(
     name: &str,
     input: &serde_json::Value,
     call_id: &str,
-    accumulator: &mut DecisionAccumulator,
+    accumulator: &mut CognitiveAccumulator,
 ) -> Result<ContentBlock, ExoError> {
     match process_cognitive_tool(name, input) {
         Ok(result) => {
-            if let Some(plan_update) = result.plan_update {
-                accumulator.snapshot_delta.plan_update = Some(plan_update);
-            }
-            if !result.working_memory_ops.is_empty() {
-                accumulator
-                    .snapshot_delta
-                    .working_memory_ops
-                    .get_or_insert_with(Vec::new)
-                    .extend(result.working_memory_ops);
-            }
-            if let Some(note) = result.memory_note {
-                accumulator.memory_notes.push(note);
-            }
-            if let Some(watch) = result.watch_proposal {
-                accumulator.watch_proposals.push(watch);
-            }
-            if let Some(mode) = result.vessel_mode_request {
-                accumulator.vessel_mode_request = Some(mode);
-            }
-            if let Some(reply) = result.reply {
-                accumulator.reply = Some(reply);
-            }
+            accumulate_cognitive_outcome(accumulator, result);
             Ok(ContentBlock::ToolResult {
                 tool_use_id: call_id.to_string(),
                 content: "ok".into(),
@@ -245,7 +217,7 @@ fn action_rationale(reasoning: &str, tool_name: &str) -> String {
 
 fn build_decision_result(
     kernel: &KernelContext,
-    accumulator: DecisionAccumulator,
+    accumulator: CognitiveAccumulator,
     llm_records: Vec<LlmCallRecord>,
     response_artifact_id: ArtifactId,
 ) -> Result<DecisionResult, ExoError> {

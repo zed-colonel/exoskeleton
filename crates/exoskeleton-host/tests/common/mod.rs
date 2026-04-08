@@ -117,6 +117,80 @@ pub fn test_llm_request() -> LlmRequest {
     }
 }
 
+/// Build a mock LlmResponse, upgrading legacy JSON fixtures into content blocks.
+///
+/// Accepts either raw text (returned as a single Text block) or a JSON string
+/// with `reasoning`, `actions`, and `memory_notes` fields. Actions become
+/// ToolUse blocks; memory notes become `save_memory_note` ToolUse blocks.
+pub fn mock_llm_response(content: &str) -> LlmResponse {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        let reasoning = value
+            .get("reasoning")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let actions = value
+            .get("actions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let memory_notes = value
+            .get("memory_notes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut content_blocks = Vec::new();
+        if !reasoning.is_empty() {
+            content_blocks.push(ContentBlock::Text { text: reasoning });
+        }
+        for (idx, note) in memory_notes.iter().enumerate() {
+            if let Some(note) = note.as_str() {
+                content_blocks.push(ContentBlock::ToolUse {
+                    id: format!("memory_note_{idx}"),
+                    name: "save_memory_note".into(),
+                    input: serde_json::json!({ "note": note }),
+                });
+            }
+        }
+        for (idx, action) in actions.iter().enumerate() {
+            content_blocks.push(ContentBlock::ToolUse {
+                id: format!("call_{idx}"),
+                name: action["tool_name"].as_str().unwrap_or("unknown").to_string(),
+                input: action["params"].clone(),
+            });
+        }
+
+        return LlmResponse {
+            content_blocks,
+            model: "mock-model".into(),
+            tokens_in: 100,
+            tokens_out: 50,
+            latency_ms: 10,
+            stop_reason: if actions.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolUse
+            },
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        };
+    }
+
+    LlmResponse {
+        content_blocks: vec![ContentBlock::Text {
+            text: content.to_string(),
+        }],
+        model: "mock-model".into(),
+        tokens_in: 100,
+        tokens_out: 50,
+        latency_ms: 10,
+        stop_reason: StopReason::EndTurn,
+        cost_estimate_cents: None,
+        backend: LlmBackend::Local,
+    }
+}
+
 pub fn test_llm_response() -> LlmResponse {
     LlmResponse {
         content_blocks: vec![ContentBlock::Text {
