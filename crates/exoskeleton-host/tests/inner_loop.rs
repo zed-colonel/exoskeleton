@@ -32,7 +32,7 @@ use worldinterface_connector::registry::ConnectorRegistry;
 use worldinterface_host::config::HostConfig;
 use worldinterface_host::host::EmbeddedHost;
 
-/// Decision JSON with no actions (idle tick, no inner loop).
+/// Legacy JSON fixture converted into native content blocks by `mock_llm_response`.
 const DECISION_NO_ACTIONS: &str =
     r#"{"reasoning":"No actions needed","actions":[],"memory_notes":[]}"#;
 
@@ -43,11 +43,62 @@ const DECISION_INNER_LOOP_WITH_ACTION: &str = r#"{"reasoning":"Coding task","inn
 const DECISION_INNER_LOOP_NO_ACTIONS: &str =
     r#"{"reasoning":"Done coding","inner_loop_requested":true,"actions":[],"memory_notes":[]}"#;
 
-/// Decision JSON that does NOT request inner loop, with one action.
-const DECISION_NO_INNER_LOOP_WITH_ACTION: &str = r#"{"reasoning":"Normal action","inner_loop_requested":false,"actions":[{"tool_name":"delay","params":{"duration_ms":1},"rationale":"regular action"}],"memory_notes":[]}"#;
-
-/// Build a mock LlmResponse with the given content.
+/// Build a mock LlmResponse, upgrading legacy JSON fixtures into content blocks.
 fn mock_llm_response(content: &str) -> LlmResponse {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        let reasoning = value
+            .get("reasoning")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let actions = value
+            .get("actions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let memory_notes = value
+            .get("memory_notes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut content_blocks = Vec::new();
+        if !reasoning.is_empty() {
+            content_blocks.push(ContentBlock::Text { text: reasoning });
+        }
+        for (idx, note) in memory_notes.iter().enumerate() {
+            if let Some(note) = note.as_str() {
+                content_blocks.push(ContentBlock::ToolUse {
+                    id: format!("memory_note_{idx}"),
+                    name: "save_memory_note".into(),
+                    input: serde_json::json!({ "note": note }),
+                });
+            }
+        }
+        for (idx, action) in actions.iter().enumerate() {
+            content_blocks.push(ContentBlock::ToolUse {
+                id: format!("call_{idx}"),
+                name: action["tool_name"].as_str().unwrap_or("unknown").to_string(),
+                input: action["params"].clone(),
+            });
+        }
+
+        return LlmResponse {
+            content_blocks,
+            model: "mock-model".into(),
+            tokens_in: 100,
+            tokens_out: 50,
+            latency_ms: 10,
+            stop_reason: if actions.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolUse
+            },
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        };
+    }
+
     LlmResponse {
         content_blocks: vec![ContentBlock::Text {
             text: content.to_string(),
@@ -253,10 +304,8 @@ async fn inner_loop_disabled_classic_path() {
 async fn inner_loop_enabled_not_requested_classic_path() {
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         let dir = tempfile::tempdir().unwrap();
-        // Enabled but the agent doesn't request it
-        let mock = Arc::new(MockLlmBackend::new(mock_llm_response(
-            DECISION_NO_INNER_LOOP_WITH_ACTION,
-        )));
+        // Enabled, but no external tool actions means the inner loop is not requested.
+        let mock = Arc::new(MockLlmBackend::new(mock_llm_response(DECISION_NO_ACTIONS)));
         let mock_clone = mock.clone();
         let config = InnerLoopConfig {
             enabled: true,
@@ -290,7 +339,7 @@ async fn inner_loop_enabled_not_requested_classic_path() {
         }
         assert!(
             !found_inner_loop,
-            "inner loop should not activate when agent doesn't request it"
+            "inner loop should not activate when there are no external actions"
         );
 
         shutdown_host(&kernel).await;
@@ -906,7 +955,8 @@ async fn inner_loop_events_broadcast() {
 async fn inner_loop_agent_complete() {
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         let dir = tempfile::tempdir().unwrap();
-        // Agent requests inner loop but starts with empty actions → immediate AgentComplete
+        // No external actions means the tick stays on the classic path and does not
+        // enter the bounded inner loop at all.
         let responses = vec![
             mock_llm_response(DECISION_INNER_LOOP_NO_ACTIONS),
             mock_llm_response(DECISION_NO_ACTIONS), // Reflect
@@ -933,25 +983,26 @@ async fn inner_loop_agent_complete() {
             actionqueue_executor_local::HandlerOutput::Success { .. }
         ));
 
-        let mut completion_reason = None;
+        let mut found_started = false;
+        let mut found_completed = false;
         let mut step_count = 0;
         while let Ok(event) = rx.try_recv() {
             if event.event_type == EventType::InnerLoopStep {
                 step_count += 1;
             }
             if event.event_type == EventType::InnerLoopCompleted {
-                completion_reason = event.inner_loop_detail.and_then(|d| d.completion_reason);
+                found_completed = true;
+            }
+            if event.event_type == EventType::InnerLoopStarted {
+                found_started = true;
             }
         }
         assert_eq!(
             step_count, 0,
             "no steps should execute when actions are empty"
         );
-        assert_eq!(
-            completion_reason.as_deref(),
-            Some("agent_complete"),
-            "should complete with agent_complete reason"
-        );
+        assert!(!found_started, "inner loop should not start without actions");
+        assert!(!found_completed, "inner loop should not emit completion without starting");
 
         shutdown_host(&kernel).await;
     })

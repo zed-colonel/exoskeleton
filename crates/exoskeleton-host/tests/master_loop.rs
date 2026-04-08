@@ -33,15 +33,69 @@ use worldinterface_connector::registry::ConnectorRegistry;
 use worldinterface_host::config::HostConfig;
 use worldinterface_host::host::EmbeddedHost;
 
-/// Valid DecisionProtocol JSON with no actions (simplest successful tick).
+/// Legacy JSON fixture converted into native content blocks by `mock_llm_response`.
 const MOCK_DECISION_NO_ACTIONS: &str =
     r#"{"reasoning":"No actions needed","actions":[],"memory_notes":[]}"#;
 
-/// Valid DecisionProtocol JSON with a delay action.
+/// Legacy JSON fixture converted into native content blocks by `mock_llm_response`.
 const MOCK_DECISION_WITH_ACTION: &str = r#"{"reasoning":"Testing","actions":[{"tool_name":"delay","params":{"duration_ms":1},"rationale":"test"}],"memory_notes":["test note"]}"#;
 
-/// Build a mock LlmResponse with the given content.
+/// Build a mock LlmResponse, upgrading legacy JSON fixtures into content blocks.
 fn mock_llm_response(content: &str) -> LlmResponse {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        let reasoning = value
+            .get("reasoning")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let actions = value
+            .get("actions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let memory_notes = value
+            .get("memory_notes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut content_blocks = Vec::new();
+        if !reasoning.is_empty() {
+            content_blocks.push(ContentBlock::Text { text: reasoning });
+        }
+        for (idx, note) in memory_notes.iter().enumerate() {
+            if let Some(note) = note.as_str() {
+                content_blocks.push(ContentBlock::ToolUse {
+                    id: format!("memory_note_{idx}"),
+                    name: "save_memory_note".into(),
+                    input: serde_json::json!({ "note": note }),
+                });
+            }
+        }
+        for (idx, action) in actions.iter().enumerate() {
+            content_blocks.push(ContentBlock::ToolUse {
+                id: format!("call_{idx}"),
+                name: action["tool_name"].as_str().unwrap_or("unknown").to_string(),
+                input: action["params"].clone(),
+            });
+        }
+
+        return LlmResponse {
+            content_blocks,
+            model: "mock-model".into(),
+            tokens_in: 100,
+            tokens_out: 50,
+            latency_ms: 10,
+            stop_reason: if actions.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolUse
+            },
+            cost_estimate_cents: None,
+            backend: LlmBackend::Local,
+        };
+    }
+
     LlmResponse {
         content_blocks: vec![ContentBlock::Text {
             text: content.to_string(),
@@ -1026,52 +1080,10 @@ async fn e3_tick_record_has_context_breakdown_ref() {
 
 mod proptest_tests {
     use exoskeleton_core::{StateSnapshot, VesselId, VesselStatus};
-    use exoskeleton_host::kernel::{DecisionProtocol, PlannedAction, SnapshotDelta};
+    use exoskeleton_host::kernel::{PlannedAction, SnapshotDelta};
     use proptest::prelude::*;
 
     proptest! {
-        #[test]
-        fn decision_protocol_survives_json_roundtrip(
-            reasoning in "\\PC{1,200}",
-            plan in proptest::option::of("\\PC{1,100}"),
-            wc in proptest::option::of("\\PC{1,100}"),
-            num_actions in 0usize..5,
-            num_notes in 0usize..5,
-        ) {
-            let actions: Vec<PlannedAction> = (0..num_actions).map(|i| PlannedAction {
-                tool_name: format!("tool_{i}"),
-                params: serde_json::json!({"key": i}),
-                rationale: format!("reason {i}"),
-                plan_task_id: None,
-            }).collect();
-            let notes: Vec<String> = (0..num_notes).map(|i| format!("note {i}")).collect();
-
-            let plan_update = plan.map(|p| exoskeleton_core::PlanUpdate::Replace {
-                plan: exoskeleton_core::Plan::from_legacy_string(p),
-            });
-            let working_memory_ops = wc.map(|w| vec![exoskeleton_core::WorkingMemoryOp::Set {
-                key: "context".into(),
-                value: w,
-                ttl_ticks: None,
-            }]);
-            let proto = DecisionProtocol {
-                reasoning,
-                inner_loop_requested: false,
-                reply: None,
-                plan_update,
-                working_memory_ops,
-                vessel_mode_request: None,
-                actions,
-                memory_notes: notes,
-                watch_proposals: vec![],
-            };
-            let json = serde_json::to_string(&proto).unwrap();
-            let parsed: DecisionProtocol = serde_json::from_str(&json).unwrap();
-            prop_assert_eq!(proto.reasoning, parsed.reasoning);
-            prop_assert_eq!(proto.actions.len(), parsed.actions.len());
-            prop_assert_eq!(proto.memory_notes.len(), parsed.memory_notes.len());
-        }
-
         #[test]
         fn planned_action_survives_json_roundtrip(
             tool_name in "[a-z][a-z.]{0,20}",
@@ -1079,6 +1091,7 @@ mod proptest_tests {
             param_val in 0i64..1000,
         ) {
             let action = PlannedAction {
+                call_id: format!("call_{param_val}"),
                 tool_name,
                 params: serde_json::json!({"value": param_val}),
                 rationale,
@@ -1086,6 +1099,7 @@ mod proptest_tests {
             };
             let json = serde_json::to_string(&action).unwrap();
             let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(action.call_id, parsed.call_id);
             prop_assert_eq!(action.tool_name, parsed.tool_name);
             prop_assert_eq!(action.rationale, parsed.rationale);
             prop_assert_eq!(action.params, parsed.params);

@@ -101,6 +101,7 @@ pub fn check_watches(kernel: &KernelContext, tick_number: u64) -> WatchCheckResu
                 connector, params, ..
             } => {
                 poll_actions.push(PlannedAction {
+                    call_id: format!("watch_{}_{}", watch.id, connector),
                     tool_name: connector.clone(),
                     params: params.clone(),
                     rationale: format!("Poll watch '{}' scheduled check", watch.name),

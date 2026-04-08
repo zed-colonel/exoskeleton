@@ -925,14 +925,14 @@ async fn replay_tick_record_references_correct_artifacts() {
         thread_output_artifacts.len()
     );
 
-    // LlmResponse artifacts should exist (one per thread + one for Decide)
+    // LlmResponse artifacts should exist for the decide step plus builtin thread calls.
     let llm_artifacts = kernel
         .artifact_store
         .list_by_kind(ArtifactKind::LlmResponse, 20)
         .unwrap();
     assert!(
-        llm_artifacts.len() >= 7,
-        "expected at least 7 LlmResponse artifacts (6 threads + 1 decide), got {}",
+        llm_artifacts.len() >= 6,
+        "expected at least 6 LlmResponse artifacts (builtin threads + decide), got {}",
         llm_artifacts.len()
     );
 

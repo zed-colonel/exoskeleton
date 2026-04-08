@@ -17,6 +17,7 @@ pub mod policy;
 pub mod reflect;
 pub mod repo_analysis;
 pub mod threads;
+pub mod tools;
 pub mod types;
 pub mod virtual_tools;
 pub mod watches;
@@ -37,9 +38,9 @@ use exoskeleton_memory::{ContextCompiler, MemoryStore};
 use exoskeleton_relationship::RelationshipLedger;
 use exoskeleton_threads::ThreadRegistry;
 pub use types::{
-    ActResult, ActionExecution, AlignmentResult, DecisionProtocol, DecisionResult,
-    MasterLoopPayload, OrientationResult, PerceptionResult, PlannedAction, ReflectionResult,
-    SnapshotDelta, ThreadPayload,
+    ActResult, ActionExecution, AlignmentResult, DecisionResult, MasterLoopPayload,
+    OrientationResult, PerceptionResult, PlannedAction, ReflectionResult, SnapshotDelta,
+    ThreadPayload,
 };
 use worldinterface_host::host::EmbeddedHost;
 
@@ -367,6 +368,7 @@ pub fn run_tick(
                     .poll_actions
                     .into_iter()
                     .map(|a| PlannedAction {
+                        call_id: a.call_id,
                         tool_name: a.tool_name,
                         params: a.params,
                         rationale: a.rationale,
@@ -972,6 +974,7 @@ mod tests {
         let act_result = ActResult {
             executions: vec![ActionExecution {
                 action: PlannedAction {
+                    call_id: "call_code_edit".into(),
                     tool_name: "code.edit".into(),
                     params: serde_json::json!({"file_path": "/tmp/sample.rs"}),
                     rationale: "test".into(),
@@ -983,6 +986,11 @@ mod tests {
                     target: "/tmp/sample.rs".into(),
                     outcome: ActionOutcome::Success,
                     receipt_ref: None,
+                },
+                tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
+                    tool_use_id: "call_code_edit".into(),
+                    content: "{\"ok\":true}".into(),
+                    is_error: false,
                 },
                 pending_question: false,
                 code_diff: Some((

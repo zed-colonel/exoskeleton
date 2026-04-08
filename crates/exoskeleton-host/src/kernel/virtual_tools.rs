@@ -11,6 +11,7 @@
 use exoskeleton_core::{
     Artifact, ArtifactKind, EventType, ExoError, LiveEvent, QuestionDetail, TickId,
 };
+use exoskeleton_core::llm::ToolDefinition;
 use serde_json::{json, Value};
 use worldinterface_core::descriptor::{ConnectorCategory, Descriptor};
 
@@ -30,6 +31,20 @@ pub fn is_virtual_tool(name: &str) -> bool {
 /// LLM's tool list alongside WI connector descriptors.
 pub fn virtual_tool_descriptors() -> Vec<Descriptor> {
     vec![ask_user_descriptor(), peer_resolve_descriptor()]
+}
+
+/// Returns ToolDefinitions for virtual tools exposed to the LLM.
+pub fn virtual_tool_definitions() -> Vec<ToolDefinition> {
+    virtual_tool_descriptors()
+        .into_iter()
+        .map(|descriptor| ToolDefinition {
+            name: descriptor.name,
+            description: descriptor.description,
+            input_schema: descriptor
+                .input_schema
+                .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+        })
+        .collect()
 }
 
 fn ask_user_descriptor() -> Descriptor {

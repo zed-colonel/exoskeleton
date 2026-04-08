@@ -309,19 +309,14 @@ mod tests {
         let result = registry
             .resolve(
                 "decide-system",
-                &[
-                    ("vessel_id", "test-vessel-123"),
-                    ("mission", "explore the cosmos"),
-                    ("tools", "tool_a: does thing A\ntool_b: does thing B"),
-                ],
+                &[("vessel_id", "test-vessel-123"), ("mission", "explore the cosmos")],
             )
             .unwrap();
 
         assert!(result.contains("vessel test-vessel-123"));
         assert!(result.contains("explore the cosmos"));
-        assert!(result.contains("tool_a: does thing A"));
-        // JSON braces should be preserved as literal
-        assert!(result.contains("\"reasoning\""));
+        assert!(result.contains("Use native tool calls instead of JSON blobs."));
+        assert!(result.contains("request_vessel_mode"));
     }
 
     #[test]

@@ -1102,6 +1102,7 @@ mod tests {
         // Add an execution to verify the output JSON
         let exec = ActionExecution {
             action: super::super::types::PlannedAction {
+                call_id: "call_delay".into(),
                 tool_name: "delay".into(),
                 params: serde_json::json!({"duration_ms": 10}),
                 rationale: "test".into(),
@@ -1113,6 +1114,11 @@ mod tests {
                 target: "{}".into(),
                 receipt_ref: None,
                 outcome: exoskeleton_core::tick::ActionOutcome::Success,
+            },
+            tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
+                tool_use_id: "call_delay".into(),
+                content: "{\"slept_ms\":10}".into(),
+                is_error: false,
             },
             pending_question: false,
             code_diff: None,

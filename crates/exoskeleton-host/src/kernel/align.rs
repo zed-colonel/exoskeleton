@@ -257,6 +257,7 @@ mod tests {
 
     fn test_action(name: &str) -> PlannedAction {
         PlannedAction {
+            call_id: format!("call_{name}"),
             tool_name: name.into(),
             params: serde_json::json!({}),
             rationale: format!("test {name}"),

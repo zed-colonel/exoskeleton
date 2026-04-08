@@ -8,6 +8,7 @@
 
 use actionqueue_executor_local::CancellationToken;
 use chrono::Utc;
+use exoskeleton_core::llm::ContentBlock;
 use exoskeleton_core::tick::{ActionOutcome, ActionRecord};
 use exoskeleton_core::{
     Artifact, ArtifactKind, CodeDiffContent, CodeDiffOperation, EventEntry, EventType, ExoError,
@@ -18,6 +19,22 @@ use worldinterface_core::descriptor::{ConnectorCategory, Descriptor};
 use super::policy::{self, PolicyDecision};
 use super::types::{ActResult, ActionExecution, AlignmentResult};
 use super::KernelContext;
+
+pub const MAX_TOOL_RESULT_CHARS: usize = 4000;
+
+fn tool_result_content(value: &Result<serde_json::Value, String>) -> (String, bool) {
+    let raw = match value {
+        Ok(json) => serde_json::to_string(json).unwrap_or_else(|_| "\"serialization_error\"".into()),
+        Err(error) => error.clone(),
+    };
+    let truncated = if raw.chars().count() > MAX_TOOL_RESULT_CHARS {
+        let shortened: String = raw.chars().take(MAX_TOOL_RESULT_CHARS.saturating_sub(3)).collect();
+        format!("{shortened}...")
+    } else {
+        raw
+    };
+    (truncated, value.is_err())
+}
 
 /// Extract a CodeDiff artifact from a successful mutating code tool result.
 fn try_extract_code_diff(
@@ -150,6 +167,11 @@ pub fn act(
                         action: action.clone(),
                         result: Err("rate_limited".into()),
                         record,
+                        tool_result: ContentBlock::ToolResult {
+                            tool_use_id: action.call_id.clone(),
+                            content: "rate_limited".into(),
+                            is_error: true,
+                        },
                         pending_question: false,
                         code_diff: None,
                     });
@@ -223,6 +245,11 @@ pub fn act(
                             action: action.clone(),
                             result: Err("read_before_write_required".into()),
                             record,
+                            tool_result: ContentBlock::ToolResult {
+                                tool_use_id: action.call_id.clone(),
+                                content: "read_before_write_required".into(),
+                                is_error: true,
+                            },
                             pending_question: false,
                             code_diff: None,
                         });
@@ -257,6 +284,11 @@ pub fn act(
                     action: action.clone(),
                     result: Err(reason.clone()),
                     record,
+                    tool_result: ContentBlock::ToolResult {
+                        tool_use_id: action.call_id.clone(),
+                        content: reason.clone(),
+                        is_error: true,
+                    },
                     pending_question: false,
                     code_diff: None,
                 });
@@ -280,6 +312,11 @@ pub fn act(
                     action: action.clone(),
                     result: Err(reason.clone()),
                     record,
+                    tool_result: ContentBlock::ToolResult {
+                        tool_use_id: action.call_id.clone(),
+                        content: reason.clone(),
+                        is_error: true,
+                    },
                     pending_question: false,
                     code_diff: None,
                 });
@@ -316,6 +353,11 @@ pub fn act(
                             action: action.clone(),
                             result: Err(e.to_string()),
                             record,
+                            tool_result: ContentBlock::ToolResult {
+                                tool_use_id: action.call_id.clone(),
+                                content: e.to_string(),
+                                is_error: true,
+                            },
                             pending_question: false,
                             code_diff: None,
                         });
@@ -469,11 +511,17 @@ pub fn act(
                     .and_then(|value| value.as_str()),
                 Some("pending")
             );
+        let (tool_content, tool_is_error) = tool_result_content(&result_value);
 
         executions.push(ActionExecution {
             action: action.clone(),
             result: result_value,
             record,
+            tool_result: ContentBlock::ToolResult {
+                tool_use_id: action.call_id.clone(),
+                content: tool_content,
+                is_error: tool_is_error,
+            },
             pending_question,
             code_diff,
         });
@@ -521,6 +569,11 @@ pub fn act(
                     action: remaining.clone(),
                     result: Err("cancelled".into()),
                     record,
+                    tool_result: ContentBlock::ToolResult {
+                        tool_use_id: remaining.call_id.clone(),
+                        content: "cancelled".into(),
+                        is_error: true,
+                    },
                     pending_question: false,
                     code_diff: None,
                 });
@@ -714,6 +767,7 @@ mod tests {
 
     fn delay_action(ms: u64) -> PlannedAction {
         PlannedAction {
+            call_id: format!("call_delay_{ms}"),
             tool_name: "delay".into(),
             params: serde_json::json!({"duration_ms": ms}),
             rationale: "test delay".into(),
@@ -723,6 +777,7 @@ mod tests {
 
     fn unknown_action() -> PlannedAction {
         PlannedAction {
+            call_id: "call_unknown".into(),
             tool_name: "nonexistent.tool".into(),
             params: serde_json::json!({"key": "value"}),
             rationale: "test unknown tool".into(),
@@ -732,6 +787,7 @@ mod tests {
 
     fn code_read_action(path: &std::path::Path) -> PlannedAction {
         PlannedAction {
+            call_id: "call_code_read".into(),
             tool_name: "code.read".into(),
             params: serde_json::json!({"file_path": path.to_str().unwrap()}),
             rationale: "read file".into(),
@@ -741,6 +797,7 @@ mod tests {
 
     fn code_write_action(path: &std::path::Path, content: &str) -> PlannedAction {
         PlannedAction {
+            call_id: "call_code_write".into(),
             tool_name: "code.write".into(),
             params: serde_json::json!({"file_path": path.to_str().unwrap(), "content": content}),
             rationale: "write file".into(),
@@ -750,6 +807,7 @@ mod tests {
 
     fn fs_write_action(path: &std::path::Path, content: &str) -> PlannedAction {
         PlannedAction {
+            call_id: "call_fs_write".into(),
             tool_name: "fs.write".into(),
             params: serde_json::json!({"path": path.to_str().unwrap(), "content": content, "mode": "overwrite"}),
             rationale: "write file".into(),

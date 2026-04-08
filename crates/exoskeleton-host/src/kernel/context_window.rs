@@ -125,6 +125,7 @@ mod tests {
         let success = result.is_ok();
         ActionExecution {
             action: PlannedAction {
+                call_id: format!("call_{tool}"),
                 tool_name: tool.into(),
                 params,
                 rationale: "test".into(),
@@ -140,6 +141,11 @@ mod tests {
                 } else {
                     ActionOutcome::Failure
                 },
+            },
+            tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
+                tool_use_id: format!("call_{tool}"),
+                content: "{}".into(),
+                is_error: !success,
             },
             pending_question: false,
             code_diff: None,

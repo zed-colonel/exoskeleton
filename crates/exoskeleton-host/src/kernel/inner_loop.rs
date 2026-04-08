@@ -16,15 +16,15 @@
 
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::event::InnerLoopStepDetail;
-use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
+use exoskeleton_core::llm::{ContentBlock, LlmMessage, LlmRequest, LlmRole, StopReason};
 use exoskeleton_core::tick::LlmCallRecord;
 use exoskeleton_core::RelationshipSnapshot;
 use exoskeleton_core::{DiffSummary, EventType, ExoError, LiveEvent, RelationshipRecord};
-
 use super::types::{
-    extract_json_from_code_fence, ActionExecution, DecisionProtocol, DecisionResult,
-    OrientationResult, PerceptionResult, SnapshotDelta,
+    ActionExecution, DecisionResult, OrientationResult, PerceptionResult, PlannedAction,
+    SnapshotDelta,
 };
+use super::tools::{build_inner_loop_tools, is_cognitive_tool, process_cognitive_tool};
 use super::{act, align, diff_tracker::DiffTracker, KernelContext};
 use crate::budget::session::{
     DoomLoopStatus, SessionBudget, SessionBudgetCheck, SessionCompletionReason,
@@ -325,81 +325,106 @@ fn decide_lite(
     correction_message: Option<&str>,
     cancellation: &CancellationToken,
 ) -> Result<DecisionResult, ExoError> {
-    // Build system prompt from inner-loop template
-    let tools_description = build_tools_description(kernel);
     let mode_context = build_mode_context(kernel);
     let system_prompt = kernel.prompt_registry.resolve(
         "inner-loop-system",
-        &[
-            ("tools", &tools_description),
-            ("mode_context", &mode_context),
-        ],
+        &[("mode_context", &mode_context)],
     )?;
 
-    // Build messages: original context + decision summary + tool results
     let mut messages = vec![LlmMessage::text(
         LlmRole::User,
         orientation.compiled_context.prompt.clone(),
     )];
 
-    // Append previous decision's reasoning as assistant message
-    messages.push(LlmMessage::text(
-        LlmRole::Assistant,
-        format_decision_summary(previous_decision),
-    ));
+    let window_size = kernel.inner_loop_config.context_window_size.max(1) as usize;
+    let start = previous_executions.len().saturating_sub(window_size);
+    let windowed = &previous_executions[start..];
 
-    // Append tool results as user message
-    let mut tool_results = super::context_window::format_windowed_results(
-        previous_executions,
-        kernel.inner_loop_config.context_window_size,
-    );
-    if let Some(correction) = correction_message {
-        tool_results = format!("{correction}\n\n{tool_results}");
+    for execution in windowed {
+        messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: assistant_blocks_for_action(&execution.action),
+        });
+        messages.push(LlmMessage {
+            role: LlmRole::User,
+            content: user_blocks_for_tool_result(
+                execution.tool_result.clone(),
+                correction_message.filter(|_| {
+                    std::ptr::eq(execution, windowed.last().unwrap_or(execution))
+                }),
+            ),
+        });
     }
-    messages.push(LlmMessage::text(LlmRole::User, tool_results));
 
-    let request = LlmRequest {
-        backend: None,
-        system_prompt: Some(system_prompt),
-        messages,
-        max_output_tokens: kernel.max_output_tokens,
-        temperature: Some(0.3),
-        stop_sequences: vec![],
-        stream: true,
-        tools: vec![],
-    };
+    if windowed.is_empty() {
+        messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: assistant_blocks_for_decision(previous_decision),
+        });
+    }
 
-    // Use unified handler_direct_llm_call
-    let result = handler_direct_llm_call(handler, kernel, &request, cancellation)?;
+    let tools = build_inner_loop_tools(kernel);
+    let mut llm_records = Vec::new();
+    let mut last_artifact_id = None;
+    let mut accumulator = LiteDecisionAccumulator::default();
 
-    // Parse response into DecisionResult
-    parse_decide_lite_response(
-        &result.response.text(),
-        result.llm_call_record,
-        result.artifact_id,
-    )
-}
+    for _ in 0..kernel.max_decide_turns {
+        let request = LlmRequest {
+            backend: None,
+            system_prompt: Some(system_prompt.clone()),
+            messages: messages.clone(),
+            max_output_tokens: kernel.max_output_tokens,
+            temperature: Some(0.3),
+            stop_sequences: vec![],
+            stream: true,
+            tools: tools.clone(),
+        };
 
-/// Build a tools description string for the inner-loop prompt.
-fn build_tools_description(kernel: &KernelContext) -> String {
-    // Try to get the WI Host for tool descriptions
-    let host_guard = kernel.wi_host_slot.blocking_lock();
-    match host_guard.as_ref() {
-        Some(host) => {
-            let descriptors = host.list_capabilities();
-            let mut desc = String::new();
-            for d in descriptors {
-                desc.push_str(&format!(
-                    "- **{}**: {}\n  Input: {}\n",
-                    d.name,
-                    d.description,
-                    serde_json::to_string(&d.input_schema).unwrap_or_default(),
-                ));
-            }
-            desc
+        let result = handler_direct_llm_call(handler, kernel, &request, cancellation)?;
+        llm_records.push(result.llm_call_record);
+        last_artifact_id = Some(result.artifact_id.clone());
+
+        let response = result.response;
+        let assistant_message = LlmMessage {
+            role: LlmRole::Assistant,
+            content: response.content_blocks.clone(),
+        };
+        let actions_before = accumulator.actions.len();
+        let inline_tool_results = accumulate_lite_response(&response, &mut accumulator);
+        let has_external_actions = accumulator.actions.len() > actions_before;
+
+        messages.push(assistant_message);
+        if has_external_actions {
+            break;
         }
-        None => "(no tools available)".into(),
+        if matches!(response.stop_reason, StopReason::ToolUse) && !inline_tool_results.is_empty() {
+            messages.push(LlmMessage {
+                role: LlmRole::User,
+                content: inline_tool_results,
+            });
+            continue;
+        }
+        break;
     }
+
+    let mut llm_call_record = LlmCallRecord::merge(&llm_records);
+    let artifact_id = last_artifact_id.ok_or_else(|| {
+        ExoError::LlmInvocation("DecideLite produced no LLM response artifact".into())
+    })?;
+    llm_call_record.response_artifact_ref = Some(artifact_id.clone());
+
+    Ok(DecisionResult {
+        reasoning: accumulator.reasoning_parts.join("\n"),
+        reply: accumulator.reply,
+        actions: accumulator.actions,
+        snapshot_delta: accumulator.snapshot_delta,
+        memory_notes: accumulator.memory_notes,
+        llm_call_record,
+        response_artifact_id: artifact_id,
+        watch_proposals: accumulator.watch_proposals,
+        inner_loop_requested: false,
+        vessel_mode_request: accumulator.vessel_mode_request,
+    })
 }
 
 fn build_mode_context(kernel: &KernelContext) -> String {
@@ -417,18 +442,55 @@ fn build_mode_context(kernel: &KernelContext) -> String {
 }
 
 /// Format the previous decision as an assistant message summary.
-fn format_decision_summary(decision: &DecisionResult) -> String {
-    let mut summary = format!("Reasoning: {}\n", decision.reasoning);
-    if !decision.actions.is_empty() {
-        summary.push_str("\nActions taken:\n");
-        for action in &decision.actions {
-            summary.push_str(&format!("- {}: {}\n", action.tool_name, action.rationale));
-        }
+fn assistant_blocks_for_decision(decision: &DecisionResult) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    if !decision.reasoning.trim().is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: decision.reasoning.clone(),
+        });
     }
-    if let Some(ref reply) = decision.reply {
-        summary.push_str(&format!("\nReply: {reply}\n"));
+    for action in &decision.actions {
+        blocks.push(ContentBlock::ToolUse {
+            id: action.call_id.clone(),
+            name: action.tool_name.clone(),
+            input: action.params.clone(),
+        });
     }
-    summary
+    if blocks.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: "Continuing.".into(),
+        });
+    }
+    blocks
+}
+
+fn assistant_blocks_for_action(action: &PlannedAction) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    if !action.rationale.trim().is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: action.rationale.clone(),
+        });
+    }
+    blocks.push(ContentBlock::ToolUse {
+        id: action.call_id.clone(),
+        name: action.tool_name.clone(),
+        input: action.params.clone(),
+    });
+    blocks
+}
+
+fn user_blocks_for_tool_result(
+    tool_result: ContentBlock,
+    correction_message: Option<&str>,
+) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    if let Some(correction) = correction_message {
+        blocks.push(ContentBlock::Text {
+            text: correction.to_string(),
+        });
+    }
+    blocks.push(tool_result);
+    blocks
 }
 
 fn build_doom_loop_correction(tool: &str, count: u32, last_error: Option<&str>) -> String {
@@ -442,59 +504,82 @@ fn build_doom_loop_correction(tool: &str, count: u32, last_error: Option<&str>) 
 }
 
 /// Parse a DecideLite response into a DecisionResult.
-fn parse_decide_lite_response(
-    response_text: &str,
-    llm_call_record: LlmCallRecord,
-    artifact_id: exoskeleton_core::ArtifactId,
-) -> Result<DecisionResult, ExoError> {
-    // Try direct JSON parse
-    let protocol = if let Ok(p) = serde_json::from_str::<DecisionProtocol>(response_text) {
-        p
-    } else if let Some(json_str) = extract_json_from_code_fence(response_text) {
-        serde_json::from_str::<DecisionProtocol>(json_str).unwrap_or_else(|_| {
-            // Fallback: treat as completion (empty actions)
-            DecisionProtocol {
-                reasoning: response_text.to_string(),
-                inner_loop_requested: false,
-                reply: None,
-                plan_update: None,
-                working_memory_ops: None,
-                vessel_mode_request: None,
-                actions: vec![],
-                memory_notes: vec![],
-                watch_proposals: vec![],
-            }
-        })
-    } else {
-        // Unparseable → treat as completion
-        DecisionProtocol {
-            reasoning: response_text.to_string(),
-            inner_loop_requested: false,
-            reply: None,
-            plan_update: None,
-            working_memory_ops: None,
-            vessel_mode_request: None,
-            actions: vec![],
-            memory_notes: vec![],
-            watch_proposals: vec![],
-        }
-    };
+#[derive(Default)]
+struct LiteDecisionAccumulator {
+    reasoning_parts: Vec<String>,
+    reply: Option<String>,
+    actions: Vec<PlannedAction>,
+    snapshot_delta: SnapshotDelta,
+    memory_notes: Vec<String>,
+    watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
+    vessel_mode_request: Option<exoskeleton_core::VesselMode>,
+}
 
-    Ok(DecisionResult {
-        reasoning: protocol.reasoning,
-        reply: protocol.reply,
-        actions: protocol.actions,
-        snapshot_delta: SnapshotDelta {
-            plan_update: protocol.plan_update,
-            working_memory_ops: protocol.working_memory_ops,
-        },
-        memory_notes: protocol.memory_notes,
-        llm_call_record,
-        response_artifact_id: artifact_id,
-        watch_proposals: protocol.watch_proposals,
-        inner_loop_requested: false, // Not relevant for inner-loop iterations
-        vessel_mode_request: protocol.vessel_mode_request,
-    })
+fn accumulate_lite_response(
+    response: &exoskeleton_core::llm::LlmResponse,
+    accumulator: &mut LiteDecisionAccumulator,
+) -> Vec<ContentBlock> {
+    let mut inline_tool_results = Vec::new();
+    let response_text = response.text();
+    if !response_text.trim().is_empty() {
+        accumulator.reasoning_parts.push(response_text);
+    }
+
+    for block in &response.content_blocks {
+        if let ContentBlock::ToolUse { id, name, input } = block {
+            if is_cognitive_tool(name) {
+                match process_cognitive_tool(name, input) {
+                    Ok(result) => {
+                        if let Some(plan_update) = result.plan_update {
+                            accumulator.snapshot_delta.plan_update = Some(plan_update);
+                        }
+                        if !result.working_memory_ops.is_empty() {
+                            accumulator
+                                .snapshot_delta
+                                .working_memory_ops
+                                .get_or_insert_with(Vec::new)
+                                .extend(result.working_memory_ops);
+                        }
+                        if let Some(note) = result.memory_note {
+                            accumulator.memory_notes.push(note);
+                        }
+                        if let Some(watch) = result.watch_proposal {
+                            accumulator.watch_proposals.push(watch);
+                        }
+                        if let Some(mode) = result.vessel_mode_request {
+                            accumulator.vessel_mode_request = Some(mode);
+                        }
+                        if let Some(message) = result.reply {
+                            accumulator.reply = Some(message);
+                        }
+                        inline_tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: "ok".into(),
+                            is_error: false,
+                        });
+                    }
+                    Err(error) => inline_tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: error.to_string(),
+                        is_error: true,
+                    }),
+                }
+            } else {
+                accumulator.actions.push(PlannedAction {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    params: input.clone(),
+                    rationale: accumulator
+                        .reasoning_parts
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| format!("model selected {name}")),
+                    plan_task_id: None,
+                });
+            }
+        }
+    }
+    inline_tool_results
 }
 
 /// Broadcast an inner-loop event via the event channel.

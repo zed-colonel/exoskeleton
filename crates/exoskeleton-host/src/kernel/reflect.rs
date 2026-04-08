@@ -269,6 +269,7 @@ mod tests {
     fn success_execution(name: &str) -> ActionExecution {
         ActionExecution {
             action: PlannedAction {
+                call_id: format!("call_{name}"),
                 tool_name: name.into(),
                 params: serde_json::json!({}),
                 rationale: "test".into(),
@@ -281,6 +282,11 @@ mod tests {
                 receipt_ref: None,
                 outcome: ActionOutcome::Success,
             },
+            tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
+                tool_use_id: format!("call_{name}"),
+                content: "{\"ok\":true}".into(),
+                is_error: false,
+            },
             pending_question: false,
             code_diff: None,
         }
@@ -289,6 +295,7 @@ mod tests {
     fn failure_execution(name: &str, error: &str) -> ActionExecution {
         ActionExecution {
             action: PlannedAction {
+                call_id: format!("call_{name}"),
                 tool_name: name.into(),
                 params: serde_json::json!({}),
                 rationale: "test".into(),
@@ -300,6 +307,11 @@ mod tests {
                 target: "test".into(),
                 receipt_ref: None,
                 outcome: ActionOutcome::Failure,
+            },
+            tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
+                tool_use_id: format!("call_{name}"),
+                content: error.into(),
+                is_error: true,
             },
             pending_question: false,
             code_diff: None,
@@ -572,6 +584,7 @@ mod tests {
             reasoning: "Test reasoning".into(),
             reply: None,
             actions: vec![PlannedAction {
+                call_id: "call_fs_write".into(),
                 tool_name: "fs.write".into(),
                 params: serde_json::json!({}),
                 rationale: "write output".into(),
