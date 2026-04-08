@@ -19,7 +19,6 @@ use crate::config::VesselConfig;
 use crate::inspect::VesselInspector;
 use crate::kernel::policy::{PolicyRule, ToolPolicyConfig};
 use crate::vessel::Vessel;
-use crate::budget::session::SessionCompletionReason;
 
 /// A benchmark task specification parsed from TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,6 +361,11 @@ pub fn prepare_workspace(repo_path: &Path) -> Result<tempfile::TempDir, std::io:
     Ok(temp_dir)
 }
 
+/// RAII guard that restores the current working directory on drop.
+///
+/// WARNING: `std::env::set_current_dir()` is process-global. This is safe
+/// only because benchmark tasks run sequentially. If tasks ever run in
+/// parallel, replace this with `Command::current_dir()` on each subprocess.
 struct CurrentDirGuard {
     previous: PathBuf,
 }
@@ -393,24 +397,37 @@ impl Drop for CurrentDirGuard {
 pub struct HeadlessRunner;
 
 impl HeadlessRunner {
+    /// Extract the completion reason from a decision rationale that contains
+    /// a `[completion: ...]` tag appended by `format_decision_rationale`.
+    ///
+    /// CONTRACT: The needle strings must match `SessionCompletionReason::fmt()`
+    /// output in budget/session.rs. If those Display strings change, update here.
     fn completion_reason_from_rationale(rationale: &str) -> Option<&'static str> {
         let normalized = rationale.to_lowercase();
-        let known = [
-            (SessionCompletionReason::AgentComplete.to_string(), "AgentComplete"),
-            (SessionCompletionReason::StepLimit.to_string(), "StepLimit"),
-            (SessionCompletionReason::TokenBudget.to_string(), "TokenBudget"),
-            (SessionCompletionReason::Timeout.to_string(), "InnerLoopTimeout"),
-            (SessionCompletionReason::DoomLoop.to_string(), "DoomLoop"),
-            (SessionCompletionReason::Cancelled.to_string(), "Cancelled"),
-            (
-                SessionCompletionReason::AwaitingInput.to_string(),
-                "AwaitingInput",
-            ),
+
+        // Static pairs: (Display string needle, return value)
+        const KNOWN: &[(&str, &str)] = &[
+            ("agent_complete", "AgentComplete"),
+            ("step_limit", "StepLimit"),
+            ("token_budget", "TokenBudget"),
+            ("timeout", "Timeout"),
+            ("doom_loop", "DoomLoop"),
+            ("cancelled", "Cancelled"),
+            ("awaiting_input", "AwaitingInput"),
         ];
 
-        known
-            .iter()
-            .find_map(|(needle, result)| normalized.contains(needle).then_some(*result))
+        for (needle, label) in KNOWN {
+            if normalized.contains(needle) {
+                return Some(label);
+            }
+        }
+
+        // Handle Error(String) variant — dynamic content, match by prefix
+        if normalized.contains("error:") {
+            return Some("Error");
+        }
+
+        None
     }
 
     /// Build a VesselConfig for a benchmark task by merging the base config
@@ -453,14 +470,9 @@ impl HeadlessRunner {
         config
     }
 
-    /// Submit a task prompt to the vessel's inbox as a HumanMessage envelope.
-    fn submit_task_prompt(
-        inbox: &dyn Inbox,
-        artifact_store: &dyn ArtifactStore,
-        prompt: &str,
-        workspace_path: &Path,
-    ) -> Result<EnvelopeId, String> {
-        let benchmark_prompt = format!(
+    /// Format the benchmark task prompt with workspace context.
+    fn format_task_prompt(workspace_path: &Path, prompt: &str) -> String {
+        format!(
             "You are working on a benchmark task.\n\
 The ONLY repository you should inspect or modify is this workspace copy:\n\
 {}\n\n\
@@ -470,7 +482,17 @@ Verification will run inside this workspace copy, so only changes there count.\n
 Task:\n{}",
             workspace_path.display(),
             prompt
-        );
+        )
+    }
+
+    /// Submit a task prompt to the vessel's inbox as a HumanMessage envelope.
+    fn submit_task_prompt(
+        inbox: &dyn Inbox,
+        artifact_store: &dyn ArtifactStore,
+        prompt: &str,
+        workspace_path: &Path,
+    ) -> Result<EnvelopeId, String> {
+        let benchmark_prompt = Self::format_task_prompt(workspace_path, prompt);
         let artifact = Artifact::new(
             ArtifactKind::Envelope,
             benchmark_prompt.as_bytes().to_vec(),
@@ -665,6 +687,9 @@ Task:\n{}",
                 }
 
                 global_step += 1;
+                // NOTE: Per-step token attribution is not yet implemented. Token counts
+                // are only available at the tick level (from LlmCallRecord), not per
+                // individual tool call. Step trace tokens are always 0 for now.
                 step_trace.push(StepTrace {
                     step: global_step,
                     tick: tick.tick_number as u32,
@@ -1697,6 +1722,21 @@ command = "true"
             ),
             Some("AwaitingInput")
         );
+    }
+
+    #[test]
+    fn format_task_prompt_includes_workspace_path() {
+        let prompt =
+            HeadlessRunner::format_task_prompt(Path::new("/tmp/workspace"), "Fix the bug in main.rs");
+        assert!(prompt.contains("/tmp/workspace"));
+        assert!(prompt.contains("Fix the bug in main.rs"));
+    }
+
+    #[test]
+    fn completion_reason_from_rationale_detects_error() {
+        let rationale = "some reasoning\n\n[completion: error: LLM call failed]";
+        let reason = HeadlessRunner::completion_reason_from_rationale(rationale);
+        assert_eq!(reason, Some("Error"));
     }
 
     #[test]

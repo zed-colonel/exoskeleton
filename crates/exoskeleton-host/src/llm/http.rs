@@ -69,33 +69,15 @@ fn effective_stream(request: &LlmRequest) -> bool {
     request.stream && request.tools.is_empty()
 }
 
+/// Encode a tool name for the Anthropic API, which requires names to match `[a-zA-Z0-9_-]{1,64}`.
+/// Replaces '.' with `__dot__` for readability in API logs (e.g., `"code.read"` -> `"code__dot__read"`).
 fn encode_anthropic_tool_name(name: &str) -> String {
-    let mut encoded = String::from("tool_");
-    for byte in name.as_bytes() {
-        use std::fmt::Write as _;
-        let _ = write!(&mut encoded, "{byte:02x}");
-    }
-    encoded
+    name.replace('.', "__dot__")
 }
 
-fn decode_anthropic_tool_name(name: &str) -> String {
-    let Some(hex) = name.strip_prefix("tool_") else {
-        return name.to_string();
-    };
-    if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return name.to_string();
-    }
-
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for i in (0..hex.len()).step_by(2) {
-        let pair = &hex[i..i + 2];
-        let Ok(byte) = u8::from_str_radix(pair, 16) else {
-            return name.to_string();
-        };
-        bytes.push(byte);
-    }
-
-    String::from_utf8(bytes).unwrap_or_else(|_| name.to_string())
+/// Decode an Anthropic-encoded tool name back to the original.
+fn decode_anthropic_tool_name(encoded: &str) -> String {
+    encoded.replace("__dot__", ".")
 }
 
 fn request_text_len(request: &LlmRequest) -> usize {
@@ -2025,17 +2007,27 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&tool_def).unwrap();
-        assert!(json.contains("\"name\":\"tool_636f64652e72656164\""));
+        assert!(json.contains("\"name\":\"code__dot__read\""));
         assert!(json.contains("\"input_schema\""));
         assert!(json.contains("\"description\":\"Read a file\""));
     }
 
     #[test]
-    fn anthropic_tool_name_roundtrip_preserves_canonical_name() {
-        let encoded = encode_anthropic_tool_name("agent.ask_user");
-        assert_eq!(encoded, "tool_6167656e742e61736b5f75736572");
-        assert_eq!(decode_anthropic_tool_name(&encoded), "agent.ask_user");
-        assert_eq!(decode_anthropic_tool_name("update_plan"), "update_plan");
+    fn anthropic_tool_name_encode_decode_roundtrip() {
+        let original = "code.read";
+        let encoded = encode_anthropic_tool_name(original);
+        assert_eq!(encoded, "code__dot__read");
+        let decoded = decode_anthropic_tool_name(&encoded);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn anthropic_tool_name_no_dots_unchanged() {
+        let original = "update_plan";
+        let encoded = encode_anthropic_tool_name(original);
+        assert_eq!(encoded, "update_plan"); // no dots, no change
+        let decoded = decode_anthropic_tool_name(&encoded);
+        assert_eq!(decoded, original);
     }
 
     #[test]

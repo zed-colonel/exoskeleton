@@ -33,6 +33,8 @@ timeout_secs = 120
 # --- Inner Loop ---
 [inner_loop]
 enabled = true
+# Increased from 25 to 35 to provide headroom for medium/hard tasks.
+# Easy tasks use 6-14 steps; 35 accommodates multi-file edits.
 max_steps_per_tick = 35
 max_tokens_per_session = 500000
 timeout_secs = 300
@@ -53,5 +55,8 @@ threat_monitor_enabled = false
 meta_cognition_enabled = false
 creative_synthesis_enabled = false
 initiative_enabled = false
+# Disabled for benchmarks: these threads consume tokens but don't improve
+# single-session task pass rate. Self-critique evaluates after the tick
+# (benefits future ticks only), memory consolidation is long-term learning.
 self_critique_enabled = false
 memory_consolidation_enabled = false
