@@ -376,7 +376,10 @@ struct OpenAiFunctionDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiToolCall {
-    id: String,
+    /// Call ID. Optional because some backends (Ollama native) may omit it.
+    /// When absent, a synthetic ID is generated during response parsing.
+    #[serde(default)]
+    id: Option<String>,
     r#type: String,
     function: OpenAiFunctionCall,
 }
@@ -431,7 +434,7 @@ fn append_openai_messages(
         .iter()
         .filter_map(|block| match block {
             ContentBlock::ToolUse { id, name, input } => Some(OpenAiToolCall {
-                id: id.clone(),
+                id: Some(id.clone()),
                 r#type: "function".into(),
                 function: OpenAiFunctionCall {
                     name: name.clone(),
@@ -487,15 +490,20 @@ fn parse_openai_response_blocks(message: OpenAiMessage) -> Result<Vec<ContentBlo
         }
     }
     if let Some(tool_calls) = message.tool_calls {
-        for call in tool_calls {
+        for (i, call) in tool_calls.into_iter().enumerate() {
             let input = serde_json::from_str(&call.function.arguments).map_err(|e| {
                 ExoError::LlmInvocation(format!(
                     "malformed tool call arguments for '{}': {e}",
                     call.function.name
                 ))
             })?;
+            // Use the API-provided call ID, or generate a synthetic one
+            // for backends (e.g., some Ollama versions) that omit it.
+            let id = call
+                .id
+                .unwrap_or_else(|| format!("synthetic_call_{i}"));
             blocks.push(ContentBlock::ToolUse {
-                id: call.id,
+                id,
                 name: call.function.name,
                 input,
             });
@@ -1346,7 +1354,7 @@ fn append_ollama_messages(
         .iter()
         .filter_map(|block| match block {
             ContentBlock::ToolUse { id, name, input } => Some(OpenAiToolCall {
-                id: id.clone(),
+                id: Some(id.clone()),
                 r#type: "function".into(),
                 function: OpenAiFunctionCall {
                     name: name.clone(),
@@ -1906,5 +1914,164 @@ mod tests {
         let debug = format!("{:?}", backend);
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("sk-secret123"));
+    }
+
+    // ── Wire-format parsing tests (tool_use) ──
+
+    #[test]
+    fn parse_anthropic_text_content_block() {
+        let json = r#"{"type": "text", "text": "I'll read the file."}"#;
+        let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
+        match block {
+            AnthropicContentBlock::Text { text } => assert_eq!(text, "I'll read the file."),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_tool_use_content_block() {
+        let json = r#"{
+            "type": "tool_use",
+            "id": "toolu_01ABC",
+            "name": "code.read",
+            "input": {"file_path": "src/lib.rs"}
+        }"#;
+        let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
+        match block {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_01ABC");
+                assert_eq!(name, "code.read");
+                assert_eq!(input["file_path"], "src/lib.rs");
+            }
+            other => panic!("expected ToolUse, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_tool_result_content_block() {
+        let json = r#"{
+            "type": "tool_result",
+            "tool_use_id": "toolu_01ABC",
+            "content": "file contents here",
+            "is_error": false
+        }"#;
+        let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
+        match block {
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "toolu_01ABC");
+                assert_eq!(content, "file contents here");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_tool_definition_serialization() {
+        let tool_def = AnthropicToolDefinition {
+            name: "code.read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"]
+            }),
+        };
+        let json = serde_json::to_string(&tool_def).unwrap();
+        assert!(json.contains("\"name\":\"code.read\""));
+        assert!(json.contains("\"input_schema\""));
+        assert!(json.contains("\"description\":\"Read a file\""));
+    }
+
+    #[test]
+    fn parse_openai_tool_call_with_id() {
+        let json = r#"{
+            "id": "call_abc123",
+            "type": "function",
+            "function": {
+                "name": "code.read",
+                "arguments": "{\"file_path\":\"src/lib.rs\"}"
+            }
+        }"#;
+        let call: OpenAiToolCall = serde_json::from_str(json).unwrap();
+        assert_eq!(call.id, Some("call_abc123".into()));
+        assert_eq!(call.function.name, "code.read");
+    }
+
+    #[test]
+    fn parse_openai_tool_call_without_id() {
+        let json = r#"{
+            "type": "function",
+            "function": {
+                "name": "code.read",
+                "arguments": "{\"file_path\":\"src/lib.rs\"}"
+            }
+        }"#;
+        let call: OpenAiToolCall = serde_json::from_str(json).unwrap();
+        assert_eq!(call.id, None);
+        assert_eq!(call.function.name, "code.read");
+    }
+
+    #[test]
+    fn parse_openai_response_blocks_with_tool_calls() {
+        let msg = OpenAiMessage {
+            role: "assistant".into(),
+            content: Some("I'll read the file.".into()),
+            tool_calls: Some(vec![OpenAiToolCall {
+                id: Some("call_1".into()),
+                r#type: "function".into(),
+                function: OpenAiFunctionCall {
+                    name: "code.read".into(),
+                    arguments: r#"{"file_path":"src/lib.rs"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let blocks = parse_openai_response_blocks(msg).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "I'll read the file."));
+        assert!(matches!(&blocks[1], ContentBlock::ToolUse { id, name, .. } if id == "call_1" && name == "code.read"));
+    }
+
+    #[test]
+    fn parse_openai_response_blocks_synthetic_id() {
+        let msg = OpenAiMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(vec![OpenAiToolCall {
+                id: None,
+                r#type: "function".into(),
+                function: OpenAiFunctionCall {
+                    name: "code.read".into(),
+                    arguments: r#"{"file_path":"test"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let blocks = parse_openai_response_blocks(msg).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            matches!(&blocks[0], ContentBlock::ToolUse { id, .. } if id == "synthetic_call_0")
+        );
+    }
+
+    #[test]
+    fn openai_tool_definition_serialization() {
+        let tool_def = OpenAiToolDefinition {
+            r#type: "function".into(),
+            function: OpenAiFunctionDefinition {
+                name: "code.read".into(),
+                description: "Read a file".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        };
+        let json = serde_json::to_string(&tool_def).unwrap();
+        assert!(json.contains("\"type\":\"function\""));
+        assert!(json.contains("\"name\":\"code.read\""));
+        assert!(json.contains("\"parameters\""));
     }
 }

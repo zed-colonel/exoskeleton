@@ -102,6 +102,74 @@ pub fn default_mock_response() -> LlmResponse {
     }
 }
 
+/// Create a mock response with a single tool_use block.
+pub fn mock_tool_use_response(
+    call_id: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+) -> LlmResponse {
+    use exoskeleton_core::llm::{LlmBackend, StopReason};
+
+    LlmResponse {
+        content_blocks: vec![ContentBlock::ToolUse {
+            id: call_id.into(),
+            name: tool_name.into(),
+            input,
+        }],
+        model: "mock-model".into(),
+        tokens_in: 10,
+        tokens_out: 5,
+        latency_ms: 100,
+        stop_reason: StopReason::ToolUse,
+        cost_estimate_cents: None,
+        backend: LlmBackend::Local,
+    }
+}
+
+/// Create a mock response with text and tool_use blocks.
+pub fn mock_text_and_tool_use_response(
+    text: &str,
+    call_id: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+) -> LlmResponse {
+    use exoskeleton_core::llm::{LlmBackend, StopReason};
+
+    LlmResponse {
+        content_blocks: vec![
+            ContentBlock::Text { text: text.into() },
+            ContentBlock::ToolUse {
+                id: call_id.into(),
+                name: tool_name.into(),
+                input,
+            },
+        ],
+        model: "mock-model".into(),
+        tokens_in: 10,
+        tokens_out: 5,
+        latency_ms: 100,
+        stop_reason: StopReason::ToolUse,
+        cost_estimate_cents: None,
+        backend: LlmBackend::Local,
+    }
+}
+
+/// Create a mock text-only response (end turn, no tool calls).
+pub fn mock_end_turn_response(text: &str) -> LlmResponse {
+    use exoskeleton_core::llm::{LlmBackend, StopReason};
+
+    LlmResponse {
+        content_blocks: vec![ContentBlock::Text { text: text.into() }],
+        model: "mock-model".into(),
+        tokens_in: 10,
+        tokens_out: 5,
+        latency_ms: 100,
+        stop_reason: StopReason::EndTurn,
+        cost_estimate_cents: None,
+        backend: LlmBackend::Local,
+    }
+}
+
 /// Mock LLM backend that returns a sequence of responses.
 ///
 /// Returns the next response in the sequence on each call. Wraps around if
@@ -208,6 +276,39 @@ mod tests {
         assert_eq!(mock.call_count(), 1);
         mock.call(&client, &test_request(), &token).unwrap();
         assert_eq!(mock.call_count(), 2);
+    }
+
+    #[test]
+    fn mock_tool_use_response_has_tool_use() {
+        let resp = mock_tool_use_response(
+            "call_1",
+            "code.read",
+            serde_json::json!({"file_path": "src/lib.rs"}),
+        );
+        assert!(resp.has_tool_use());
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert_eq!(resp.tool_use_blocks().len(), 1);
+    }
+
+    #[test]
+    fn mock_end_turn_no_tool_use() {
+        let resp = mock_end_turn_response("Done.");
+        assert!(!resp.has_tool_use());
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert_eq!(resp.text(), "Done.");
+    }
+
+    #[test]
+    fn mock_text_and_tool_use_has_both() {
+        let resp = mock_text_and_tool_use_response(
+            "Let me read that.",
+            "call_1",
+            "code.read",
+            serde_json::json!({}),
+        );
+        assert!(resp.has_tool_use());
+        assert_eq!(resp.text(), "Let me read that.");
+        assert_eq!(resp.tool_use_blocks().len(), 1);
     }
 
     #[test]
