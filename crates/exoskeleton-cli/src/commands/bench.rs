@@ -41,6 +41,7 @@ pub async fn run_bench(
     refresh: bool,
     repos_cache: Option<String>,
     swe_test_timeout: Option<u64>,
+    swe_max_ticks: Option<u32>,
 ) -> Result<(), CliError> {
     let results_dir = results_dir
         .map(PathBuf::from)
@@ -69,6 +70,7 @@ pub async fn run_bench(
             refresh,
             repos_cache,
             swe_test_timeout,
+            swe_max_ticks,
             record,
             compare,
             results_dir,
@@ -399,6 +401,7 @@ async fn run_swe_bench(
     refresh: bool,
     repos_cache: Option<String>,
     swe_test_timeout: Option<u64>,
+    swe_max_ticks: Option<u32>,
     record: Option<String>,
     compare: Option<String>,
     results_dir: PathBuf,
@@ -450,6 +453,7 @@ async fn run_swe_bench(
         test_timeout: swe_test_timeout
             .map(std::time::Duration::from_secs)
             .unwrap_or(defaults.test_timeout),
+        max_ticks: swe_max_ticks.unwrap_or(defaults.max_ticks),
         ..defaults
     };
 

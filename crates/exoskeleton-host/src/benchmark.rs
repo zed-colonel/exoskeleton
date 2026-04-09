@@ -708,9 +708,11 @@ impl HeadlessRunner {
         let normalized = rationale.to_lowercase();
 
         // Static pairs: (Display string needle, return value)
+        // NOTE: step_limit is intentionally absent — it means the inner loop hit
+        // its per-tick step budget, but the master loop will start a new tick.
+        // The poller should keep waiting for a terminal reason or max_ticks.
         const KNOWN: &[(&str, &str)] = &[
             ("agent_complete", "AgentComplete"),
-            ("step_limit", "StepLimit"),
             ("token_budget", "TokenBudget"),
             ("timeout", "Timeout"),
             ("doom_loop", "DoomLoop"),
@@ -1745,9 +1747,10 @@ command = "true"
             ),
             Some("AgentComplete")
         );
+        // step_limit is intentionally non-terminal — the master loop ticks over
         assert_eq!(
             HeadlessRunner::completion_reason_from_rationale("notes [completion: step_limit]"),
-            Some("StepLimit")
+            None
         );
         assert_eq!(
             HeadlessRunner::completion_reason_from_rationale(

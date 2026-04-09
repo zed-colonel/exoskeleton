@@ -95,6 +95,7 @@ pub struct SweRunOptions {
     pub cache_dir: PathBuf,
     pub repos_cache: PathBuf,
     pub test_timeout: std::time::Duration,
+    pub max_ticks: u32,
     pub verbose: bool,
 }
 
@@ -111,6 +112,7 @@ impl Default for SweRunOptions {
             cache_dir: cache_base.join("datasets"),
             repos_cache: cache_base.join("repos"),
             test_timeout: std::time::Duration::from_secs(300),
+            max_ticks: 5,
             verbose: false,
         }
     }
@@ -229,7 +231,7 @@ impl SweBenchRunner {
             &instance.problem_statement,
             workspace,
             timeout,
-            Some(5),
+            Some(options.max_ticks),
         )
         .await?;
 

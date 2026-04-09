@@ -276,6 +276,10 @@ enum Commands {
         /// Timeout in seconds for cargo test during evaluation (default: 300).
         #[arg(long)]
         swe_test_timeout: Option<u64>,
+
+        /// Maximum ticks per SWE-bench instance (default: 5).
+        #[arg(long)]
+        swe_max_ticks: Option<u32>,
     },
 }
 
@@ -375,6 +379,7 @@ async fn main() {
             refresh,
             repos_cache,
             swe_test_timeout,
+            swe_max_ticks,
         } => {
             commands::bench::run_bench(
                 task,
@@ -396,6 +401,7 @@ async fn main() {
                 refresh,
                 repos_cache,
                 swe_test_timeout,
+                swe_max_ticks,
             )
             .await
         }
