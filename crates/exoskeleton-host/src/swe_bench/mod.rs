@@ -229,9 +229,12 @@ impl SweBenchRunner {
         // Each tick's inner loop has its own timeout (inner_loop.timeout_secs),
         // so the outer timeout needs to accommodate max_ticks * per-tick time
         // plus overhead for vessel boot, reflect, amend between ticks.
-        let per_tick_secs = base_config.inner_loop.timeout_secs.max(300);
+        // Each tick includes LLM inference + tool execution; real wall time is
+        // dominated by LLM latency, not the inner loop timeout. Use 10 minutes
+        // per tick as a generous upper bound.
+        let per_tick_budget_secs = 600_u64;
         let timeout = std::time::Duration::from_secs(
-            per_tick_secs * options.max_ticks as u64 + 60,
+            per_tick_budget_secs * options.max_ticks as u64 + 120,
         );
         let (completion_reason, inspector) = inject_and_poll(
             &vessel,
