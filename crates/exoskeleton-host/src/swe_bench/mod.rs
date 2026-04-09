@@ -225,7 +225,14 @@ impl SweBenchRunner {
         let vessel = boot_vessel(config).await?;
 
         // 5-6. Inject prompt and poll
-        let timeout = std::time::Duration::from_secs(base_config.inner_loop.timeout_secs.max(300));
+        // Outer timeout: allow enough time for all ticks to complete.
+        // Each tick's inner loop has its own timeout (inner_loop.timeout_secs),
+        // so the outer timeout needs to accommodate max_ticks * per-tick time
+        // plus overhead for vessel boot, reflect, amend between ticks.
+        let per_tick_secs = base_config.inner_loop.timeout_secs.max(300);
+        let timeout = std::time::Duration::from_secs(
+            per_tick_secs * options.max_ticks as u64 + 60,
+        );
         let (completion_reason, inspector) = inject_and_poll(
             &vessel,
             &instance.problem_statement,
