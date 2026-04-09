@@ -229,10 +229,11 @@ impl SweBenchRunner {
         // Each tick's inner loop has its own timeout (inner_loop.timeout_secs),
         // so the outer timeout needs to accommodate max_ticks * per-tick time
         // plus overhead for vessel boot, reflect, amend between ticks.
-        // Each tick includes LLM inference + tool execution; real wall time is
-        // dominated by LLM latency, not the inner loop timeout. Use 10 minutes
-        // per tick as a generous upper bound.
-        let per_tick_budget_secs = 600_u64;
+        // Each tick includes LLM inference + tool execution (some tools like
+        // cargo build can take minutes). Use 30 min per tick as a generous bound.
+        // The actual termination signal is max_ticks or agent_complete, not this
+        // timeout — this is just a safety net against infinite hangs.
+        let per_tick_budget_secs = 1800_u64;
         let timeout = std::time::Duration::from_secs(
             per_tick_budget_secs * options.max_ticks as u64 + 120,
         );
