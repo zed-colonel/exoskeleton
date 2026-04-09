@@ -933,8 +933,14 @@ async fn inner_loop_agent_complete() {
             step_count, 0,
             "no steps should execute when actions are empty"
         );
-        assert!(!found_started, "inner loop should not start without actions");
-        assert!(!found_completed, "inner loop should not emit completion without starting");
+        assert!(
+            !found_started,
+            "inner loop should not start without actions"
+        );
+        assert!(
+            !found_completed,
+            "inner loop should not emit completion without starting"
+        );
 
         shutdown_host(&kernel).await;
     })

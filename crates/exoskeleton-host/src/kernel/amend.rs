@@ -23,11 +23,11 @@ use exoskeleton_memory::approximate_token_count;
 use exoskeleton_threads::builtin::memory_consolidation;
 use exoskeleton_threads::MEMORY_CONSOLIDATION_ID;
 
-use crate::budget::session::SessionCompletionReason;
 use super::types::{
     ActResult, AlignmentResult, DecisionResult, PerceptionResult, ReflectionResult,
 };
 use super::KernelContext;
+use crate::budget::session::SessionCompletionReason;
 
 /// Format the decision rationale for the tick record.
 ///

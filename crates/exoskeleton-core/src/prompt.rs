@@ -309,7 +309,10 @@ mod tests {
         let result = registry
             .resolve(
                 "decide-system",
-                &[("vessel_id", "test-vessel-123"), ("mission", "explore the cosmos")],
+                &[
+                    ("vessel_id", "test-vessel-123"),
+                    ("mission", "explore the cosmos"),
+                ],
             )
             .unwrap();
 

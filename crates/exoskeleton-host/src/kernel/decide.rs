@@ -10,7 +10,7 @@
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::LlmCallRecord;
-use exoskeleton_core::{Artifact, ArtifactKind, ArtifactId, ExoError};
+use exoskeleton_core::{Artifact, ArtifactId, ArtifactKind, ExoError};
 use serde_json::json;
 
 use super::tools::{
@@ -99,15 +99,13 @@ pub fn decide(
         for block in &response.content_blocks {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 if is_introspection_tool(name) {
-                    let tool_result =
-                        resolve_introspection_tool(name, input, id, &introspection)?;
+                    let tool_result = resolve_introspection_tool(name, input, id, &introspection)?;
                     tool_results.push(tool_result);
                     continue;
                 }
 
                 if is_cognitive_tool(name) {
-                    let tool_result =
-                        resolve_cognitive_tool(name, input, id, &mut accumulator)?;
+                    let tool_result = resolve_cognitive_tool(name, input, id, &mut accumulator)?;
                     tool_results.push(tool_result);
                     continue;
                 }
@@ -139,8 +137,10 @@ pub fn decide(
             break;
         }
 
-        if matches!(response.stop_reason, exoskeleton_core::llm::StopReason::ToolUse)
-            && !tool_results.is_empty()
+        if matches!(
+            response.stop_reason,
+            exoskeleton_core::llm::StopReason::ToolUse
+        ) && !tool_results.is_empty()
         {
             continue;
         }

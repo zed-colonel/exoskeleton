@@ -60,8 +60,7 @@ pub fn cognitive_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "update_plan".into(),
-            description: "Replace the current plan or patch it with incremental operations."
-                .into(),
+            description: "Replace the current plan or patch it with incremental operations.".into(),
             input_schema: json!({
                 "type": "object",
                 "required": ["type"],
@@ -275,21 +274,19 @@ pub fn introspection_tool_to_query(
         "introspect_budget_status" => Ok(IntrospectionQuery::BudgetStatus),
         "introspect_thread_status" => Ok(IntrospectionQuery::ThreadStatus),
         "introspect_memory_search" => Ok(IntrospectionQuery::MemorySearch {
-            topic: input.get("topic").and_then(Value::as_str).map(str::to_owned),
+            topic: input
+                .get("topic")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             tags: input
                 .get("tags")
                 .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok()),
         }),
         "introspect_trust_scores" => Ok(IntrospectionQuery::TrustScores),
         "introspect_connector_details" => {
-            let connector = input
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ExoError::Engine(
-                        "introspect_connector_details requires string field 'name'".into(),
-                    )
-                })?;
+            let connector = input.get("name").and_then(Value::as_str).ok_or_else(|| {
+                ExoError::Engine("introspect_connector_details requires string field 'name'".into())
+            })?;
             Ok(IntrospectionQuery::ConnectorDetails {
                 name: connector.into(),
             })
@@ -321,9 +318,7 @@ pub fn process_cognitive_tool(name: &str, input: &Value) -> Result<CognitiveTool
             let ops = input
                 .get("ops")
                 .cloned()
-                .ok_or_else(|| {
-                    ExoError::Engine("set_working_memory requires field 'ops'".into())
-                })
+                .ok_or_else(|| ExoError::Engine("set_working_memory requires field 'ops'".into()))
                 .and_then(|value| {
                     serde_json::from_value::<Vec<WorkingMemoryOp>>(value).map_err(|e| {
                         ExoError::Engine(format!("set_working_memory invalid ops: {e}"))
@@ -353,17 +348,12 @@ pub fn process_cognitive_tool(name: &str, input: &Value) -> Result<CognitiveTool
             ..CognitiveToolResult::default()
         }),
         "request_vessel_mode" => Ok(CognitiveToolResult {
-            vessel_mode_request: Some(serde_json::from_value(
-                input
-                    .get("mode")
-                    .cloned()
-                    .ok_or_else(|| {
-                        ExoError::Engine(
-                            "request_vessel_mode requires field 'mode'".into(),
-                        )
-                    })?,
-            )
-            .map_err(|e| ExoError::Engine(format!("request_vessel_mode invalid mode: {e}")))?),
+            vessel_mode_request: Some(
+                serde_json::from_value(input.get("mode").cloned().ok_or_else(|| {
+                    ExoError::Engine("request_vessel_mode requires field 'mode'".into())
+                })?)
+                .map_err(|e| ExoError::Engine(format!("request_vessel_mode invalid mode: {e}")))?,
+            ),
             ..CognitiveToolResult::default()
         }),
         "reply_to_user" => Ok(CognitiveToolResult {
@@ -431,7 +421,9 @@ pub fn build_decide_tools(kernel: &KernelContext) -> Vec<ToolDefinition> {
     tools.extend(
         virtual_tools::virtual_tool_definitions()
             .into_iter()
-            .filter(|tool| tool.name != virtual_tools::PEER_RESOLVE || kernel.observatory_url.is_some()),
+            .filter(|tool| {
+                tool.name != virtual_tools::PEER_RESOLVE || kernel.observatory_url.is_some()
+            }),
     );
     tools.extend(cognitive_tool_definitions());
     tools.extend(introspection_tool_definitions());
@@ -530,7 +522,10 @@ mod tests {
     #[test]
     fn is_introspection_tool_recognizes_all() {
         for name in INTROSPECTION_TOOLS {
-            assert!(is_introspection_tool(name), "{name} should be introspection");
+            assert!(
+                is_introspection_tool(name),
+                "{name} should be introspection"
+            );
         }
     }
 
@@ -543,8 +538,8 @@ mod tests {
 
     #[test]
     fn introspection_tool_to_query_tick_history() {
-        let q = introspection_tool_to_query("introspect_tick_history", &json!({"limit": 5}))
-            .unwrap();
+        let q =
+            introspection_tool_to_query("introspect_tick_history", &json!({"limit": 5})).unwrap();
         assert!(matches!(q, IntrospectionQuery::TickHistory { limit: 5 }));
     }
 

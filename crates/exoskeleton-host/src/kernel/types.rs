@@ -9,8 +9,8 @@ use exoskeleton_core::plan::{PlanTaskStatus, PlanUpdate};
 use exoskeleton_core::tick::{ActionRecord, LlmCallRecord, ThreadContribution};
 use exoskeleton_core::working_memory::WorkingMemoryOp;
 use exoskeleton_core::{
-    ArtifactId, EventEntry, MessageEnvelope, PlanTaskId, RelationshipRecord,
-    RelationshipSnapshot, ThreadId, TickId, VesselId, VesselMode,
+    ArtifactId, EventEntry, MessageEnvelope, PlanTaskId, RelationshipRecord, RelationshipSnapshot,
+    ThreadId, TickId, VesselId, VesselMode,
 };
 use exoskeleton_memory::CompiledContext;
 use serde::{Deserialize, Serialize};

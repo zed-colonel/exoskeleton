@@ -8,10 +8,10 @@
 //! infrastructure primitives. Virtual tools are the abstraction boundary
 //! between agent intent and infrastructure mechanism.
 
+use exoskeleton_core::llm::ToolDefinition;
 use exoskeleton_core::{
     Artifact, ArtifactKind, EventType, ExoError, LiveEvent, QuestionDetail, TickId,
 };
-use exoskeleton_core::llm::ToolDefinition;
 use serde_json::{json, Value};
 use worldinterface_core::descriptor::{ConnectorCategory, Descriptor};
 

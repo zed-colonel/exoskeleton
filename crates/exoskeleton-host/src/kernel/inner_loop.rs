@@ -14,18 +14,12 @@
 //! Every inner-loop action passes through the Align gate (I8) and budget enforcement (I6).
 //! Every LLM response is stored as a content-addressed artifact (I3).
 
-use actionqueue_executor_local::CancellationToken;
-use exoskeleton_core::event::InnerLoopStepDetail;
-use exoskeleton_core::llm::{ContentBlock, LlmMessage, LlmRequest, LlmRole, StopReason};
-use exoskeleton_core::tick::LlmCallRecord;
-use exoskeleton_core::RelationshipSnapshot;
-use exoskeleton_core::{DiffSummary, EventType, ExoError, LiveEvent, RelationshipRecord};
+use super::tools::{
+    accumulate_cognitive_outcome, build_inner_loop_tools, is_cognitive_tool,
+    process_cognitive_tool, CognitiveAccumulator,
+};
 use super::types::{
     ActionExecution, DecisionResult, OrientationResult, PerceptionResult, PlannedAction,
-};
-use super::tools::{
-    accumulate_cognitive_outcome, build_inner_loop_tools, is_cognitive_tool, process_cognitive_tool,
-    CognitiveAccumulator,
 };
 use super::{act, align, diff_tracker::DiffTracker, KernelContext};
 use crate::budget::session::{
@@ -33,6 +27,12 @@ use crate::budget::session::{
 };
 use crate::cognitive_engine::CognitiveHandler;
 use crate::llm::direct::handler_direct_llm_call;
+use actionqueue_executor_local::CancellationToken;
+use exoskeleton_core::event::InnerLoopStepDetail;
+use exoskeleton_core::llm::{ContentBlock, LlmMessage, LlmRequest, LlmRole, StopReason};
+use exoskeleton_core::tick::LlmCallRecord;
+use exoskeleton_core::RelationshipSnapshot;
+use exoskeleton_core::{DiffSummary, EventType, ExoError, LiveEvent, RelationshipRecord};
 
 /// Result of the inner loop, consumed by the outer tick for Reflect and Amend.
 pub struct InnerLoopResult {
@@ -328,10 +328,9 @@ fn decide_lite(
     cancellation: &CancellationToken,
 ) -> Result<DecisionResult, ExoError> {
     let mode_context = build_mode_context(kernel);
-    let system_prompt = kernel.prompt_registry.resolve(
-        "inner-loop-system",
-        &[("mode_context", &mode_context)],
-    )?;
+    let system_prompt = kernel
+        .prompt_registry
+        .resolve("inner-loop-system", &[("mode_context", &mode_context)])?;
 
     let mut messages = vec![LlmMessage::text(
         LlmRole::User,

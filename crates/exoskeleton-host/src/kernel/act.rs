@@ -24,11 +24,16 @@ pub const MAX_TOOL_RESULT_CHARS: usize = 4000;
 
 fn tool_result_content(value: &Result<serde_json::Value, String>) -> (String, bool) {
     let raw = match value {
-        Ok(json) => serde_json::to_string(json).unwrap_or_else(|_| "\"serialization_error\"".into()),
+        Ok(json) => {
+            serde_json::to_string(json).unwrap_or_else(|_| "\"serialization_error\"".into())
+        }
         Err(error) => error.clone(),
     };
     let truncated = if raw.chars().count() > MAX_TOOL_RESULT_CHARS {
-        let shortened: String = raw.chars().take(MAX_TOOL_RESULT_CHARS.saturating_sub(3)).collect();
+        let shortened: String = raw
+            .chars()
+            .take(MAX_TOOL_RESULT_CHARS.saturating_sub(3))
+            .collect();
         format!("{shortened}...")
     } else {
         raw

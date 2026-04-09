@@ -514,9 +514,7 @@ fn parse_openai_response_blocks(message: OpenAiMessage) -> Result<Vec<ContentBlo
             })?;
             // Use the API-provided call ID, or generate a synthetic one
             // for backends (e.g., some Ollama versions) that omit it.
-            let id = call
-                .id
-                .unwrap_or_else(|| format!("synthetic_call_{i}"));
+            let id = call.id.unwrap_or_else(|| format!("synthetic_call_{i}"));
             blocks.push(ContentBlock::ToolUse {
                 id,
                 name: call.function.name,
@@ -967,13 +965,11 @@ fn parse_anthropic_response_blocks(blocks: Vec<AnthropicContentBlock>) -> Vec<Co
         .into_iter()
         .map(|block| match block {
             AnthropicContentBlock::Text { text } => ContentBlock::Text { text },
-            AnthropicContentBlock::ToolUse { id, name, input } => {
-                ContentBlock::ToolUse {
-                    id,
-                    name: decode_anthropic_tool_name(&name),
-                    input,
-                }
-            }
+            AnthropicContentBlock::ToolUse { id, name, input } => ContentBlock::ToolUse {
+                id,
+                name: decode_anthropic_tool_name(&name),
+                input,
+            },
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
                 content,
@@ -1045,9 +1041,7 @@ impl LlmHttpBackend for AnthropicBackend {
             .map_err(|e| ExoError::LlmInvocation(format!("failed to read response body: {e}")))?;
         let parsed: AnthropicResponse = serde_json::from_str(&response_text).map_err(|e| {
             let snippet: String = response_text.chars().take(600).collect();
-            ExoError::LlmInvocation(format!(
-                "malformed response body: {e}; body={snippet}"
-            ))
+            ExoError::LlmInvocation(format!("malformed response body: {e}; body={snippet}"))
         })?;
 
         let content_blocks = parse_anthropic_response_blocks(parsed.content);
@@ -2091,7 +2085,9 @@ mod tests {
         let blocks = parse_openai_response_blocks(msg).unwrap();
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "I'll read the file."));
-        assert!(matches!(&blocks[1], ContentBlock::ToolUse { id, name, .. } if id == "call_1" && name == "code.read"));
+        assert!(
+            matches!(&blocks[1], ContentBlock::ToolUse { id, name, .. } if id == "call_1" && name == "code.read")
+        );
     }
 
     #[test]
@@ -2111,9 +2107,7 @@ mod tests {
         };
         let blocks = parse_openai_response_blocks(msg).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert!(
-            matches!(&blocks[0], ContentBlock::ToolUse { id, .. } if id == "synthetic_call_0")
-        );
+        assert!(matches!(&blocks[0], ContentBlock::ToolUse { id, .. } if id == "synthetic_call_0"));
     }
 
     #[test]
@@ -2142,7 +2136,10 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("test".into()),
-            messages: vec![exoskeleton_core::llm::LlmMessage::text(LlmRole::User, "hello")],
+            messages: vec![exoskeleton_core::llm::LlmMessage::text(
+                LlmRole::User,
+                "hello",
+            )],
             max_output_tokens: 256,
             temperature: None,
             stop_sequences: vec![],
@@ -2165,7 +2162,10 @@ mod tests {
         let request = LlmRequest {
             backend: None,
             system_prompt: Some("test".into()),
-            messages: vec![exoskeleton_core::llm::LlmMessage::text(LlmRole::User, "hello")],
+            messages: vec![exoskeleton_core::llm::LlmMessage::text(
+                LlmRole::User,
+                "hello",
+            )],
             max_output_tokens: 256,
             temperature: None,
             stop_sequences: vec![],

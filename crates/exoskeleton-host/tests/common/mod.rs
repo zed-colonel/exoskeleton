@@ -156,7 +156,10 @@ pub fn mock_llm_response(content: &str) -> LlmResponse {
         for (idx, action) in actions.iter().enumerate() {
             content_blocks.push(ContentBlock::ToolUse {
                 id: format!("call_{idx}"),
-                name: action["tool_name"].as_str().unwrap_or("unknown").to_string(),
+                name: action["tool_name"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
                 input: action["params"].clone(),
             });
         }
