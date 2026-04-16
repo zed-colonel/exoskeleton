@@ -22,6 +22,18 @@ use super::KernelContext;
 
 pub const MAX_TOOL_RESULT_CHARS: usize = 4000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathRequirement {
+    ExistingFile,
+    ExistingPath,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecentPathContext {
+    Read,
+    Mutation,
+}
+
 fn tool_result_content(value: &Result<serde_json::Value, String>) -> (String, bool) {
     let raw = match value {
         Ok(json) => {
@@ -39,6 +51,145 @@ fn tool_result_content(value: &Result<serde_json::Value, String>) -> (String, bo
         raw
     };
     (truncated, value.is_err())
+}
+
+fn action_target_summary(action: &super::types::PlannedAction) -> String {
+    extract_action_path(&action.params)
+        .map(str::to_owned)
+        .unwrap_or_else(|| action.params.to_string())
+}
+
+fn is_read_action_type(tool_name: &str) -> bool {
+    matches!(tool_name, "code.read" | "fs.read")
+}
+
+fn is_mutating_action_type(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code.edit" | "code.write" | "code.apply_patch" | "fs.write"
+    )
+}
+
+fn path_requirement_for_tool(tool_name: &str) -> Option<PathRequirement> {
+    match tool_name {
+        "code.read" | "fs.read" | "code.edit" => Some(PathRequirement::ExistingFile),
+        "code.grep" | "code.ls" | "code.glob" => Some(PathRequirement::ExistingPath),
+        _ => None,
+    }
+}
+
+fn validate_action_target_path(
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    let requirement = path_requirement_for_tool(tool_name)?;
+    let target_path = extract_action_path(params)?;
+    let path = std::path::Path::new(target_path);
+
+    let validation_error = match requirement {
+        PathRequirement::ExistingFile if !path.exists() => {
+            format!("target file does not exist: {target_path}")
+        }
+        PathRequirement::ExistingFile if !path.is_file() => {
+            format!("target path is not a file: {target_path}")
+        }
+        PathRequirement::ExistingPath if !path.exists() => {
+            format!("target path does not exist: {target_path}")
+        }
+        _ => return None,
+    };
+
+    let error_json = serde_json::json!({
+        "error": validation_error,
+        "tool": tool_name,
+        "params": params,
+        "validation": "preflight_target_path",
+    });
+    Some((validation_error, error_json))
+}
+
+fn build_error_receipt(
+    kernel: &KernelContext,
+    tool_name: &str,
+    params: &serde_json::Value,
+    error_message: &str,
+    extra: Option<serde_json::Value>,
+) -> Option<exoskeleton_core::ArtifactId> {
+    let mut error_json = serde_json::json!({
+        "error": error_message,
+        "tool": tool_name,
+        "params": params,
+    });
+    if let Some(extra_fields) = extra {
+        if let (Some(target), Some(extra_obj)) =
+            (error_json.as_object_mut(), extra_fields.as_object())
+        {
+            target.extend(extra_obj.clone());
+        }
+    }
+
+    match Artifact::from_json(ArtifactKind::Receipt, &error_json) {
+        Ok(artifact) => match kernel.artifact_store.put(&artifact) {
+            Ok(id) => Some(id),
+            Err(store_err) => {
+                tracing::warn!(error = %store_err, "failed to store error receipt");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize error receipt");
+            None
+        }
+    }
+}
+
+fn recent_path_context(kernel: &KernelContext, target_path: &str) -> Option<RecentPathContext> {
+    if kernel
+        .read_paths_this_tick
+        .lock()
+        .map(|guard| guard.contains(target_path))
+        .unwrap_or(false)
+    {
+        return Some(RecentPathContext::Read);
+    }
+
+    let Some(latest) = kernel.tick_store.latest().ok().flatten() else {
+        return None;
+    };
+    let from_tick = latest.tick_number.saturating_sub(3);
+    let Ok(recent_ticks) = kernel.tick_store.range(from_tick, latest.tick_number) else {
+        return None;
+    };
+
+    for tick in recent_ticks.into_iter().rev() {
+        for action in tick.actions_taken.into_iter().rev() {
+            if action.outcome != ActionOutcome::Success || action.target != target_path {
+                continue;
+            }
+            if is_read_action_type(&action.action_type) {
+                return Some(RecentPathContext::Read);
+            }
+            if is_mutating_action_type(&action.action_type) {
+                return Some(RecentPathContext::Mutation);
+            }
+        }
+    }
+
+    None
+}
+
+fn satisfies_read_before_write(
+    kernel: &KernelContext,
+    tool_name: &str,
+    target_path: &str,
+) -> bool {
+    match recent_path_context(kernel, target_path) {
+        Some(RecentPathContext::Read) => true,
+        Some(RecentPathContext::Mutation) => {
+            matches!(tool_name, "code.edit" | "code.apply_patch")
+        }
+        None => false,
+    }
 }
 
 /// Extract a CodeDiff artifact from a successful mutating code tool result.
@@ -155,6 +306,8 @@ pub fn act(
                         target: action.params.to_string(),
                         receipt_ref: None,
                         outcome: ActionOutcome::RateLimited,
+                        origin_exec_thread_id: action.origin_exec_thread_id,
+                        proposal_id: action.proposal_id.clone(),
                     };
                     let event = EventEntry {
                         id: LedgerEntryId::new(),
@@ -189,13 +342,10 @@ pub fn act(
             if desc.requires_read_before_write {
                 if let Some(target_path) = extract_action_path(&action.params) {
                     let path_exists = std::path::Path::new(target_path).exists();
-                    let was_read = kernel
-                        .read_paths_this_tick
-                        .lock()
-                        .map(|guard| guard.contains(target_path))
-                        .unwrap_or(false);
+                    let has_recent_context =
+                        satisfies_read_before_write(kernel, &action.tool_name, target_path);
 
-                    if path_exists && !was_read {
+                    if path_exists && !has_recent_context {
                         let error_json = serde_json::json!({
                             "error": format!(
                                 "read-before-write required: {target_path} must be read earlier in this tick before invoking {}",
@@ -222,9 +372,11 @@ pub fn act(
 
                         let record = ActionRecord {
                             action_type: action.tool_name.clone(),
-                            target: action.params.to_string(),
+                            target: action_target_summary(action),
                             receipt_ref,
                             outcome: ActionOutcome::Failure,
+                            origin_exec_thread_id: action.origin_exec_thread_id,
+                            proposal_id: action.proposal_id.clone(),
                         };
                         let event = EventEntry {
                             id: LedgerEntryId::new(),
@@ -232,8 +384,8 @@ pub fn act(
                             event_type: EventType::ActionExecuted,
                             payload_ref: record.receipt_ref.clone(),
                             summary: format!(
-                                "Action {}: failed: read-before-write required for {} ({})",
-                                action.tool_name, target_path, action.rationale,
+                                "Action {}: failed: read-before-write required for {}",
+                                action.tool_name, target_path,
                             ),
                             timestamp: Utc::now(),
                         };
@@ -264,6 +416,57 @@ pub fn act(
             }
         }
 
+        if let Some((validation_error, error_json)) =
+            validate_action_target_path(&action.tool_name, &action.params)
+        {
+            let receipt_ref = build_error_receipt(
+                kernel,
+                &action.tool_name,
+                &action.params,
+                &validation_error,
+                Some(error_json),
+            );
+            let record = ActionRecord {
+                action_type: action.tool_name.clone(),
+                target: action_target_summary(action),
+                receipt_ref,
+                outcome: ActionOutcome::Failure,
+                origin_exec_thread_id: action.origin_exec_thread_id,
+                proposal_id: action.proposal_id.clone(),
+            };
+            let summary = format!("Action {}: failed: {}", action.tool_name, validation_error);
+            let event = EventEntry {
+                id: LedgerEntryId::new(),
+                tick_id: Some(tick_id),
+                event_type: EventType::ActionExecuted,
+                payload_ref: record.receipt_ref.clone(),
+                summary: summary.clone(),
+                timestamp: Utc::now(),
+            };
+            if let Err(e) = kernel.event_ledger.append(&event) {
+                tracing::warn!(error = %e, "failed to log ActionExecuted event");
+            }
+            let _ = kernel.event_tx.send(LiveEvent {
+                event_type: EventType::ActionExecuted,
+                summary,
+                ..LiveEvent::new(None)
+            });
+
+            executions.push(ActionExecution {
+                action: action.clone(),
+                result: Err(validation_error.clone()),
+                record,
+                tool_result: ContentBlock::ToolResult {
+                    tool_use_id: action.call_id.clone(),
+                    content: validation_error,
+                    is_error: true,
+                },
+                pending_question: false,
+                code_diff: None,
+            });
+            continue;
+        }
+
         let descriptor_read_only = descriptor.as_ref().is_some_and(|d| d.is_read_only);
         let current_mode = *kernel.vessel_mode.lock().unwrap();
         let policy_decision = policy::evaluate_policy(
@@ -279,11 +482,11 @@ pub fn act(
             PolicyDecision::Denied { reason } => {
                 let record = ActionRecord {
                     action_type: action.tool_name.clone(),
-                    target: extract_action_path(&action.params)
-                        .unwrap_or_default()
-                        .to_string(),
+                    target: action_target_summary(action),
                     receipt_ref: None,
                     outcome: ActionOutcome::PolicyDenied,
+                    origin_exec_thread_id: action.origin_exec_thread_id,
+                    proposal_id: action.proposal_id.clone(),
                 };
                 executions.push(ActionExecution {
                     action: action.clone(),
@@ -307,11 +510,11 @@ pub fn act(
                 );
                 let record = ActionRecord {
                     action_type: action.tool_name.clone(),
-                    target: extract_action_path(&action.params)
-                        .unwrap_or_default()
-                        .to_string(),
+                    target: action_target_summary(action),
                     receipt_ref: None,
                     outcome: ActionOutcome::PolicyDenied,
+                    origin_exec_thread_id: action.origin_exec_thread_id,
+                    proposal_id: action.proposal_id.clone(),
                 };
                 executions.push(ActionExecution {
                     action: action.clone(),
@@ -350,9 +553,11 @@ pub fn act(
                         );
                         let record = ActionRecord {
                             action_type: action.tool_name.clone(),
-                            target: action.params.to_string(),
+                            target: action_target_summary(action),
                             receipt_ref: None,
                             outcome: ActionOutcome::Failure,
+                            origin_exec_thread_id: action.origin_exec_thread_id,
+                            proposal_id: action.proposal_id.clone(),
                         };
                         executions.push(ActionExecution {
                             action: action.clone(),
@@ -409,30 +614,50 @@ pub fn act(
                 (ActionOutcome::Success, Ok(value), receipt_ref, code_diff)
             }
             Err(e) => {
+                let error_message = if let Some(target_path) = extract_action_path(&action.params) {
+                    let path = std::path::Path::new(target_path);
+                    if let Some(requirement) = path_requirement_for_tool(&action.tool_name) {
+                        match requirement {
+                            PathRequirement::ExistingFile if !path.exists() => {
+                                format!(
+                                    "target file does not exist: {target_path} (underlying error: {e})"
+                                )
+                            }
+                            PathRequirement::ExistingFile if !path.is_file() => {
+                                format!(
+                                    "target path is not a file: {target_path} (underlying error: {e})"
+                                )
+                            }
+                            PathRequirement::ExistingPath if !path.exists() => {
+                                format!(
+                                    "target path does not exist: {target_path} (underlying error: {e})"
+                                )
+                            }
+                            _ => e.to_string(),
+                        }
+                    } else {
+                        e.to_string()
+                    }
+                } else {
+                    e.to_string()
+                };
                 tracing::warn!(
                     tool = %action.tool_name,
-                    error = %e,
+                    error = %error_message,
                     "tool invocation failed"
                 );
-                // Store error as receipt artifact so Observatory can display it
-                let error_json = serde_json::json!({
-                    "error": e.to_string(),
-                    "tool": action.tool_name,
-                    "params": action.params,
-                });
-                let receipt_ref = match Artifact::from_json(ArtifactKind::Receipt, &error_json) {
-                    Ok(artifact) => match kernel.artifact_store.put(&artifact) {
-                        Ok(id) => Some(id),
-                        Err(store_err) => {
-                            tracing::warn!(error = %store_err, "failed to store error receipt");
-                            None
-                        }
-                    },
-                    Err(_) => None,
-                };
+                let receipt_ref = build_error_receipt(
+                    kernel,
+                    &action.tool_name,
+                    &action.params,
+                    &error_message,
+                    Some(serde_json::json!({
+                        "underlying_error": e.to_string(),
+                    })),
+                );
                 (
                     ActionOutcome::Failure,
-                    Err(e.to_string()),
+                    Err(error_message),
                     receipt_ref,
                     None,
                 )
@@ -441,9 +666,11 @@ pub fn act(
 
         let record = ActionRecord {
             action_type: action.tool_name.clone(),
-            target: action.params.to_string(),
+            target: action_target_summary(action),
             receipt_ref,
             outcome,
+            origin_exec_thread_id: action.origin_exec_thread_id,
+            proposal_id: action.proposal_id.clone(),
         };
 
         // Log ActionExecuted event to the Event Ledger.
@@ -466,10 +693,7 @@ pub fn act(
             tick_id: Some(tick_id),
             event_type: EventType::ActionExecuted,
             payload_ref: record.receipt_ref.clone(),
-            summary: format!(
-                "Action {}: {} ({})",
-                action.tool_name, result_summary, action.rationale,
-            ),
+            summary: format!("Action {}: {}", action.tool_name, result_summary),
             timestamp: Utc::now(),
         };
         if let Err(e) = kernel.event_ledger.append(&event) {
@@ -550,9 +774,11 @@ pub fn act(
             for remaining in &alignment.approved_actions[i + 1..] {
                 let record = ActionRecord {
                     action_type: remaining.tool_name.clone(),
-                    target: remaining.params.to_string(),
+                    target: action_target_summary(remaining),
                     receipt_ref: None,
                     outcome: ActionOutcome::Skipped,
+                    origin_exec_thread_id: remaining.origin_exec_thread_id,
+                    proposal_id: remaining.proposal_id.clone(),
                 };
 
                 let event = EventEntry {
@@ -560,10 +786,7 @@ pub fn act(
                     tick_id: Some(tick_id),
                     event_type: EventType::ActionExecuted,
                     payload_ref: None,
-                    summary: format!(
-                        "Action {}: skipped (cancelled) ({})",
-                        remaining.tool_name, remaining.rationale,
-                    ),
+                    summary: format!("Action {}: skipped (cancelled)", remaining.tool_name),
                     timestamp: Utc::now(),
                 };
                 if let Err(e) = kernel.event_ledger.append(&event) {
@@ -638,12 +861,12 @@ mod tests {
     use actionqueue_executor_local::CancellationToken;
     use exoskeleton_core::conversation::InMemoryConversationStore;
     use exoskeleton_core::prompt::PromptRegistry;
-    use exoskeleton_core::{ArtifactKind, EventType};
+    use exoskeleton_core::{ArtifactId, ArtifactKind, EventType, TickPhase, TickRecord};
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
     use worldinterface_connector::connectors::{
-        CodeReadConnector, CodeWriteConnector, DelayConnector, FsWriteConnector,
+        CodeEditConnector, CodeReadConnector, CodeWriteConnector, DelayConnector, FsWriteConnector,
     };
     use worldinterface_connector::registry::ConnectorRegistry;
     use worldinterface_host::config::HostConfig;
@@ -675,6 +898,9 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
+            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
+                crate::exec_threads::InMemoryExecThreadStore::new(),
+            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -689,7 +915,7 @@ mod tests {
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            coding_thread_config: crate::config::CodingThreadConfig::default(),
             tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -706,6 +932,7 @@ mod tests {
         // Boot a real WI Host with the delay connector
         let registry = ConnectorRegistry::new();
         registry.register(Arc::new(DelayConnector));
+        registry.register(Arc::new(CodeEditConnector));
         registry.register(Arc::new(CodeReadConnector));
         registry.register(Arc::new(CodeWriteConnector));
         registry.register(Arc::new(FsWriteConnector));
@@ -738,6 +965,9 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
+            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
+                crate::exec_threads::InMemoryExecThreadStore::new(),
+            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -752,7 +982,7 @@ mod tests {
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            coding_thread_config: crate::config::CodingThreadConfig::default(),
             tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -777,6 +1007,8 @@ mod tests {
             params: serde_json::json!({"duration_ms": ms}),
             rationale: "test delay".into(),
             plan_task_id: None,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 
@@ -787,6 +1019,8 @@ mod tests {
             params: serde_json::json!({"key": "value"}),
             rationale: "test unknown tool".into(),
             plan_task_id: None,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 
@@ -797,6 +1031,8 @@ mod tests {
             params: serde_json::json!({"file_path": path.to_str().unwrap()}),
             rationale: "read file".into(),
             plan_task_id: None,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 
@@ -807,6 +1043,28 @@ mod tests {
             params: serde_json::json!({"file_path": path.to_str().unwrap(), "content": content}),
             rationale: "write file".into(),
             plan_task_id: None,
+            origin_exec_thread_id: None,
+            proposal_id: None,
+        }
+    }
+
+    fn code_edit_action(
+        path: &std::path::Path,
+        old_string: &str,
+        new_string: &str,
+    ) -> PlannedAction {
+        PlannedAction {
+            call_id: "call_code_edit".into(),
+            tool_name: "code.edit".into(),
+            params: serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": old_string,
+                "new_string": new_string
+            }),
+            rationale: "edit file".into(),
+            plan_task_id: None,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 
@@ -817,6 +1075,8 @@ mod tests {
             params: serde_json::json!({"path": path.to_str().unwrap(), "content": content, "mode": "overwrite"}),
             rationale: "write file".into(),
             plan_task_id: None,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 
@@ -923,6 +1183,83 @@ mod tests {
         assert_eq!(result.executions.len(), 1);
         assert_eq!(result.executions[0].record.outcome, ActionOutcome::Failure);
         assert!(result.executions[0].result.is_err());
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_missing_code_read_target_reports_specific_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let missing = dir.path().join("missing.rs");
+        let alignment = alignment_with(vec![code_read_action(&missing)]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+        let artifact_store = kernel.artifact_store.clone();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions.len(), 1);
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Failure);
+        let error = result.executions[0].result.as_ref().unwrap_err();
+        assert!(error.contains("target file does not exist"));
+        assert!(error.contains("missing.rs"));
+
+        let receipt_ref = result.executions[0]
+            .record
+            .receipt_ref
+            .as_ref()
+            .expect("missing-path failure should store a receipt");
+        let receipt = artifact_store
+            .get(receipt_ref)
+            .unwrap()
+            .expect("receipt artifact should exist");
+        let content: serde_json::Value = serde_json::from_slice(&receipt.content).unwrap();
+        assert_eq!(content["validation"], "preflight_target_path");
+        assert!(content["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("target file does not exist"));
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_missing_code_edit_target_reports_specific_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let missing = dir.path().join("missing.rs");
+        let alignment = alignment_with(vec![code_edit_action(&missing, "old", "new")]);
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+        let event_ledger = kernel.event_ledger.clone();
+
+        let result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            move || act(&kernel, &alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.executions.len(), 1);
+        assert_eq!(result.executions[0].record.outcome, ActionOutcome::Failure);
+        let error = result.executions[0].result.as_ref().unwrap_err();
+        assert!(error.contains("target file does not exist"));
+        assert!(error.contains("missing.rs"));
+
+        let events = event_ledger.for_tick(tick_id).unwrap();
+        let action_event = events
+            .into_iter()
+            .find(|event| event.event_type == EventType::ActionExecuted)
+            .expect("action event should be present");
+        assert!(action_event.summary.contains("target file does not exist"));
 
         shutdown_host(kernel).await;
     }
@@ -1185,6 +1522,217 @@ mod tests {
 
         assert_eq!(result.executions[1].record.outcome, ActionOutcome::Failure);
         assert_eq!(std::fs::read_to_string(&write_file).unwrap(), "old\n");
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_passes_across_ticks_when_last_touch_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let read_alignment = alignment_with(vec![code_read_action(&file)]);
+        let read_result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            let token = token.clone();
+            move || act(&kernel, &read_alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            read_result.executions[0].record.outcome,
+            ActionOutcome::Success
+        );
+
+        kernel
+            .tick_store
+            .save(&TickRecord {
+                tick_id,
+                tick_number: 1,
+                phase: TickPhase::Amend,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                snapshot_before: ArtifactId::from_content(b"before"),
+                snapshot_after: Some(ArtifactId::from_content(b"after")),
+                thread_contributions: Vec::new(),
+                exec_thread_contributions: Vec::new(),
+                actions_taken: read_result
+                    .executions
+                    .iter()
+                    .map(|execution| execution.record.clone())
+                    .collect(),
+                llm_calls: Vec::new(),
+                decision_rationale: None,
+                context_breakdown_ref: None,
+            })
+            .unwrap();
+
+        kernel.read_paths_this_tick.lock().unwrap().clear();
+
+        let write_alignment = alignment_with(vec![code_write_action(&file, "new\n")]);
+        let next_tick_id = TickId::new();
+        let write_result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            let token = token.clone();
+            move || act(&kernel, &write_alignment, next_tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            write_result.executions[0].record.outcome,
+            ActionOutcome::Success
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_passes_for_follow_up_code_edit_across_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let initial_alignment = alignment_with(vec![
+            code_read_action(&file),
+            code_edit_action(&file, "old\n", "new\n"),
+        ]);
+        let initial_result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            let token = token.clone();
+            move || act(&kernel, &initial_alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            initial_result.executions[1].record.outcome,
+            ActionOutcome::Success
+        );
+
+        kernel
+            .tick_store
+            .save(&TickRecord {
+                tick_id,
+                tick_number: 1,
+                phase: TickPhase::Amend,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                snapshot_before: ArtifactId::from_content(b"before"),
+                snapshot_after: Some(ArtifactId::from_content(b"after")),
+                thread_contributions: Vec::new(),
+                exec_thread_contributions: Vec::new(),
+                actions_taken: initial_result
+                    .executions
+                    .iter()
+                    .map(|execution| execution.record.clone())
+                    .collect(),
+                llm_calls: Vec::new(),
+                decision_rationale: None,
+                context_breakdown_ref: None,
+            })
+            .unwrap();
+
+        kernel.read_paths_this_tick.lock().unwrap().clear();
+
+        let follow_up_alignment =
+            alignment_with(vec![code_edit_action(&file, "new\n", "newer\n")]);
+        let next_tick_id = TickId::new();
+        let follow_up_result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            let token = token.clone();
+            move || act(&kernel, &follow_up_alignment, next_tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            follow_up_result.executions[0].record.outcome,
+            ActionOutcome::Success
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "newer\n");
+
+        shutdown_host(kernel).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn act_read_before_write_still_blocks_code_write_after_recent_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "old\n").unwrap();
+        let kernel = test_kernel_with_host(dir.path()).await;
+        let tick_id = TickId::new();
+        let token = CancellationToken::new();
+
+        let initial_alignment = alignment_with(vec![
+            code_read_action(&file),
+            code_edit_action(&file, "old\n", "new\n"),
+        ]);
+        let initial_result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            let token = token.clone();
+            move || act(&kernel, &initial_alignment, tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            initial_result.executions[1].record.outcome,
+            ActionOutcome::Success
+        );
+
+        kernel
+            .tick_store
+            .save(&TickRecord {
+                tick_id,
+                tick_number: 1,
+                phase: TickPhase::Amend,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                snapshot_before: ArtifactId::from_content(b"before"),
+                snapshot_after: Some(ArtifactId::from_content(b"after")),
+                thread_contributions: Vec::new(),
+                exec_thread_contributions: Vec::new(),
+                actions_taken: initial_result
+                    .executions
+                    .iter()
+                    .map(|execution| execution.record.clone())
+                    .collect(),
+                llm_calls: Vec::new(),
+                decision_rationale: None,
+                context_breakdown_ref: None,
+            })
+            .unwrap();
+
+        kernel.read_paths_this_tick.lock().unwrap().clear();
+
+        let follow_up_alignment = alignment_with(vec![code_write_action(&file, "overwritten\n")]);
+        let next_tick_id = TickId::new();
+        let follow_up_result = tokio::task::spawn_blocking({
+            let kernel = clone_kernel_for_blocking(&kernel);
+            let token = token.clone();
+            move || act(&kernel, &follow_up_alignment, next_tick_id, &token)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            follow_up_result.executions[0].record.outcome,
+            ActionOutcome::Failure
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
 
         shutdown_host(kernel).await;
     }
@@ -1519,6 +2067,7 @@ mod tests {
             max_output_tokens: kernel.max_output_tokens,
             master_loop_interval_secs: kernel.master_loop_interval_secs,
             thread_registry: kernel.thread_registry.clone(),
+            exec_thread_registry: kernel.exec_thread_registry.clone(),
             relationship_ledger: kernel.relationship_ledger.clone(),
             conversation_store: kernel.conversation_store.clone(),
             budget_tracker: kernel.budget_tracker.clone(),
@@ -1533,7 +2082,7 @@ mod tests {
             watch_store: kernel.watch_store.clone(),
             max_watches: kernel.max_watches,
             read_paths_this_tick: kernel.read_paths_this_tick.clone(),
-            inner_loop_config: kernel.inner_loop_config.clone(),
+            coding_thread_config: kernel.coding_thread_config.clone(),
             tool_policy: kernel.tool_policy.clone(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: kernel.vessel_mode.clone(),

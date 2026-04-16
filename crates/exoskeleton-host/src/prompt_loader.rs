@@ -16,15 +16,20 @@ use exoskeleton_core::prompt::PromptRegistry;
 const PROMPT_FILES: &[(&str, &str)] = &[
     ("decide-system", "decide-system.md"),
     ("coding-system", "coding-system.md"),
+    ("coding-thread-system", "coding-thread-system.md"),
     ("context-system-section", "context-system-section.md"),
     ("thread-execution", "thread-execution.md"),
     ("thread-user-message", "thread-user-message.md"),
+    ("reflect-system", "reflect-system.md"),
     ("charter-threat-monitor", "charters/threat-monitor.md"),
     ("charter-self-critique", "charters/self-critique.md"),
     (
         "charter-memory-consolidation",
         "charters/memory-consolidation.md",
     ),
+    ("charter-creative-synthesis", "charters/creative-synthesis.md"),
+    ("charter-initiative", "charters/initiative.md"),
+    ("charter-coding-thread", "charters/coding-thread.md"),
     ("bootstrap-first-contact", "bootstrap/first-contact.md"),
     (
         "bootstrap-identity-extraction",
@@ -107,6 +112,7 @@ mod tests {
         .unwrap();
 
         let mut registry = PromptRegistry::with_defaults();
+        let original_len = registry.len();
         let original = registry.get("decide-system").unwrap().to_string();
         assert_ne!(original, "Custom decide prompt from data_dir");
 
@@ -117,7 +123,7 @@ mod tests {
             "Custom decide prompt from data_dir"
         );
         // Other prompts should still be defaults
-        assert_eq!(registry.len(), 15);
+        assert_eq!(registry.len(), original_len);
     }
 
     // ── E0-T13: project-level override takes precedence over compiled-in ──
@@ -175,6 +181,7 @@ mod tests {
         // No prompt files in data_dir
 
         let mut registry = PromptRegistry::with_defaults();
+        let original_len = registry.len();
         let before = registry.get("decide-system").unwrap().to_string();
 
         load_prompt_overrides(&mut registry, dir.path());
@@ -182,8 +189,8 @@ mod tests {
         // Should still have the compiled-in default (or project-level if accessible)
         let after = registry.get("decide-system").unwrap();
         assert!(!after.is_empty());
-        // All 13 prompts should still be present
-        assert_eq!(registry.len(), 15);
+        // All compiled prompts should still be present
+        assert_eq!(registry.len(), original_len);
         // If no project-level files found, should match the compiled-in
         if !Path::new("prompts/decide-system.md").exists() {
             assert_eq!(after, &before);

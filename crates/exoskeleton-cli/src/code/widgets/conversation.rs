@@ -599,10 +599,10 @@ mod tests {
         assert!(!state.has_new_content_below());
     }
 
-    // ── TUI-T17: block_from_inner_loop_step_with_detail ──
+    // ── TUI-T17: block_from_coding_exec_tool_call ──
 
     #[test]
-    fn block_from_inner_loop_step_with_detail() {
+    fn block_from_coding_exec_tool_call() {
         let block = Block::ToolCall {
             tool_name: "code.edit".into(),
             args_summary: "src/main.rs".into(),

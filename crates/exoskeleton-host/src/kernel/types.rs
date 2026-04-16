@@ -6,7 +6,9 @@
 use exoskeleton_core::conversation::Conversation;
 use exoskeleton_core::llm::ContentBlock;
 use exoskeleton_core::plan::{PlanTaskStatus, PlanUpdate};
-use exoskeleton_core::tick::{ActionRecord, LlmCallRecord, ThreadContribution};
+use exoskeleton_core::tick::{
+    ActionRecord, ExecThreadContribution, LlmCallRecord, ThreadContribution,
+};
 use exoskeleton_core::working_memory::WorkingMemoryOp;
 use exoskeleton_core::{
     ArtifactId, EventEntry, MessageEnvelope, PlanTaskId, RelationshipRecord, RelationshipSnapshot,
@@ -35,6 +37,7 @@ pub struct PerceptionResult {
     /// Active conversations after envelope grouping (E1-S2).
     pub active_conversations: Vec<Conversation>,
     pub thread_outputs: Vec<ThreadContribution>,
+    pub exec_thread_outputs: Vec<ExecThreadContribution>,
     pub pending_action_results: Vec<EventEntry>,
 }
 
@@ -58,6 +61,10 @@ pub struct PlannedAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_plan_task_id_lenient")]
     pub plan_task_id: Option<PlanTaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_exec_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
 }
 
 /// Lenient deserializer for plan_task_id: accepts UUIDs, maps non-UUID strings to None.
@@ -88,8 +95,6 @@ pub struct DecisionResult {
     pub response_artifact_id: ArtifactId,
     /// Watch proposals approved by Decide, awaiting Align approval.
     pub watch_proposals: Vec<exoskeleton_core::watch::WatchProposal>,
-    /// In Sprint 2 this is inferred from non-empty WI actions in Decide.
-    pub inner_loop_requested: bool,
     /// Optional vessel mode transition request from Decide.
     pub vessel_mode_request: Option<VesselMode>,
 }
@@ -214,6 +219,8 @@ mod tests {
             params: serde_json::json!({"path": "/tmp/out.txt"}),
             rationale: "Write output".into(),
             plan_task_id: Some(task_id),
+            origin_exec_thread_id: None,
+            proposal_id: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
@@ -309,6 +316,8 @@ Done."#;
                 params: serde_json::json!({"duration_ms": 1}),
                 rationale: "test".into(),
                 plan_task_id: None,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             },
             result: Ok(serde_json::json!({"status": "ok"})),
             record: ActionRecord {
@@ -316,6 +325,8 @@ Done."#;
                 target: "{}".into(),
                 receipt_ref: None,
                 outcome: ActionOutcome::Success,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             },
             tool_result: ContentBlock::ToolResult {
                 tool_use_id: "call_4".into(),

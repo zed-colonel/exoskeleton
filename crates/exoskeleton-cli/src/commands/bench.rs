@@ -5,19 +5,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::client::CliError;
+use crate::commands::start::{apply_llm_overrides, LlmOverrideOptions};
 use chrono::Utc;
 use exoskeleton_host::benchmark::{
     format_comparison, format_report, format_step_verbose, load_suite, load_task_spec,
     prepare_workspace, run_verification, ContextUtilization, HeadlessRunner, SuiteResult,
     TaskResult, TokenMetrics,
 };
-
-use exoskeleton_host::config::{
-    FrontierModelConfig, FrontierProvider, LocalApiFormat, LocalModelConfig,
-};
-use exoskeleton_host::VesselConfig;
-
-use crate::client::CliError;
 
 /// Run the `exo bench` command.
 #[allow(clippy::too_many_arguments)]
@@ -115,10 +110,12 @@ pub async fn run_bench(
         .map(|config| {
             apply_llm_overrides(
                 config,
-                provider.as_deref(),
-                model.as_deref(),
-                api_key_env.as_deref(),
-                local_endpoint.as_deref(),
+                &LlmOverrideOptions {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    api_key_env: api_key_env.clone(),
+                    local_endpoint: local_endpoint.clone(),
+                },
             )
         })
         .transpose()?;
@@ -213,130 +210,6 @@ pub async fn run_bench(
     Ok(())
 }
 
-/// Apply CLI flag overrides to the vessel's LLM configuration.
-///
-/// Supports three patterns:
-/// 1. Frontier override: `--provider anthropic --model claude-sonnet-4-20250514 --api-key-env MY_KEY`
-/// 2. Local override: `--local-endpoint http://localhost:11434 --model llama3.2:latest`
-/// 3. Mix: `--provider openai --model gpt-4o --api-key-env OPENAI_API_KEY` (uses OpenAI-compat)
-///
-/// When `--local-endpoint` is provided without `--provider`, defaults to "ollama".
-fn apply_llm_overrides(
-    mut config: VesselConfig,
-    provider: Option<&str>,
-    model: Option<&str>,
-    api_key_env: Option<&str>,
-    local_endpoint: Option<&str>,
-) -> Result<VesselConfig, CliError> {
-    use exoskeleton_core::llm::LlmBackend;
-
-    // If local-endpoint is provided, configure a local backend
-    if let Some(endpoint) = local_endpoint {
-        let provider_str = provider.unwrap_or("ollama");
-        let api_format = match provider_str {
-            "ollama" => LocalApiFormat::Ollama,
-            _ => LocalApiFormat::OpenAICompat,
-        };
-        config.llm_config.local = Some(LocalModelConfig {
-            endpoint: endpoint.into(),
-            model: model.unwrap_or("llama3.2:latest").into(),
-            api_format,
-        });
-        config.llm_config.default_backend = LlmBackend::Local;
-        eprintln!(
-            "  LLM override: local {} @ {} ({})",
-            config.llm_config.local.as_ref().unwrap().model,
-            endpoint,
-            provider_str,
-        );
-        return Ok(config);
-    }
-
-    // If provider is specified (without local-endpoint), configure a frontier backend
-    if let Some(provider_str) = provider {
-        let frontier_provider = match provider_str {
-            "anthropic" => FrontierProvider::Anthropic,
-            "openai" => FrontierProvider::OpenAI,
-            "gemini" => FrontierProvider::Gemini,
-            "grok" => FrontierProvider::Grok,
-            "openrouter" => FrontierProvider::OpenRouter,
-            "deepseek" => FrontierProvider::DeepSeek,
-            other => {
-                return Err(CliError::Other(format!(
-                    "unknown provider '{other}'. Supported: anthropic, openai, gemini, grok, openrouter, deepseek"
-                )));
-            }
-        };
-
-        let model_name = model.unwrap_or(default_model_for_provider(frontier_provider));
-        let key_env = api_key_env.unwrap_or(default_api_key_env_for_provider(frontier_provider));
-
-        config.llm_config.frontier = Some(FrontierModelConfig {
-            provider: frontier_provider,
-            model: model_name.into(),
-            api_key_env: key_env.into(),
-            endpoint: None,
-        });
-        config.llm_config.default_backend = LlmBackend::Frontier;
-        eprintln!(
-            "  LLM override: {} {} (key from ${})",
-            provider_str, model_name, key_env,
-        );
-        return Ok(config);
-    }
-
-    // If only --model is specified, update the current default backend's model
-    if let Some(model_name) = model {
-        match config.llm_config.default_backend {
-            LlmBackend::Frontier => {
-                if let Some(ref mut f) = config.llm_config.frontier {
-                    eprintln!("  LLM override: model {} (frontier)", model_name);
-                    f.model = model_name.into();
-                }
-            }
-            LlmBackend::Local => {
-                if let Some(ref mut l) = config.llm_config.local {
-                    eprintln!("  LLM override: model {} (local)", model_name);
-                    l.model = model_name.into();
-                }
-            }
-        }
-    }
-
-    // If only --api-key-env is specified, update the frontier config's key env
-    if let Some(key_env) = api_key_env {
-        if let Some(ref mut f) = config.llm_config.frontier {
-            f.api_key_env = key_env.into();
-        }
-    }
-
-    Ok(config)
-}
-
-/// Default model for a given frontier provider.
-fn default_model_for_provider(provider: FrontierProvider) -> &'static str {
-    match provider {
-        FrontierProvider::Anthropic => "claude-sonnet-4-20250514",
-        FrontierProvider::OpenAI => "gpt-4o",
-        FrontierProvider::Gemini => "gemini-2.5-flash",
-        FrontierProvider::Grok => "grok-3-mini",
-        FrontierProvider::OpenRouter => "anthropic/claude-sonnet-4-20250514",
-        FrontierProvider::DeepSeek => "deepseek-chat",
-    }
-}
-
-/// Default API key environment variable for a given provider.
-fn default_api_key_env_for_provider(provider: FrontierProvider) -> &'static str {
-    match provider {
-        FrontierProvider::Anthropic => "ANTHROPIC_PLATFORM_API_KEY",
-        FrontierProvider::OpenAI => "OPENAI_API_KEY",
-        FrontierProvider::Gemini => "GEMINI_API_KEY",
-        FrontierProvider::Grok => "GROK_API_KEY",
-        FrontierProvider::OpenRouter => "OPENROUTER_API_KEY",
-        FrontierProvider::DeepSeek => "DEEPSEEK_API_KEY",
-    }
-}
-
 /// Dry-run mode: validate harness without agent execution.
 async fn run_benchmark_task_dry(
     spec: &exoskeleton_host::benchmark::TaskSpec,
@@ -381,6 +254,7 @@ async fn run_benchmark_task_dry(
         step_trace: vec![],
         context_utilization: ContextUtilization::default(),
         tick_details: vec![],
+        harness_anomalies: vec![],
         difficulty: spec.task.difficulty.clone(),
         language: spec.task.language.clone(),
         tags: spec.task.tags.clone(),
@@ -434,10 +308,12 @@ async fn run_swe_bench(
 
     base_config = apply_llm_overrides(
         base_config,
-        provider.as_deref(),
-        model.as_deref(),
-        api_key_env.as_deref(),
-        local_endpoint.as_deref(),
+        &LlmOverrideOptions {
+            provider: provider.clone(),
+            model: model.clone(),
+            api_key_env: api_key_env.clone(),
+            local_endpoint: local_endpoint.clone(),
+        },
     )?;
 
     let defaults = SweRunOptions::default();
@@ -614,6 +490,7 @@ mod tests {
             step_trace: vec![],
             context_utilization: ContextUtilization::default(),
             tick_details: vec![],
+            harness_anomalies: vec![],
             difficulty: Some("easy".into()),
             language: Some("rust".into()),
             tags: vec![],

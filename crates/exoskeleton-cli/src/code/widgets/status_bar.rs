@@ -96,6 +96,14 @@ impl<'a> Widget for StatusBarWidget<'a> {
             ));
         }
 
+        if !self.status.exec_summary.is_empty() {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                self.status.exec_summary.clone(),
+                Style::default().fg(Color::LightCyan),
+            ));
+        }
+
         if !self.status.step_summary.is_empty() {
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
             spans.push(Span::styled(
@@ -125,6 +133,7 @@ mod tests {
             vessel_name: "test-vessel".into(),
             vessel_mode: "normal".into(),
             token_summary: "4.2k tok".into(),
+            exec_summary: "coding: active/editing high".into(),
             step_summary: "step 3/25".into(),
         };
         let connection = ConnectionStatus::Connected;
@@ -134,6 +143,7 @@ mod tests {
             is_active: true,
             is_streaming: false,
             streaming_tokens: 0,
+            is_notice: false,
         };
         let widget = StatusBarWidget::new(&status, &connection, &activity);
         let area = Rect::new(0, 0, 100, 1);

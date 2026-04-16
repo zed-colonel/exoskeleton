@@ -16,6 +16,7 @@ pub mod state;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{future::Future, pin::Pin};
 
 use axum::http::HeaderValue;
 use exoskeleton_core::ExoError;
@@ -65,6 +66,23 @@ impl ExoDaemon {
 
     /// Serve the HTTP API until Ctrl+C, then shut down the vessel gracefully.
     pub async fn run_until_shutdown(self) -> Result<(), ExoError> {
+        let listener = tokio::net::TcpListener::bind(self.listen_addr)
+            .await
+            .map_err(|e| ExoError::Config(format!("failed to bind {}: {e}", self.listen_addr)))?;
+        self.run_with_listener_until(listener, shutdown_signal_boxed())
+            .await
+    }
+
+    /// Serve the HTTP API using a pre-bound listener until the provided
+    /// shutdown future resolves, then shut down the vessel gracefully.
+    pub async fn run_with_listener_until<F>(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), ExoError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let inspector = self.vessel.inspector();
         let inbox = self.vessel.inbox().clone();
         let vessel_id = self.vessel.vessel_id();
@@ -108,19 +126,18 @@ impl ExoDaemon {
         });
 
         let router = routes::build_router(app_state);
-
-        let listener = tokio::net::TcpListener::bind(self.listen_addr)
-            .await
-            .map_err(|e| ExoError::Config(format!("failed to bind {}: {e}", self.listen_addr)))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| ExoError::Config(format!("failed to inspect listener address: {e}")))?;
 
         tracing::info!(
-            listen_addr = %self.listen_addr,
+            listen_addr = %local_addr,
             vessel_id = %vessel_id,
             "daemon listening"
         );
 
         axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown)
             .await
             .map_err(|e| ExoError::Config(format!("HTTP server error: {e}")))?;
 
@@ -132,9 +149,11 @@ impl ExoDaemon {
 }
 
 /// Wait for Ctrl+C (SIGINT) to signal graceful shutdown.
-async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install Ctrl+C handler");
-    tracing::info!("received Ctrl+C, initiating graceful shutdown");
+fn shutdown_signal_boxed() -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+        tracing::info!("received Ctrl+C, initiating graceful shutdown");
+    })
 }

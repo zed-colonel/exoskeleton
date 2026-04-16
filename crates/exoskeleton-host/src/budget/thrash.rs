@@ -158,6 +158,7 @@ mod tests {
             snapshot_before: ArtifactId::from_content(b"before"),
             snapshot_after: None,
             thread_contributions: vec![],
+            exec_thread_contributions: vec![],
             actions_taken: actions,
             llm_calls,
             decision_rationale: None,
@@ -171,6 +172,8 @@ mod tests {
             target: "target".into(),
             receipt_ref: None,
             outcome: ActionOutcome::Failure,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 
@@ -180,6 +183,8 @@ mod tests {
             target: "target".into(),
             receipt_ref: None,
             outcome: ActionOutcome::Success,
+            origin_exec_thread_id: None,
+            proposal_id: None,
         }
     }
 

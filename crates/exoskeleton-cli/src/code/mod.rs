@@ -22,7 +22,9 @@ use crossterm::{
 };
 use futures_util::{stream::SplitStream, StreamExt};
 use ratatui::{backend::CrosstermBackend, Terminal};
+use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Error as WsError, Message as WsMessage},
@@ -31,6 +33,12 @@ use tokio_tungstenite::{
 use tracing::{info, warn};
 
 use crate::client::{CliError, DaemonClient};
+use crate::commands::start::{
+    apply_llm_overrides, apply_local_code_operator_waiting_posture, init_tracing,
+    load_local_code_vessel_config, LlmOverrideOptions,
+};
+use exoskeleton_daemon::{DaemonConfig, ExoDaemon};
+use exoskeleton_host::benchmark::format_task_prompt;
 
 use self::app::{App, Message, SideEffect};
 use self::connection::{
@@ -42,6 +50,56 @@ use self::messages::{from_crossterm_event, from_ws_text};
 type WsRead = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 type WsReadItem = Option<Result<WsMessage, WsError>>;
 
+#[derive(Debug, Clone)]
+pub struct LocalCodeSessionOptions {
+    pub config_path: Option<String>,
+    pub data_dir: Option<String>,
+    pub mission: Option<String>,
+    pub workspace_root: Option<String>,
+    pub log_level: String,
+    pub llm_overrides: LlmOverrideOptions,
+}
+
+struct LocalDaemonSession {
+    base_url: String,
+    workspace_root: Option<std::path::PathBuf>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: tokio::task::JoinHandle<Result<(), exoskeleton_core::ExoError>>,
+}
+
+impl LocalDaemonSession {
+    async fn shutdown(mut self) -> Result<(), CliError> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        match self.handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(CliError::Other(format!(
+                "local daemon shutdown failed: {err}"
+            ))),
+            Err(err) => Err(CliError::Other(format!(
+                "local daemon task join failed: {err}"
+            ))),
+        }
+    }
+}
+
+pub async fn run_local_code_session(
+    options: LocalCodeSessionOptions,
+    task: &str,
+) -> Result<(), CliError> {
+    let local_daemon = start_local_daemon(options, !task.trim().is_empty()).await?;
+    let initial_task = format_local_code_task(task, local_daemon.workspace_root.as_deref());
+    let run_result = run_code_session(&local_daemon.base_url, &initial_task).await;
+    let shutdown_result = local_daemon.shutdown().await;
+
+    match (run_result, shutdown_result) {
+        (Err(err), _) => Err(err),
+        (Ok(()), Err(err)) => Err(err),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
 /// Run a live coding session with a fullscreen TUI.
 ///
 /// This is the main entry point called by `main.rs` when the user runs
@@ -52,7 +110,7 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
     let client = DaemonClient::new(&base_url);
     let mut app = App::new();
 
-    let _vessel_id = fetch_vessel_status(&client, &mut app).await.map_err(|e| {
+    let maybe_vessel_id = fetch_vessel_status(&client, &mut app).await.map_err(|e| {
         CliError::Connection(format!(
             "cannot connect to vessel at {}: {e}",
             client.base_url()
@@ -60,30 +118,36 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
     })?;
 
     let mut saved_session = None;
-    if let Ok(Some(session_state)) = session::load_session(&_vessel_id) {
-        if session::is_session_recent(&session_state) {
-            app.debug.visible = session_state.debug_visible;
-            info!(
-                "resuming session for vessel {} (conversation: {})",
-                session_state.vessel_id, session_state.conversation_id
-            );
-            saved_session = Some(session_state);
+    if let Some(vessel_id) = maybe_vessel_id.as_ref() {
+        if let Ok(Some(session_state)) = session::load_session(vessel_id) {
+            if session::is_session_recent(&session_state) {
+                app.debug.visible = session_state.debug_visible;
+                info!(
+                    "resuming session for vessel {} (conversation: {})",
+                    session_state.vessel_id, session_state.conversation_id
+                );
+                saved_session = Some(session_state);
+            }
         }
     }
 
-    if let Ok(prefs) = session::load_preferences(&_vessel_id) {
-        if !app.debug.visible {
-            app.debug.visible = prefs.debug_view;
+    if let Some(vessel_id) = maybe_vessel_id.as_ref() {
+        if let Ok(prefs) = session::load_preferences(vessel_id) {
+            if !app.debug.visible {
+                app.debug.visible = prefs.debug_view;
+            }
         }
     }
 
     let preferred_conversation_id = saved_session.as_ref().and_then(|state| {
         (!state.conversation_id.is_empty()).then_some(state.conversation_id.as_str())
     });
-    if let Err(e) =
-        load_conversation_history_for(&client, &mut app, 50, preferred_conversation_id).await
-    {
-        warn!("failed to load conversation history: {e}");
+    if maybe_vessel_id.is_some() {
+        if let Err(e) =
+            load_conversation_history_for(&client, &mut app, 50, preferred_conversation_id).await
+        {
+            warn!("failed to load conversation history: {e}");
+        }
     }
     if let Some(session_state) = saved_session {
         app.conversation
@@ -123,6 +187,7 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
                             text: task.to_string(),
                             timestamp: chrono::Utc::now(),
                         });
+                    add_local_acknowledgement(&mut app);
                 }
                 Err(e) => {
                     app.conversation
@@ -397,6 +462,152 @@ pub async fn run_code_session(daemon_addr: &str, task: &str) -> Result<(), CliEr
     }
 }
 
+async fn start_local_daemon(
+    options: LocalCodeSessionOptions,
+    has_initial_task: bool,
+) -> Result<LocalDaemonSession, CliError> {
+    init_tracing(&options.log_level)?;
+
+    let mut vessel_config = apply_llm_overrides(
+        load_local_code_vessel_config(
+            options.config_path,
+            options.data_dir,
+            options.mission,
+            options.workspace_root,
+        )?,
+        &options.llm_overrides,
+    )?;
+    if !has_initial_task {
+        apply_local_code_operator_waiting_posture(&mut vessel_config);
+    }
+    let workspace_root = vessel_config
+        .coding_thread
+        .workspace_root
+        .as_ref()
+        .map(std::path::PathBuf::from);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| CliError::Connection(format!("failed to bind local daemon: {e}")))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| CliError::Connection(format!("failed to inspect local listener: {e}")))?;
+    let base_url = format!("http://{local_addr}");
+
+    let daemon = ExoDaemon::start(DaemonConfig {
+        vessel: vessel_config,
+        listen_addr: local_addr,
+    })
+    .await
+    .map_err(|e| CliError::Other(format!("failed to start local daemon: {e}")))?;
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        daemon
+            .run_with_listener_until(listener, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    wait_for_local_daemon(&base_url).await?;
+    ensure_local_coding_exec_thread_ready(&base_url).await?;
+
+    Ok(LocalDaemonSession {
+        base_url,
+        workspace_root,
+        shutdown_tx: Some(shutdown_tx),
+        handle,
+    })
+}
+
+fn format_local_code_task(task: &str, workspace_root: Option<&std::path::Path>) -> String {
+    if task.is_empty() {
+        return String::new();
+    }
+
+    match workspace_root {
+        Some(root) => format_task_prompt(root, task),
+        None => task.to_string(),
+    }
+}
+
+async fn wait_for_local_daemon(base_url: &str) -> Result<(), CliError> {
+    let client = DaemonClient::new(base_url);
+    let mut last_error = None;
+
+    for _ in 0..300 {
+        match client.status().await {
+            Ok(Some(_)) | Ok(None) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err.to_string());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    Err(CliError::Connection(format!(
+        "local daemon did not become ready at {base_url}: {}",
+        last_error.unwrap_or_else(|| "status endpoint kept returning no snapshot".into())
+    )))
+}
+
+async fn ensure_local_coding_exec_thread_ready(base_url: &str) -> Result<(), CliError> {
+    let client = DaemonClient::new(base_url);
+    let mut last_state = "status endpoint did not return a completed snapshot".to_string();
+
+    for _ in 0..150 {
+        match client.status().await {
+            Ok(Some(status)) => {
+                let summaries = status
+                    .get("exec_thread_summaries")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| {
+                        CliError::Connection(
+                            "local coding session status did not include exec_thread_summaries"
+                                .into(),
+                        )
+                    })?;
+                let has_coding = summaries.iter().any(|summary| {
+                    summary
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("coding"))
+                        || summary
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|name| name == "Coding")
+                });
+
+                if has_coding {
+                    return Ok(());
+                }
+                last_state =
+                    "snapshot completed, but the coding exec thread was not registered".into();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                last_state = err.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    Err(CliError::Connection(format!(
+        "local coding session is not ready: {last_state}. Rebuild `exo` and verify coding-mode local defaults are enabled."
+    )))
+}
+
+fn add_local_acknowledgement(app: &mut App) {
+    app.conversation
+        .add_block(widgets::conversation::Block::SystemNote {
+            text: "Request received. Vessel is orienting around your latest instruction.".into(),
+            severity: widgets::conversation::NoteSeverity::Info,
+        });
+    app.activity.label = "Orienting around latest operator request".into();
+    app.activity.is_active = true;
+    app.activity.is_notice = false;
+}
+
 fn rest_error_message(action: &str, err: &CliError) -> String {
     match err {
         CliError::DaemonError { status: 404, .. } => {
@@ -411,7 +622,13 @@ fn rest_error_message(action: &str, err: &CliError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use crate::code::app::App;
+    use crate::code::widgets::conversation::Block;
+
     use super::connection::{normalize_base_url, websocket_url};
+    use super::{add_local_acknowledgement, format_local_code_task};
 
     #[test]
     fn normalize_and_ws_url_round_trip() {
@@ -427,5 +644,34 @@ mod tests {
         assert_eq!(base, "https://vessel.example.com:8443");
         let ws = websocket_url(&base);
         assert_eq!(ws, "wss://vessel.example.com:8443/api/v1/ws");
+    }
+
+    #[test]
+    fn local_code_task_is_wrapped_with_workspace_context() {
+        let task = format_local_code_task("Fix the failing test", Some(Path::new("/tmp/work")));
+        assert!(task.contains("/tmp/work"));
+        assert!(task.contains("The ONLY repository you should inspect or modify"));
+        assert!(task.contains("Fix the failing test"));
+    }
+
+    #[test]
+    fn empty_local_code_task_stays_empty() {
+        assert!(format_local_code_task("", Some(Path::new("/tmp/work"))).is_empty());
+    }
+
+    #[test]
+    fn local_acknowledgement_adds_visible_note() {
+        let mut app = App::new();
+        add_local_acknowledgement(&mut app);
+
+        assert!(app.activity.is_active);
+        assert_eq!(
+            app.activity.label,
+            "Orienting around latest operator request"
+        );
+        assert!(matches!(
+            app.conversation.blocks().last(),
+            Some(Block::SystemNote { text, .. }) if text.contains("Request received")
+        ));
     }
 }

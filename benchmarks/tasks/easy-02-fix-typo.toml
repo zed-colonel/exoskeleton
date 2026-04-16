@@ -5,8 +5,7 @@ prompt = """The function calculate_averge in src/lib.rs has a typo in its name.
 Rename it to calculate_average. Update the function name and its doc comment
 to use the correct spelling. Also update any references to the old name."""
 timeout_secs = 300
-max_steps = 25
-max_ticks = 5
+max_ticks = 15
 
 [verify]
 command = "cargo test --lib && ! grep -q 'averge' src/lib.rs"

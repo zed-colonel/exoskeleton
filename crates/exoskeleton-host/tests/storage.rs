@@ -537,6 +537,7 @@ mod proptest_tests {
                 vessel_mode: exoskeleton_core::VesselMode::Normal,
                 working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
                 thread_summaries: Vec::new(),
+                exec_thread_summaries: Vec::new(),
                 relationship_snapshot_ref: None,
                 budget_status: BudgetStatus::unlimited(),
                 last_action_summary: None,

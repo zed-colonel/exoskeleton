@@ -9,8 +9,8 @@ pub mod compaction;
 pub mod context_window;
 pub mod decide;
 pub mod diff_tracker;
+pub mod exec_threads;
 pub mod git_context;
-pub mod inner_loop;
 pub mod orient;
 pub mod perceive;
 pub mod policy;
@@ -24,6 +24,7 @@ pub mod watches;
 
 use std::sync::Arc;
 
+use crate::exec_threads::ExecThreadRegistry;
 use actionqueue_executor_local::{CancellationToken, HandlerOutput};
 use chrono::Utc;
 use exoskeleton_core::conversation::ConversationStore;
@@ -67,6 +68,8 @@ pub struct KernelContext {
     pub master_loop_interval_secs: u64,
     /// Thread registry for cognitive thread lifecycle management (Sprint 6).
     pub thread_registry: Arc<ThreadRegistry>,
+    /// Executable thread registry for proposal-producing worker threads.
+    pub exec_thread_registry: Arc<ExecThreadRegistry>,
     /// Relationship ledger for relational signal persistence (Sprint 8).
     pub relationship_ledger: Arc<dyn RelationshipLedger>,
     /// Conversation store for multi-turn interaction tracking (E1-S2).
@@ -100,8 +103,8 @@ pub struct KernelContext {
     pub max_watches: u32,
     /// Paths read during the current tick for read-before-write enforcement.
     pub read_paths_this_tick: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// Inner loop configuration (E8-S1). Controls bounded inner interaction loop.
-    pub inner_loop_config: crate::config::InnerLoopConfig,
+    /// Coding-thread configuration for the built-in coding exec thread.
+    pub coding_thread_config: crate::config::CodingThreadConfig,
     /// Tool policy configuration for allow/deny/ask rules.
     pub tool_policy: crate::kernel::policy::ToolPolicyConfig,
     /// Session-scoped tool approvals.
@@ -251,21 +254,46 @@ pub fn run_tick(
     }
 
     // 7.5 Execute due threads (Sprint 6)
-    let thread_contributions =
-        match threads::execute_due_threads(handler, kernel, &snapshot, tick_id, cancellation) {
-            Ok(tc) => tc,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "thread execution failed; continuing without threads"
-                );
-                Vec::new()
-            }
-        };
+    let thread_contributions = match threads::execute_due_threads(
+        handler,
+        kernel,
+        &snapshot,
+        &perception,
+        tick_id,
+        cancellation,
+    ) {
+        Ok(tc) => tc,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "thread execution failed; continuing without threads"
+            );
+            Vec::new()
+        }
+    };
+
+    let exec_thread_contributions = match exec_threads::execute_due_exec_threads(
+        handler,
+        kernel,
+        &snapshot,
+        &perception,
+        tick_id,
+        cancellation,
+    ) {
+        Ok(tc) => tc,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "exec thread execution failed; continuing without exec threads"
+            );
+            Vec::new()
+        }
+    };
 
     // Merge thread outputs into perception
     let perception = PerceptionResult {
         thread_outputs: thread_contributions,
+        exec_thread_outputs: exec_thread_contributions,
         ..perception
     };
 
@@ -310,6 +338,11 @@ pub fn run_tick(
         Ok(d) => d,
         Err(e) => return HandlerOutput::retryable_failure(format!("Decide failed: {e}")),
     };
+    let decision = annotate_exec_thread_origins(kernel, decision);
+    let decision = reconcile_exec_thread_proposals(kernel, decision);
+    let suppress_external_actions =
+        should_hold_bounded_coding_session_idle(kernel, &perception);
+    let decision = suppress_actions_for_bounded_coding_idle(decision, suppress_external_actions);
 
     if let Some(requested_mode) = decision.vessel_mode_request {
         let mut guard = kernel.vessel_mode.lock().unwrap();
@@ -347,84 +380,17 @@ pub fn run_tick(
         return HandlerOutput::retryable_failure("cancelled after Decide");
     }
 
-    // 12.5 Inner loop activation check (E8-S1)
-    let inner_loop_active = kernel.inner_loop_config.enabled && decision.inner_loop_requested;
     let mut diff_tracker = diff_tracker::DiffTracker::new(tick_number);
 
-    let (decision, alignment, act_result, inner_loop_completion) = if inner_loop_active {
-        // Inner loop: iterative DecideLite→Align→Act cycle.
-        // The agent explicitly requested this — the task needs
-        // iterative tool-feedback (e.g., multi-step coding).
-        tracing::info!(tick_number, "Inner Loop (activated by agent request)");
-
-        // Merge watch poll actions into the initial decision so the inner loop's
-        // first Align+Act step includes them (E5-S2, bypass Align as already approved).
-        let decision = if watch_result.poll_actions.is_empty() {
-            decision
-        } else {
-            let mut d = decision;
-            d.actions.extend(
-                watch_result
-                    .poll_actions
-                    .into_iter()
-                    .map(|a| PlannedAction {
-                        call_id: a.call_id,
-                        tool_name: a.tool_name,
-                        params: a.params,
-                        rationale: a.rationale,
-                        plan_task_id: a.plan_task_id,
-                    }),
-            );
-            d
-        };
-
-        match inner_loop::run_inner_loop(
-            handler,
-            kernel,
-            &orientation,
-            &perception,
-            decision,
-            &mut diff_tracker,
-            cancellation,
-            tick_number,
-            tick_id,
-        ) {
-            Ok(inner_result) => {
-                tracing::info!(
-                    tick_number,
-                    steps = inner_result.steps_taken,
-                    reason = %inner_result.completion_reason,
-                    "Inner loop completed"
-                );
-                // Build a summary alignment for Amend with accumulated relationship data (I8)
-                let summary_alignment = AlignmentResult {
-                    approved_actions: vec![],
-                    blocked_actions: vec![],
-                    relationship_updates: inner_result.relationship_updates,
-                    relationship_snapshot: inner_result.relationship_snapshot,
-                };
-                (
-                    inner_result.final_decision,
-                    summary_alignment,
-                    ActResult {
-                        executions: inner_result.executions,
-                    },
-                    Some(inner_result.completion_reason),
-                )
-            }
-            Err(e) => return HandlerOutput::retryable_failure(format!("Inner loop failed: {e}")),
-        }
-    } else {
-        // Classic path: single Align→Act pass.
-        // Either the inner loop is disabled in config, or the agent
-        // determined this tick doesn't need iterative tool use.
+    let (decision, alignment, act_result) = {
         tracing::info!(tick_number, "Align");
         let alignment = align::align(kernel, &decision, &perception, tick_id, tick_number);
 
-        // Merge poll watch actions (E5-S2) — bypass Align (already approved at watch creation)
         let alignment = {
             let mut merged = alignment;
-            merged.approved_actions.extend(watch_result.poll_actions);
+            if !suppress_external_actions {
+                merged.approved_actions.extend(watch_result.poll_actions);
+            }
             merged
         };
 
@@ -436,7 +402,7 @@ pub fn run_tick(
                         diff_tracker.record(id.clone(), content.clone());
                     }
                 }
-                (decision, alignment, a, None)
+                (decision, alignment, a)
             }
             Err(e) => return HandlerOutput::retryable_failure(format!("Act failed: {e}")),
         }
@@ -559,7 +525,6 @@ pub fn run_tick(
         &act_result,
         &reflection,
         context_breakdown_ref,
-        inner_loop_completion.as_ref(),
     );
 
     // Record success/failure for consecutive failure tracking (Sprint 9)
@@ -628,12 +593,22 @@ pub fn run_tick(
                 }
             }
 
+            let should_wake_for_exec = kernel
+                .exec_thread_registry
+                .exec_thread_summaries()
+                .map(|summaries| {
+                    summaries.into_iter().any(|s| {
+                        matches!(
+                            s.status,
+                            exoskeleton_core::ExecThreadStatus::Active
+                                | exoskeleton_core::ExecThreadStatus::Blocked
+                        )
+                    })
+                })
+                .unwrap_or(false);
+
             if consumption.is_empty() {
-                if matches!(
-                    inner_loop_completion,
-                    Some(crate::budget::session::SessionCompletionReason::StepLimit)
-                        | Some(crate::budget::session::SessionCompletionReason::AwaitingInput)
-                ) {
+                if should_wake_for_exec {
                     if let Some(wake_signal) = &kernel.wake_signal {
                         wake_signal();
                     }
@@ -643,13 +618,7 @@ pub fn run_tick(
                 // Merge consumption into the output
                 match output {
                     HandlerOutput::Success { output: out, .. } => {
-                        if matches!(
-                            inner_loop_completion,
-                            Some(crate::budget::session::SessionCompletionReason::StepLimit)
-                                | Some(
-                                    crate::budget::session::SessionCompletionReason::AwaitingInput
-                                )
-                        ) {
+                        if should_wake_for_exec {
                             if let Some(wake_signal) = &kernel.wake_signal {
                                 wake_signal();
                             }
@@ -673,6 +642,205 @@ pub fn run_tick(
     }
 }
 
+fn annotate_exec_thread_origins(
+    kernel: &KernelContext,
+    mut decision: DecisionResult,
+) -> DecisionResult {
+    let proposals: Vec<(exoskeleton_core::ThreadId, String, String)> = kernel
+        .exec_thread_registry
+        .list()
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter(|(spec, status)| {
+            spec.kind == exoskeleton_core::ExecThreadKind::Coding
+                && *status != exoskeleton_core::ExecThreadStatus::Failed
+        })
+        .filter_map(|(spec, _)| {
+            kernel
+                .exec_thread_registry
+                .recent_outputs(spec.thread_id, 1)
+                .ok()
+                .and_then(|mut outputs| outputs.pop())
+                .and_then(|output| {
+                    output
+                        .proposed_action
+                        .map(|proposal| (spec.thread_id, proposal.tool_name, proposal.proposal_id))
+                })
+        })
+        .collect();
+
+    for action in &mut decision.actions {
+        if action.origin_exec_thread_id.is_some() {
+            continue;
+        }
+        let mut matches = proposals
+            .iter()
+            .filter(|(_, tool_name, _)| tool_name == &action.tool_name);
+        if let Some((thread_id, _, proposal_id)) = matches.next() {
+            if matches.next().is_none() {
+                action.origin_exec_thread_id = Some(*thread_id);
+                action.proposal_id = Some(proposal_id.clone());
+            }
+        }
+    }
+
+    decision
+}
+
+fn should_hold_bounded_coding_session_idle(
+    kernel: &KernelContext,
+    perception: &PerceptionResult,
+) -> bool {
+    let summaries = kernel
+        .exec_thread_registry
+        .exec_thread_summaries()
+        .unwrap_or_default();
+    bounded_coding_idle_visible(
+        kernel.coding_thread_config.return_to_idle_after_completion,
+        !perception.new_messages.is_empty(),
+        &summaries,
+    )
+}
+
+fn bounded_coding_idle_visible(
+    return_to_idle_after_completion: bool,
+    has_new_messages: bool,
+    summaries: &[exoskeleton_core::ExecThreadSummary],
+) -> bool {
+    if !return_to_idle_after_completion || has_new_messages {
+        return false;
+    }
+
+    summaries.iter().any(|summary| {
+        summary.kind == exoskeleton_core::ExecThreadKind::Coding
+            && summary.status == exoskeleton_core::ExecThreadStatus::Idle
+            && summary
+                .last_completion_reason
+                .as_ref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+    })
+}
+
+fn suppress_actions_for_bounded_coding_idle(
+    mut decision: DecisionResult,
+    should_suppress: bool,
+) -> DecisionResult {
+    if should_suppress && !decision.actions.is_empty() {
+        tracing::info!(
+            actions = decision.actions.len(),
+            "suppressing external actions after bounded coding-session completion"
+        );
+        decision.actions.clear();
+    }
+    decision
+}
+
+fn reconcile_exec_thread_proposals(
+    kernel: &KernelContext,
+    mut decision: DecisionResult,
+) -> DecisionResult {
+    if decision.actions.is_empty() {
+        return decision;
+    }
+
+    if decision
+        .actions
+        .iter()
+        .any(|action| is_mutating_code_action(&action.tool_name))
+    {
+        return decision;
+    }
+
+    if !decision
+        .actions
+        .iter()
+        .all(|action| is_exploratory_code_action(&action.tool_name))
+    {
+        return decision;
+    }
+
+    let mut proposals = latest_coding_exec_thread_proposals(kernel)
+        .into_iter()
+        .filter(|(_, output)| {
+            output.evidence_complete
+                && output.proposal_confidence
+                    == Some(exoskeleton_core::ExecThreadProposalConfidence::High)
+                && output
+                    .proposed_action
+                    .as_ref()
+                    .is_some_and(|proposal| is_mutating_code_action(&proposal.tool_name))
+        });
+    let Some((thread_id, output)) = proposals.next() else {
+        return decision;
+    };
+    if proposals.next().is_some() {
+        return decision;
+    }
+    let Some(proposal) = output.proposed_action.as_ref() else {
+        return decision;
+    };
+
+    tracing::info!(
+        thread_id = %thread_id,
+        tool_name = %proposal.tool_name,
+        proposal_id = %proposal.proposal_id,
+        "replacing exploratory Decide actions with exec-thread mutation proposal"
+    );
+
+    decision.actions = vec![PlannedAction {
+        call_id: format!("exec-proposal-{}", proposal.proposal_id),
+        tool_name: proposal.tool_name.clone(),
+        params: proposal.params.clone(),
+        rationale: proposal.rationale.clone(),
+        plan_task_id: None,
+        origin_exec_thread_id: Some(thread_id),
+        proposal_id: Some(proposal.proposal_id.clone()),
+    }];
+    decision
+}
+
+fn latest_coding_exec_thread_proposals(
+    kernel: &KernelContext,
+) -> Vec<(
+    exoskeleton_core::ThreadId,
+    exoskeleton_core::ExecThreadOutput,
+)> {
+    kernel
+        .exec_thread_registry
+        .list()
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter(|(spec, status)| {
+            spec.kind == exoskeleton_core::ExecThreadKind::Coding
+                && *status != exoskeleton_core::ExecThreadStatus::Failed
+        })
+        .filter_map(|(spec, _)| {
+            kernel
+                .exec_thread_registry
+                .recent_outputs(spec.thread_id, 1)
+                .ok()
+                .and_then(|mut outputs| outputs.pop())
+                .map(|output| (spec.thread_id, output))
+        })
+        .collect()
+}
+
+fn is_exploratory_code_action(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code.read" | "code.grep" | "code.ls" | "code.glob" | "fs.read"
+    )
+}
+
+fn is_mutating_code_action(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code.edit" | "code.write" | "code.apply_patch" | "fs.write"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -685,8 +853,8 @@ mod tests {
 
     use exoskeleton_core::VesselMode;
 
-    use crate::budget::session::SessionCompletionReason;
     use crate::kernel::diff_tracker::DiffTracker;
+    use crate::kernel::{DecisionResult, SnapshotDelta};
     use crate::kernel::types::{ActResult, ActionExecution, PlannedAction};
 
     /// E8S2-T13: `read_paths_this_tick` is cleared at the start of each tick.
@@ -726,13 +894,8 @@ mod tests {
     }
 
     // ── Helper: mirrors the wake-signal decision logic from run_tick ──
-    // In run_tick, after Amend, the code checks:
-    //   if inner_loop_completion is StepLimit or AwaitingInput → fire wake_signal
-    fn should_wake(completion: &Option<SessionCompletionReason>) -> bool {
-        matches!(
-            completion,
-            Some(SessionCompletionReason::StepLimit) | Some(SessionCompletionReason::AwaitingInput)
-        )
+    fn should_wake(has_active_exec_thread: bool) -> bool {
+        has_active_exec_thread
     }
 
     // ── T6: wake_signal_called_on_step_limit ──
@@ -745,20 +908,19 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
             })
         };
-        let completion = Some(SessionCompletionReason::StepLimit);
-        if should_wake(&completion) {
+        if should_wake(true) {
             wake_signal();
         }
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             1,
-            "wake signal must fire on StepLimit"
+            "wake signal must fire when exec-thread work remains active"
         );
     }
 
-    // ── T7: wake_signal_called_on_awaiting_input ──
+    // ── T7: wake_signal_called_on_blocked_exec_thread ──
     #[test]
-    fn wake_signal_called_on_awaiting_input() {
+    fn wake_signal_called_on_blocked_exec_thread() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let wake_signal: Arc<dyn Fn() + Send + Sync> = {
             let counter = Arc::clone(&call_count);
@@ -766,20 +928,19 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
             })
         };
-        let completion = Some(SessionCompletionReason::AwaitingInput);
-        if should_wake(&completion) {
+        if should_wake(true) {
             wake_signal();
         }
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             1,
-            "wake signal must fire on AwaitingInput"
+            "wake signal must fire when exec-thread work remains blocked"
         );
     }
 
-    // ── T8: wake_signal_not_called_on_agent_complete ──
+    // ── T8: wake_signal_not_called_when_no_exec_thread_requires_work ──
     #[test]
-    fn wake_signal_not_called_on_agent_complete() {
+    fn wake_signal_not_called_when_no_exec_thread_requires_work() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let wake_signal: Arc<dyn Fn() + Send + Sync> = {
             let counter = Arc::clone(&call_count);
@@ -787,15 +948,77 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
             })
         };
-        let completion = Some(SessionCompletionReason::AgentComplete);
-        if should_wake(&completion) {
+        if should_wake(false) {
             wake_signal();
         }
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             0,
-            "wake signal must NOT fire on AgentComplete"
+            "wake signal must NOT fire when no exec thread needs another cycle"
         );
+    }
+
+    #[test]
+    fn exploratory_code_actions_include_legacy_listing_tools() {
+        assert!(super::is_exploratory_code_action("code.read"));
+        assert!(super::is_exploratory_code_action("code.grep"));
+        assert!(super::is_exploratory_code_action("code.ls"));
+        assert!(super::is_exploratory_code_action("code.glob"));
+        assert!(!super::is_exploratory_code_action("code.edit"));
+    }
+
+    #[test]
+    fn bounded_coding_idle_detected_only_when_enabled() {
+        let summaries = vec![exoskeleton_core::ExecThreadSummary {
+            thread_id: exoskeleton_core::ThreadId::new(),
+            kind: exoskeleton_core::ExecThreadKind::Coding,
+            name: "Coding".into(),
+            status: exoskeleton_core::ExecThreadStatus::Idle,
+            last_output_summary: None,
+            current_focus: None,
+            work_phase: Some("idle".into()),
+            evidence_complete: true,
+            proposal_confidence: None,
+            last_completion_reason: Some("completed".into()),
+        }];
+
+        assert!(super::bounded_coding_idle_visible(true, false, &summaries));
+        assert!(!super::bounded_coding_idle_visible(false, false, &summaries));
+        assert!(!super::bounded_coding_idle_visible(true, true, &summaries));
+    }
+
+    #[test]
+    fn bounded_coding_idle_suppresses_external_actions() {
+        let decision = DecisionResult {
+            reasoning: "done".into(),
+            actions: vec![PlannedAction {
+                call_id: "call_1".into(),
+                tool_name: "code.read".into(),
+                params: serde_json::json!({"file_path": "/tmp/sample.rs"}),
+                rationale: "verify".into(),
+                plan_task_id: None,
+                origin_exec_thread_id: None,
+                proposal_id: None,
+            }],
+            reply: None,
+            memory_notes: vec![],
+            snapshot_delta: SnapshotDelta::default(),
+            llm_call_record: exoskeleton_core::LlmCallRecord {
+                model: "mock".into(),
+                tokens_in: 0,
+                tokens_out: 0,
+                cost_cents: 0.0,
+                latency_ms: 0,
+                response_artifact_ref: None,
+                turns: 1,
+            },
+            response_artifact_id: ArtifactId::from_content(b"resp"),
+            watch_proposals: vec![],
+            vessel_mode_request: None,
+        };
+
+        let suppressed = super::suppress_actions_for_bounded_coding_idle(decision, true);
+        assert!(suppressed.actions.is_empty());
     }
 
     // ── T9: kernel_context_wake_signal_none_in_tests ──
@@ -803,11 +1026,9 @@ mod tests {
     fn kernel_context_wake_signal_none_in_tests() {
         // When wake_signal is None, the wake decision code must not panic.
         let wake_signal: Option<Arc<dyn Fn() + Send + Sync>> = None;
-        let completion = Some(SessionCompletionReason::StepLimit);
-
         // This mirrors the production code:
         //   if let Some(wake_signal) = &kernel.wake_signal { wake_signal(); }
-        if should_wake(&completion) {
+        if should_wake(true) {
             if let Some(ws) = &wake_signal {
                 ws();
             }
@@ -980,6 +1201,8 @@ mod tests {
                     params: serde_json::json!({"file_path": "/tmp/sample.rs"}),
                     rationale: "test".into(),
                     plan_task_id: None,
+                    origin_exec_thread_id: None,
+                    proposal_id: None,
                 },
                 result: Ok(serde_json::json!({"ok": true})),
                 record: ActionRecord {
@@ -987,6 +1210,8 @@ mod tests {
                     target: "/tmp/sample.rs".into(),
                     outcome: ActionOutcome::Success,
                     receipt_ref: None,
+                    origin_exec_thread_id: None,
+                    proposal_id: None,
                 },
                 tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
                     tool_use_id: "call_code_edit".into(),

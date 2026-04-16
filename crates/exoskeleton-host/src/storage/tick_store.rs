@@ -186,6 +186,7 @@ mod tests {
                 format!("after-{tick_number}").as_bytes(),
             )),
             thread_contributions: Vec::new(),
+            exec_thread_contributions: Vec::new(),
             actions_taken: Vec::new(),
             llm_calls: Vec::new(),
             decision_rationale: None,
@@ -311,11 +312,14 @@ mod tests {
                 artifact_id: ArtifactId::from_content(b"thread out"),
                 summary: "Analysis complete".into(),
             }],
+            exec_thread_contributions: vec![],
             actions_taken: vec![ActionRecord {
                 action_type: "fs.write".into(),
                 target: "/tmp/output.txt".into(),
                 receipt_ref: Some(ArtifactId::from_content(b"receipt")),
                 outcome: ActionOutcome::Success,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             }],
             llm_calls: vec![LlmCallRecord {
                 model: "local-7b".into(),

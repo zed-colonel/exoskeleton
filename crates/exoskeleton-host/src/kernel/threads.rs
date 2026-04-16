@@ -18,7 +18,7 @@ use exoskeleton_core::{
 use exoskeleton_memory::ApproximateTokenCounter;
 use exoskeleton_threads::{compile_thread_context, ThreadResponse};
 
-use super::KernelContext;
+use super::{KernelContext, PerceptionResult};
 use crate::cognitive_engine::CognitiveHandler;
 
 /// Execute a single cognitive thread for one tick.
@@ -238,6 +238,7 @@ pub fn execute_due_threads(
     handler: &CognitiveHandler,
     kernel: &KernelContext,
     snapshot: &StateSnapshot,
+    perception: &PerceptionResult,
     tick_id: TickId,
     cancellation: &CancellationToken,
 ) -> Result<Vec<ThreadContribution>, ExoError> {
@@ -249,6 +250,13 @@ pub fn execute_due_threads(
     let runnable: Vec<&ThreadSpec> = due
         .iter()
         .filter(|thread| {
+            if should_pause_thread_while_waiting_on_operator(kernel, thread, snapshot, perception) {
+                tracing::debug!(
+                    thread = %thread.name,
+                    "thread paused while vessel is waiting on the operator"
+                );
+                return false;
+            }
             if let Some(ref tracker) = kernel.budget_tracker {
                 if let Ok(guard) = tracker.try_lock() {
                     if !guard.check_thread_budget(thread.thread_id) {
@@ -423,6 +431,52 @@ pub fn execute_due_threads(
     Ok(contributions)
 }
 
+fn should_pause_thread_while_waiting_on_operator(
+    kernel: &KernelContext,
+    thread: &ThreadSpec,
+    snapshot: &StateSnapshot,
+    perception: &PerceptionResult,
+) -> bool {
+    if !perception.new_messages.is_empty() {
+        return false;
+    }
+
+    if !snapshot_indicates_operator_wait(
+        snapshot,
+        kernel.coding_thread_config.return_to_idle_after_completion,
+    ) {
+        return false;
+    }
+
+    !matches!(
+        thread.thread_id,
+        exoskeleton_threads::THREAT_MONITOR_ID | exoskeleton_threads::MEMORY_CONSOLIDATION_ID
+    )
+}
+
+fn snapshot_indicates_operator_wait(
+    snapshot: &StateSnapshot,
+    bounded_completion_idle: bool,
+) -> bool {
+    let waiting_memory = snapshot.working_memory.entries.iter().any(|entry| {
+        (entry.key == "session_status" && entry.value.contains("awaiting_user_direction"))
+            || (entry.key == "user_question_pending" && !entry.value.trim().is_empty())
+    });
+    if waiting_memory {
+        return true;
+    }
+
+    snapshot.exec_thread_summaries.iter().any(|summary| {
+        bounded_completion_idle
+            && summary.kind == exoskeleton_core::ExecThreadKind::Coding
+            && summary.status == exoskeleton_core::ExecThreadStatus::Idle
+            && summary
+                .last_completion_reason
+                .as_ref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -431,13 +485,14 @@ mod tests {
     use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmResponse, StopReason};
     use exoskeleton_core::prompt::PromptRegistry;
     use exoskeleton_core::{
-        ArtifactKind, ArtifactStore, ThreadId, ThreadPriority, ThreadSchedule, ThreadSpec, VesselId,
+        ArtifactKind, ArtifactStore, ExecThreadKind, ExecThreadStatus, ThreadId, ThreadPriority,
+        ThreadSchedule, ThreadSpec, VesselId, WorkingMemoryEntry,
     };
     use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
     use exoskeleton_relationship::InMemoryRelationshipLedger;
     use exoskeleton_threads::{InMemoryThreadStore, ThreadRegistry};
 
-    use super::super::KernelContext;
+    use super::super::{types::PerceptionResult, KernelContext};
     use super::*;
     use crate::cognitive_engine::CognitiveHandler;
     use crate::inbox::InMemoryInbox;
@@ -522,6 +577,9 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry,
+            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
+                crate::exec_threads::InMemoryExecThreadStore::new(),
+            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -536,7 +594,7 @@ mod tests {
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            coding_thread_config: crate::config::CodingThreadConfig::default(),
             tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -554,6 +612,16 @@ mod tests {
             priority: ThreadPriority::Normal,
             token_budget: 4000,
             schedule: ThreadSchedule::EveryTick,
+        }
+    }
+
+    fn test_perception() -> PerceptionResult {
+        PerceptionResult {
+            new_messages: Vec::new(),
+            active_conversations: Vec::new(),
+            thread_outputs: Vec::new(),
+            exec_thread_outputs: Vec::new(),
+            pending_action_results: Vec::new(),
         }
     }
 
@@ -816,8 +884,15 @@ mod tests {
         let token = CancellationToken::new();
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        let contributions =
-            execute_due_threads(&handler, &kernel, &snapshot, tick_id, &token).unwrap();
+        let contributions = execute_due_threads(
+            &handler,
+            &kernel,
+            &snapshot,
+            &test_perception(),
+            tick_id,
+            &token,
+        )
+        .unwrap();
 
         assert_eq!(
             contributions.len(),
@@ -854,8 +929,15 @@ mod tests {
         );
 
         let start = std::time::Instant::now();
-        let contributions =
-            execute_due_threads(&handler, &kernel, &snapshot, tick_id, &token).unwrap();
+        let contributions = execute_due_threads(
+            &handler,
+            &kernel,
+            &snapshot,
+            &test_perception(),
+            tick_id,
+            &token,
+        )
+        .unwrap();
         let elapsed = start.elapsed();
 
         assert_eq!(contributions.len(), 3);
@@ -888,8 +970,15 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        let contributions =
-            execute_due_threads(&handler, &kernel, &snapshot, tick_id, &token).unwrap();
+        let contributions = execute_due_threads(
+            &handler,
+            &kernel,
+            &snapshot,
+            &test_perception(),
+            tick_id,
+            &token,
+        )
+        .unwrap();
 
         // Even if we can't easily make one specific thread fail in the parallel path
         // (since they all share the same backend), we verify no panic and correct count
@@ -915,8 +1004,15 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        let contributions =
-            execute_due_threads(&handler, &kernel, &snapshot, tick_id, &token).unwrap();
+        let contributions = execute_due_threads(
+            &handler,
+            &kernel,
+            &snapshot,
+            &test_perception(),
+            tick_id,
+            &token,
+        )
+        .unwrap();
 
         // With pre-cancelled token, threads should return errors, yielding no contributions
         assert!(
@@ -943,8 +1039,15 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        let contributions =
-            execute_due_threads(&handler, &kernel, &snapshot, tick_id, &token).unwrap();
+        let contributions = execute_due_threads(
+            &handler,
+            &kernel,
+            &snapshot,
+            &test_perception(),
+            tick_id,
+            &token,
+        )
+        .unwrap();
 
         assert_eq!(
             contributions.len(),
@@ -974,13 +1077,76 @@ mod tests {
         let json = r#"{"summary":"ok","recommendations":[]}"#;
         let handler = test_handler_with_mock(json, kernel.artifact_store.clone());
 
-        let contributions =
-            execute_due_threads(&handler, &kernel, &snapshot, tick_id, &token).unwrap();
+        let contributions = execute_due_threads(
+            &handler,
+            &kernel,
+            &snapshot,
+            &test_perception(),
+            tick_id,
+            &token,
+        )
+        .unwrap();
 
         assert_eq!(contributions.len(), 2);
         // due_threads returns Critical first, so contributions[0] should be Critical
         assert_eq!(contributions[0].thread_id, t_critical.thread_id);
         assert_eq!(contributions[1].thread_id, t_normal.thread_id);
+    }
+
+    #[test]
+    fn snapshot_operator_wait_detected_from_working_memory() {
+        let mut snapshot = test_snapshot(VesselId::new());
+        snapshot.working_memory.entries.push(WorkingMemoryEntry {
+            key: "session_status".into(),
+            value: "awaiting_user_direction".into(),
+            written_at_tick: 1,
+            ttl_ticks: Some(5),
+            relevance: 1.0,
+        });
+
+        assert!(snapshot_indicates_operator_wait(&snapshot, false));
+    }
+
+    #[test]
+    fn snapshot_operator_wait_detected_from_coding_exec_completion() {
+        let mut snapshot = test_snapshot(VesselId::new());
+        snapshot
+            .exec_thread_summaries
+            .push(exoskeleton_core::ExecThreadSummary {
+                thread_id: ThreadId::new(),
+                kind: ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status: ExecThreadStatus::Idle,
+                last_output_summary: None,
+                current_focus: None,
+                work_phase: Some("idle".into()),
+                evidence_complete: true,
+                proposal_confidence: None,
+                last_completion_reason: Some("Work item completed".into()),
+            });
+
+        assert!(snapshot_indicates_operator_wait(&snapshot, true));
+    }
+
+    #[test]
+    fn snapshot_operator_wait_ignores_coding_completion_for_unbounded_sessions() {
+        let mut snapshot = test_snapshot(VesselId::new());
+        snapshot
+            .exec_thread_summaries
+            .push(exoskeleton_core::ExecThreadSummary {
+                thread_id: ThreadId::new(),
+                kind: ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status: ExecThreadStatus::Idle,
+                last_output_summary: None,
+                current_focus: None,
+                work_phase: Some("idle".into()),
+                evidence_complete: true,
+                proposal_confidence: None,
+                last_completion_reason: Some("Work item completed".into()),
+            });
+
+        assert!(!snapshot_indicates_operator_wait(&snapshot, false));
     }
 
     // ── E5S2-T15: meta_cognition_proposes_charter ──

@@ -373,6 +373,9 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
+            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
+                crate::exec_threads::InMemoryExecThreadStore::new(),
+            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -387,7 +390,7 @@ mod tests {
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            coding_thread_config: crate::config::CodingThreadConfig::default(),
             tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -408,6 +411,7 @@ mod tests {
                 snapshot_before: ArtifactId::from_content(format!("before-{i}").as_bytes()),
                 snapshot_after: None,
                 thread_contributions: vec![],
+                exec_thread_contributions: vec![],
                 actions_taken: vec![ActionRecord {
                     action_type: "fs.write".into(),
                     target: "/tmp/test".into(),
@@ -417,6 +421,8 @@ mod tests {
                     } else {
                         ActionOutcome::Failure
                     },
+                    origin_exec_thread_id: None,
+                    proposal_id: None,
                 }],
                 llm_calls: vec![LlmCallRecord {
                     model: "test-model".into(),

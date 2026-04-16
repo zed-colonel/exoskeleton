@@ -27,26 +27,6 @@ use super::types::{
     ActResult, AlignmentResult, DecisionResult, PerceptionResult, ReflectionResult,
 };
 use super::KernelContext;
-use crate::budget::session::SessionCompletionReason;
-
-/// Format the decision rationale for the tick record.
-///
-/// When an inner loop completion reason is present, append it to the rationale
-/// so that the benchmark harness's `poll_for_completion` can detect completion
-/// by searching for known strings (e.g., "agent_complete", "step_limit").
-///
-/// CONTRACT: `poll_for_completion` in benchmark.rs searches `decision_rationale`
-/// for `SessionCompletionReason` Display strings. If those Display strings change
-/// (in budget/session.rs), update the poll detection logic too.
-fn format_decision_rationale(
-    reasoning: &str,
-    inner_loop_completion: Option<&SessionCompletionReason>,
-) -> String {
-    match inner_loop_completion {
-        Some(reason) => format!("{reasoning}\n\n[completion: {reason}]"),
-        None => reasoning.to_string(),
-    }
-}
 
 /// Execute the Amend step.
 ///
@@ -70,7 +50,6 @@ pub fn amend(
     act_result: &ActResult,
     reflection: &ReflectionResult,
     context_breakdown_ref: Option<ArtifactId>,
-    inner_loop_completion: Option<&SessionCompletionReason>,
 ) -> Result<HandlerOutput, ExoError> {
     // 1. Build new snapshot from old + SnapshotDelta
     let mut new_snapshot = snapshot_before.clone();
@@ -148,6 +127,11 @@ pub fn amend(
         .thread_registry
         .thread_summaries()
         .unwrap_or_default();
+    new_snapshot.exec_thread_summaries = kernel
+        .exec_thread_registry
+        .exec_thread_summaries()
+        .unwrap_or_default();
+    prune_working_memory_for_bounded_coding_idle(kernel, &mut new_snapshot, perception);
 
     // Process Memory Consolidation thread outputs (Sprint 7)
     // The thread produces artifacts; the master loop writes to MemoryStore (IBP §4.3).
@@ -344,6 +328,7 @@ pub fn amend(
         snapshot_before: snapshot_before_artifact_id,
         snapshot_after: Some(snapshot_after_artifact_id),
         thread_contributions: perception.thread_outputs.clone(),
+        exec_thread_contributions: perception.exec_thread_outputs.clone(),
         actions_taken: act_result
             .executions
             .iter()
@@ -356,10 +341,7 @@ pub fn amend(
             }
             calls
         },
-        decision_rationale: Some(format_decision_rationale(
-            &decision.reasoning,
-            inner_loop_completion,
-        )),
+        decision_rationale: Some(decision.reasoning.clone()),
         context_breakdown_ref,
     };
 
@@ -424,6 +406,30 @@ pub fn amend(
     });
     let output_bytes = serde_json::to_vec(&tick_summary)?;
     Ok(HandlerOutput::success_with_output(output_bytes))
+}
+
+fn prune_working_memory_for_bounded_coding_idle(
+    kernel: &KernelContext,
+    snapshot: &mut exoskeleton_core::StateSnapshot,
+    perception: &PerceptionResult,
+) {
+    if !kernel.coding_thread_config.return_to_idle_after_completion
+        || !perception.new_messages.is_empty()
+        || !snapshot.exec_thread_summaries.iter().any(|summary| {
+            summary.kind == exoskeleton_core::ExecThreadKind::Coding
+                && summary.status == exoskeleton_core::ExecThreadStatus::Idle
+                && summary
+                    .last_completion_reason
+                    .as_ref()
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        })
+    {
+        return;
+    }
+
+    snapshot.working_memory.entries.retain(|entry| {
+        matches!(entry.key.as_str(), "session_status" | "user_question_pending")
+    });
 }
 
 /// Process Memory Consolidation thread outputs by writing to MemoryStore.
@@ -632,6 +638,9 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
+            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
+                crate::exec_threads::InMemoryExecThreadStore::new(),
+            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -646,7 +655,7 @@ mod tests {
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            coding_thread_config: crate::config::CodingThreadConfig::default(),
             tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -685,13 +694,13 @@ mod tests {
             },
             response_artifact_id: ArtifactId::from_content(b"test-resp"),
             watch_proposals: vec![],
-            inner_loop_requested: false,
             vessel_mode_request: None,
         };
         let perception = PerceptionResult {
             new_messages: vec![],
             active_conversations: vec![],
             thread_outputs: vec![],
+            exec_thread_outputs: vec![],
             pending_action_results: vec![],
         };
         let alignment = AlignmentResult {
@@ -728,28 +737,6 @@ mod tests {
     // ── T-9 Tests: Amend Step ──
 
     #[test]
-    fn tick_record_includes_inner_loop_completion_in_rationale() {
-        let rationale = format_decision_rationale(
-            "The task is done",
-            Some(&crate::budget::session::SessionCompletionReason::AgentComplete),
-        );
-        assert!(
-            rationale.contains("agent_complete"),
-            "rationale should contain completion reason"
-        );
-        assert!(
-            rationale.contains("The task is done"),
-            "rationale should contain original reasoning"
-        );
-    }
-
-    #[test]
-    fn tick_record_rationale_without_inner_loop_is_just_reasoning() {
-        let rationale = format_decision_rationale("Simple reasoning", None);
-        assert_eq!(rationale, "Simple reasoning");
-    }
-
-    #[test]
     fn amend_increments_tick_number() {
         let dir = tempfile::tempdir().unwrap();
         let (kernel, _inbox) = test_kernel(dir.path());
@@ -772,7 +759,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -806,7 +792,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -844,13 +829,101 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
         let saved = kernel.snapshot_store.latest().unwrap().unwrap();
         assert_eq!(saved.working_memory.entries.len(), 1);
         assert_eq!(saved.working_memory.entries[0].value, "New working context");
+    }
+
+    #[test]
+    fn amend_prunes_task_working_memory_for_bounded_coding_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut kernel, _inbox) = test_kernel(dir.path());
+        kernel.coding_thread_config.return_to_idle_after_completion = true;
+        let thread_id = exoskeleton_core::ThreadId::new();
+        kernel
+            .exec_thread_registry
+            .register(exoskeleton_core::ExecThreadSpec {
+                thread_id,
+                kind: exoskeleton_core::ExecThreadKind::Coding,
+                name: "Coding".into(),
+                charter: "charter".into(),
+                token_budget: 1000,
+                workspace_root: None,
+            })
+            .unwrap();
+        kernel
+            .exec_thread_registry
+            .update_status(thread_id, exoskeleton_core::ExecThreadStatus::Idle)
+            .unwrap();
+        kernel
+            .exec_thread_registry
+            .save_local_state(
+                thread_id,
+                &exoskeleton_core::ExecThreadLocalState {
+                    last_completion_reason: Some("completed".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let tick_id = TickId::new();
+        let mut snapshot_before = test_snapshot(kernel.vessel_id);
+        snapshot_before
+            .working_memory
+            .apply_op(
+                &exoskeleton_core::WorkingMemoryOp::Set {
+                    key: "session_status".into(),
+                    value: "awaiting_user_direction".into(),
+                    ttl_ticks: None,
+                },
+                0,
+            );
+        snapshot_before
+            .working_memory
+            .apply_op(
+                &exoskeleton_core::WorkingMemoryOp::Set {
+                    key: "task_ready".into(),
+                    value: "ready".into(),
+                    ttl_ticks: None,
+                },
+                0,
+            );
+        let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
+        let (mut decision, perception, alignment, act_result, reflection) = test_params();
+        decision.snapshot_delta.working_memory_ops =
+            Some(vec![exoskeleton_core::WorkingMemoryOp::Set {
+                key: "lib_rs_content".into(),
+                value: "stale".into(),
+                ttl_ticks: None,
+            }]);
+
+        amend(
+            &kernel,
+            tick_id,
+            1,
+            Utc::now(),
+            &snapshot_before,
+            snapshot_before_artifact_id,
+            &perception,
+            &decision,
+            &alignment,
+            &act_result,
+            &reflection,
+            None,
+        )
+        .unwrap();
+
+        let saved = kernel.snapshot_store.latest().unwrap().unwrap();
+        let keys: Vec<&str> = saved
+            .working_memory
+            .entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["session_status"]);
     }
 
     #[test]
@@ -875,7 +948,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -913,7 +985,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -949,7 +1020,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -995,7 +1065,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -1051,7 +1120,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1094,7 +1162,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1129,7 +1196,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1163,6 +1229,8 @@ mod tests {
                 params: serde_json::json!({"duration_ms": 10}),
                 rationale: "test".into(),
                 plan_task_id: None,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             },
             result: Ok(serde_json::json!({"slept_ms": 10})),
             record: exoskeleton_core::tick::ActionRecord {
@@ -1170,6 +1238,8 @@ mod tests {
                 target: "{}".into(),
                 receipt_ref: None,
                 outcome: exoskeleton_core::tick::ActionOutcome::Success,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             },
             tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
                 tool_use_id: "call_delay".into(),
@@ -1194,7 +1264,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -1258,7 +1327,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -1330,7 +1398,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1388,7 +1455,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         );
         assert!(
             result.is_ok(),
@@ -1419,7 +1485,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -1497,7 +1562,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1559,7 +1623,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1619,7 +1682,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1659,7 +1721,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -1713,7 +1774,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1748,7 +1808,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();
@@ -1801,7 +1860,6 @@ mod tests {
             &act_result,
             &reflection,
             None,
-            None,
         )
         .unwrap();
 
@@ -1839,7 +1897,6 @@ mod tests {
             &alignment,
             &act_result,
             &reflection,
-            None,
             None,
         )
         .unwrap();

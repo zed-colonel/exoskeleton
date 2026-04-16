@@ -12,9 +12,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::diff::FileDiffEntry;
+use crate::exec_thread::{ExecThreadKind, ExecThreadProposalConfidence, ExecThreadStatus};
 use crate::id::{ArtifactId, LedgerEntryId, TickId};
 use crate::snapshot::StateSnapshot;
-use crate::ExoError;
+use crate::{ExoError, ThreadId};
 
 /// One entry in the Event Ledger.
 ///
@@ -93,12 +94,8 @@ pub enum EventType {
     ConnectorLoaded,
     /// A connector was unloaded from the registry at runtime.
     ConnectorUnloaded,
-    /// Inner loop started within a tick. Summary includes step limit and token budget.
-    InnerLoopStarted,
-    /// One inner-loop step completed. Summary includes step number, tool used, outcome.
-    InnerLoopStep,
-    /// Inner loop completed. Summary includes total steps, tokens, completion reason.
-    InnerLoopCompleted,
+    /// An executable thread reported progress or a status transition.
+    ExecThreadUpdated,
     /// Agent asked the operator a structured question.
     QuestionAsked,
     /// Operator answered a pending structured question.
@@ -136,9 +133,9 @@ pub struct LiveEvent {
     /// and vessel_started events to avoid a follow-up REST call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<StateSnapshot>,
-    /// Inner-loop step detail. Present only for InnerLoopStep and InnerLoopCompleted events.
+    /// Executable-thread progress detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inner_loop_detail: Option<InnerLoopStepDetail>,
+    pub exec_thread_detail: Option<ExecThreadLiveDetail>,
     /// Question-specific detail for interactive coding sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_detail: Option<QuestionDetail>,
@@ -165,7 +162,7 @@ impl LiveEvent {
             summary: String::new(),
             timestamp: Utc::now(),
             snapshot: None,
-            inner_loop_detail: None,
+            exec_thread_detail: None,
             question_detail: None,
             policy_detail: None,
             plan_mode_detail: None,
@@ -175,24 +172,23 @@ impl LiveEvent {
     }
 }
 
-/// Inner-loop step detail, included in LiveEvent for InnerLoopStep events (E8-S1).
+/// Executable-thread progress detail, included in LiveEvent for ExecThreadUpdated events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
-pub struct InnerLoopStepDetail {
-    /// Current step number (1-based).
-    pub step_number: u32,
-    /// Maximum steps allowed in this session.
-    pub max_steps: u32,
-    /// Tool name called in this step (None for completion events).
+pub struct ExecThreadLiveDetail {
+    pub thread_id: ThreadId,
+    pub kind: ExecThreadKind,
+    pub name: String,
+    pub status: ExecThreadStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    /// Brief outcome of the tool call (None for completion events).
+    pub work_phase: Option<String>,
+    pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_outcome: Option<String>,
-    /// Tokens consumed in this step (input + output).
-    pub tokens_this_step: u64,
-    /// Total tokens consumed across all steps so far.
-    pub tokens_total: u64,
-    /// Completion reason (only set for InnerLoopCompleted events).
+    pub proposal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_action_summary: Option<String>,
+    pub evidence_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_confidence: Option<ExecThreadProposalConfidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_reason: Option<String>,
 }
@@ -304,9 +300,7 @@ mod tests {
             EventType::CharterProposal,
             EventType::ConnectorLoaded,
             EventType::ConnectorUnloaded,
-            EventType::InnerLoopStarted,
-            EventType::InnerLoopStep,
-            EventType::InnerLoopCompleted,
+            EventType::ExecThreadUpdated,
             EventType::QuestionAsked,
             EventType::QuestionAnswered,
             EventType::PolicyApprovalRequired,
@@ -414,6 +408,7 @@ mod tests {
             vessel_mode: crate::VesselMode::Normal,
             working_memory: crate::working_memory::WorkingMemory::new(),
             thread_summaries: Vec::new(),
+            exec_thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
             last_action_summary: None,
@@ -548,28 +543,29 @@ mod tests {
         assert!(!parsed.acknowledged);
     }
 
-    // ── E8S1-T20: inner_loop_step_detail_serialize ──
+    // ── E8S1-T20: exec_thread_live_detail_serialize ──
 
     #[test]
-    fn inner_loop_step_detail_serialize() {
-        let detail = InnerLoopStepDetail {
-            step_number: 3,
-            max_steps: 25,
-            tool_name: Some("fs.write".into()),
-            tool_outcome: Some("success".into()),
-            tokens_this_step: 1500,
-            tokens_total: 4500,
+    fn exec_thread_live_detail_serialize() {
+        let detail = ExecThreadLiveDetail {
+            thread_id: ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            name: "Coding".into(),
+            status: ExecThreadStatus::Active,
+            work_phase: Some("editing".into()),
+            summary: "Ready to apply localized edit".into(),
+            proposal_id: Some("proposal-1".into()),
+            proposed_action_summary: Some("code.edit: src/lib.rs".into()),
+            evidence_complete: true,
+            proposal_confidence: Some(ExecThreadProposalConfidence::High),
             completion_reason: None,
         };
         let json = serde_json::to_string(&detail).unwrap();
-        let parsed: InnerLoopStepDetail = serde_json::from_str(&json).unwrap();
+        let parsed: ExecThreadLiveDetail = serde_json::from_str(&json).unwrap();
         assert_eq!(detail, parsed);
-        assert_eq!(parsed.step_number, 3);
-        assert_eq!(parsed.max_steps, 25);
-        assert_eq!(parsed.tokens_this_step, 1500);
-        assert_eq!(parsed.tokens_total, 4500);
-        assert_eq!(parsed.tool_name.as_deref(), Some("fs.write"));
-        assert_eq!(parsed.tool_outcome.as_deref(), Some("success"));
+        assert_eq!(parsed.name, "Coding");
+        assert_eq!(parsed.work_phase.as_deref(), Some("editing"));
+        assert_eq!(parsed.proposed_action_summary.as_deref(), Some("code.edit: src/lib.rs"));
         assert!(parsed.completion_reason.is_none());
 
         // Optional fields omitted when None
@@ -577,51 +573,61 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert!(!obj.contains_key("completion_reason"));
 
-        // Completed event with completion_reason
-        let completed_detail = InnerLoopStepDetail {
-            step_number: 5,
-            max_steps: 25,
-            tool_name: None,
-            tool_outcome: None,
-            tokens_this_step: 0,
-            tokens_total: 8000,
+        let completed_detail = ExecThreadLiveDetail {
+            thread_id: ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            name: "Coding".into(),
+            status: ExecThreadStatus::Idle,
+            work_phase: Some("idle".into()),
+            summary: "Task complete".into(),
+            proposal_id: None,
+            proposed_action_summary: None,
+            evidence_complete: false,
+            proposal_confidence: None,
             completion_reason: Some("agent_complete".into()),
         };
         let json2 = serde_json::to_string(&completed_detail).unwrap();
-        let parsed2: InnerLoopStepDetail = serde_json::from_str(&json2).unwrap();
+        let parsed2: ExecThreadLiveDetail = serde_json::from_str(&json2).unwrap();
         assert_eq!(completed_detail, parsed2);
         assert_eq!(parsed2.completion_reason.as_deref(), Some("agent_complete"));
     }
 
-    // ── E8S1-T21: live_event_with_inner_loop_detail ──
+    // ── E8S1-T21: live_event_with_exec_thread_detail ──
 
     #[test]
-    fn live_event_with_inner_loop_detail() {
-        let detail = InnerLoopStepDetail {
-            step_number: 2,
-            max_steps: 10,
-            tool_name: Some("shell.exec".into()),
-            tool_outcome: Some("success".into()),
-            tokens_this_step: 800,
-            tokens_total: 2400,
+    fn live_event_with_exec_thread_detail() {
+        let detail = ExecThreadLiveDetail {
+            thread_id: ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            name: "Coding".into(),
+            status: ExecThreadStatus::Blocked,
+            work_phase: Some("verifying".into()),
+            summary: "Waiting on operator input".into(),
+            proposal_id: None,
+            proposed_action_summary: Some("code.read: inspect failing test".into()),
+            evidence_complete: false,
+            proposal_confidence: Some(ExecThreadProposalConfidence::Medium),
             completion_reason: None,
         };
         let event = LiveEvent {
-            event_type: EventType::InnerLoopStep,
-            summary: "Step 2/10: shell.exec (success)".into(),
-            inner_loop_detail: Some(detail),
+            event_type: EventType::ExecThreadUpdated,
+            summary: "Coding thread blocked".into(),
+            exec_thread_detail: Some(detail),
             ..LiveEvent::new(Some(7))
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: LiveEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, parsed);
-        assert!(parsed.inner_loop_detail.is_some());
-        let d = parsed.inner_loop_detail.unwrap();
-        assert_eq!(d.step_number, 2);
-        assert_eq!(d.tokens_this_step, 800);
-        assert_eq!(d.tool_name.as_deref(), Some("shell.exec"));
+        assert!(parsed.exec_thread_detail.is_some());
+        let d = parsed.exec_thread_detail.unwrap();
+        assert_eq!(d.name, "Coding");
+        assert_eq!(d.work_phase.as_deref(), Some("verifying"));
+        assert_eq!(
+            d.proposed_action_summary.as_deref(),
+            Some("code.read: inspect failing test")
+        );
 
-        // Verify inner_loop_detail omitted when None
+        // Verify exec_thread_detail omitted when None
         let event_without = LiveEvent {
             event_type: EventType::TickStarted,
             summary: "Tick 1 started".into(),
@@ -629,7 +635,7 @@ mod tests {
         };
         let value: serde_json::Value = serde_json::to_value(&event_without).unwrap();
         let obj = value.as_object().unwrap();
-        assert!(!obj.contains_key("inner_loop_detail"));
+        assert!(!obj.contains_key("exec_thread_detail"));
     }
 
     #[test]
@@ -637,7 +643,7 @@ mod tests {
         let event = LiveEvent::new(Some(9));
         assert_eq!(event.tick_number, Some(9));
         assert!(event.snapshot.is_none());
-        assert!(event.inner_loop_detail.is_none());
+        assert!(event.exec_thread_detail.is_none());
         assert!(event.question_detail.is_none());
         assert!(event.policy_detail.is_none());
         assert!(event.plan_mode_detail.is_none());

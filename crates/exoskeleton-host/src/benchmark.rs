@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
     ActionOutcome, Artifact, ArtifactKind, ArtifactStore, EnvelopeId, EnvelopeKind,
-    MessageEnvelope, PrincipalId, TickPhase, VesselId,
+    ExoError, MessageEnvelope, PrincipalId, TickPhase, VesselId,
 };
 use exoskeleton_memory::CompiledContext;
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,6 @@ pub struct TaskSection {
     pub prompt: String,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
-    #[serde(default = "default_max_steps")]
-    pub max_steps: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ticks: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,10 +57,6 @@ pub struct TaskSection {
 
 fn default_timeout() -> u64 {
     600
-}
-
-fn default_max_steps() -> u32 {
-    50
 }
 
 /// The `[verify]` section of a benchmark spec.
@@ -133,7 +127,7 @@ pub struct SectionUtilization {
 pub struct TickMetrics {
     pub tick_number: u64,
     pub duration_secs: f64,
-    pub inner_loop_steps: u32,
+    pub tool_steps: u32,
     pub llm_calls: u32,
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -174,6 +168,8 @@ pub struct TaskResult {
     pub context_utilization: ContextUtilization,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tick_details: Vec<TickMetrics>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_anomalies: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub difficulty: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +395,27 @@ pub async fn boot_vessel(config: VesselConfig) -> Result<Vessel, String> {
         .map_err(|e| format!("vessel boot failed: {e}"))
 }
 
+/// Apply the standard coding-benchmark vessel overrides.
+///
+/// This enables the coding exec-thread path for a workspace-scoped run,
+/// forces a permissive tool policy for autonomous benchmark execution, and
+/// assigns a fresh vessel id plus benchmark-local data dir.
+pub fn apply_coding_benchmark_overrides(
+    config: &mut VesselConfig,
+    workspace_path: &Path,
+    data_dir: &Path,
+) {
+    config.data_dir = data_dir.to_path_buf();
+    config.coding_thread.enabled = true;
+    config.coding_thread.workspace_root = Some(workspace_path.to_string_lossy().into_owned());
+    config.coding_thread.return_to_idle_after_completion = true;
+    config.tool_policy = ToolPolicyConfig {
+        default: PolicyRule::Allow,
+        rules: HashMap::new(),
+    };
+    config.vessel_id = VesselId::new();
+}
+
 /// Format the benchmark task prompt with workspace context.
 pub fn format_task_prompt(workspace_path: &Path, prompt: &str) -> String {
     format!(
@@ -493,15 +510,15 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
         // Phase attribution heuristic: LlmCallRecord does not carry a phase tag,
         // so we infer from position. In a standard PODAARA tick, the first LLM
         // call is Decide, the last (if >1 total) is Reflect, and everything in
-        // between is DecideLite (inner loop iterations). This is approximate —
-        // multi-turn Decide introspection queries may skew the count.
+        // between is additional coding/decision work. This remains approximate
+        // until phase tags are recorded directly on LLM calls.
         for (i, call) in tick.llm_calls.iter().enumerate() {
             let phase = if i == 0 {
                 "decide"
             } else if i == tick.llm_calls.len() - 1 && tick.llm_calls.len() > 1 {
                 "reflect"
             } else {
-                "decide_lite"
+                "coding_exec"
             };
             let entry = phase_tokens
                 .entry(phase.to_string())
@@ -600,7 +617,7 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
         tick_details.push(TickMetrics {
             tick_number: tick.tick_number,
             duration_secs: tick_duration,
-            inner_loop_steps: tick.actions_taken.len() as u32,
+            tool_steps: tick.actions_taken.len() as u32,
             llm_calls: tick_llm_calls,
             tokens_in: tick_tokens_in,
             tokens_out: tick_tokens_out,
@@ -621,8 +638,12 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
         .map(compiled_context_to_utilization)
         .unwrap_or_default();
 
+    let ticks_used = tick_details.len() as u32;
+    let harness_anomalies =
+        detect_benchmark_harness_anomalies(ticks_used, &context_utilization);
+
     Ok(MetricsSnapshot {
-        ticks_used: tick_details.len() as u32,
+        ticks_used,
         steps_taken: total_steps,
         tokens: TokenMetrics {
             total_in: total_tokens_in,
@@ -641,6 +662,7 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
         step_trace,
         context_utilization,
         tick_details,
+        harness_anomalies,
     })
 }
 
@@ -679,16 +701,11 @@ pub fn log_diagnostics(inspector: &VesselInspector) {
                     i, action.action_type, action.target, action.outcome,
                 );
             }
-            // Try to read decision artifact to check inner_loop_requested
-            if let Some(ref snapshot_after) = tick.snapshot_after {
-                if let Ok(Some(artifact)) = inspector.artifact(snapshot_after) {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&artifact.content)
-                    {
-                        if let Some(ilr) = val.get("inner_loop_requested") {
-                            eprintln!("  [diag]   inner_loop_requested: {ilr}");
-                        }
-                    }
-                }
+            for contribution in &tick.exec_thread_contributions {
+                eprintln!(
+                    "  [diag]   exec_thread: {:?} {} proposal={:?}",
+                    contribution.kind, contribution.summary, contribution.proposed_action_summary
+                );
             }
         }
     }
@@ -699,18 +716,10 @@ pub fn log_diagnostics(inspector: &VesselInspector) {
 pub struct HeadlessRunner;
 
 impl HeadlessRunner {
-    /// Extract the completion reason from a decision rationale that contains
-    /// a `[completion: ...]` tag appended by `format_decision_rationale`.
-    ///
-    /// CONTRACT: The needle strings must match `SessionCompletionReason::fmt()`
-    /// output in budget/session.rs. If those Display strings change, update here.
-    fn completion_reason_from_rationale(rationale: &str) -> Option<&'static str> {
-        let normalized = rationale.to_lowercase();
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn completion_reason_from_reasoning(reasoning: &str) -> Option<&'static str> {
+        let normalized = reasoning.to_lowercase();
 
-        // Static pairs: (Display string needle, return value)
-        // NOTE: step_limit is intentionally absent — it means the inner loop hit
-        // its per-tick step budget, but the master loop will start a new tick.
-        // The poller should keep waiting for a terminal reason or max_ticks.
         const KNOWN: &[(&str, &str)] = &[
             ("agent_complete", "AgentComplete"),
             ("token_budget", "TokenBudget"),
@@ -726,12 +735,30 @@ impl HeadlessRunner {
             }
         }
 
-        // Handle Error(String) variant — dynamic content, match by prefix
         if normalized.contains("error:") {
             return Some("Error");
         }
 
         None
+    }
+
+    fn completion_reason_from_snapshot(
+        snapshot: &exoskeleton_core::StateSnapshot,
+    ) -> Option<String> {
+        let coding = snapshot
+            .exec_thread_summaries
+            .iter()
+            .find(|summary| summary.kind == exoskeleton_core::ExecThreadKind::Coding)?;
+        match coding.status {
+            exoskeleton_core::ExecThreadStatus::Completed => Some("ExecCompleted".into()),
+            exoskeleton_core::ExecThreadStatus::Failed => Some("ExecFailed".into()),
+            exoskeleton_core::ExecThreadStatus::Blocked => Some("ExecBlocked".into()),
+            exoskeleton_core::ExecThreadStatus::Idle if coding.last_completion_reason.is_some() => {
+                Some("ExecCompleted".into())
+            }
+            exoskeleton_core::ExecThreadStatus::Active => None,
+            exoskeleton_core::ExecThreadStatus::Idle => None,
+        }
     }
 
     /// Build a VesselConfig for a benchmark task by merging the base config
@@ -741,37 +768,27 @@ impl HeadlessRunner {
         spec: &TaskSpec,
         workspace_path: &Path,
         data_dir: &Path,
-    ) -> VesselConfig {
+    ) -> Result<VesselConfig, ExoError> {
         let mut config = base.clone();
 
         if let Some(toml::Value::Table(overrides)) = &spec.vessel_overrides {
-            if let Some(toml::Value::Integer(v)) = overrides.get("max_steps_per_tick") {
-                config.inner_loop.max_steps_per_tick = *v as u32;
-            }
-            if let Some(toml::Value::Integer(v)) = overrides.get("max_tokens_per_session") {
-                config.inner_loop.max_tokens_per_session = *v as u64;
-            }
-            if let Some(toml::Value::Integer(v)) = overrides.get("timeout_secs") {
-                config.inner_loop.timeout_secs = *v as u64;
-            }
-            if let Some(toml::Value::Integer(v)) = overrides.get("context_window_size") {
-                config.inner_loop.context_window_size = *v as u32;
-            }
-            if let Some(toml::Value::Integer(v)) = overrides.get("doom_loop_threshold") {
-                config.inner_loop.doom_loop_threshold = *v as u32;
+            for key in [
+                "max_tokens_per_session",
+                "timeout_secs",
+                "context_window_size",
+                "doom_loop_threshold",
+            ] {
+                if overrides.contains_key(key) {
+                    return Err(ExoError::Config(format!(
+                        "benchmark vessel_overrides key '{key}' was removed; use task.max_steps or coding_thread config instead"
+                    )));
+                }
             }
         }
 
-        config.data_dir = data_dir.to_path_buf();
-        config.inner_loop.enabled = true;
-        config.inner_loop.workspace_root = Some(workspace_path.to_string_lossy().into_owned());
-        config.tool_policy = ToolPolicyConfig {
-            default: PolicyRule::Allow,
-            rules: HashMap::new(),
-        };
-        config.vessel_id = VesselId::new();
+        apply_coding_benchmark_overrides(&mut config, workspace_path, data_dir);
 
-        config
+        Ok(config)
     }
 
     /// Submit a task prompt to the vessel's inbox as a HumanMessage envelope.
@@ -836,12 +853,6 @@ impl HeadlessRunner {
                 }
             }
 
-            if let Some(max) = max_ticks {
-                if completed_ticks >= max as u64 {
-                    return Ok("MaxTicks".to_string());
-                }
-            }
-
             for tick in ticks {
                 if tick.tick_number <= last_seen_tick {
                     continue;
@@ -852,10 +863,22 @@ impl HeadlessRunner {
                     continue;
                 }
 
-                if let Some(rationale) = tick.decision_rationale.as_deref() {
-                    if let Some(reason) = Self::completion_reason_from_rationale(rationale) {
-                        return Ok(reason.to_string());
+                if let Some(snapshot) = inspector
+                    .snapshot()
+                    .map_err(|e| format!("snapshot read failed: {e}"))?
+                {
+                    if let Some(reason) = Self::completion_reason_from_snapshot(&snapshot) {
+                        return Ok(reason);
                     }
+                }
+            }
+
+            if let Some(max) = max_ticks {
+                // Allow one additional convergence tick after the nominal limit
+                // so exec-thread completion can be recorded from the previous
+                // tick's action results.
+                if completed_ticks > max as u64 {
+                    return Ok("MaxTicks".to_string());
                 }
             }
         }
@@ -893,7 +916,8 @@ impl HeadlessRunner {
         let data_dir = workspace_dir.path().join(".exo-bench");
         std::fs::create_dir_all(&data_dir)
             .map_err(|e| format!("failed to create bench data dir: {e}"))?;
-        let config = Self::build_vessel_config(base_config, spec, workspace_dir.path(), &data_dir);
+        let config = Self::build_vessel_config(base_config, spec, workspace_dir.path(), &data_dir)
+            .map_err(|e| format!("invalid benchmark vessel config: {e}"))?;
 
         let vessel = boot_vessel(config).await?;
 
@@ -913,6 +937,10 @@ impl HeadlessRunner {
             tracing::warn!("metrics extraction failed: {e}");
             MetricsSnapshot::default()
         });
+
+        for anomaly in &metrics.harness_anomalies {
+            eprintln!("  [warn] harness anomaly: {anomaly}");
+        }
 
         vessel
             .shutdown()
@@ -978,6 +1006,7 @@ impl HeadlessRunner {
             step_trace: metrics.step_trace,
             context_utilization: metrics.context_utilization,
             tick_details: metrics.tick_details,
+            harness_anomalies: metrics.harness_anomalies,
             difficulty: spec.task.difficulty.clone(),
             language: spec.task.language.clone(),
             tags: spec.task.tags.clone(),
@@ -1004,6 +1033,7 @@ pub struct MetricsSnapshot {
     pub step_trace: Vec<StepTrace>,
     pub context_utilization: ContextUtilization,
     pub tick_details: Vec<TickMetrics>,
+    pub harness_anomalies: Vec<String>,
 }
 
 impl Default for MetricsSnapshot {
@@ -1023,8 +1053,54 @@ impl Default for MetricsSnapshot {
             step_trace: vec![],
             context_utilization: ContextUtilization::default(),
             tick_details: vec![],
+            harness_anomalies: vec![],
         }
     }
+}
+
+fn detect_benchmark_harness_anomalies(
+    ticks_used: u32,
+    context_utilization: &ContextUtilization,
+) -> Vec<String> {
+    if ticks_used == 0 {
+        return Vec::new();
+    }
+
+    let mut anomalies = Vec::new();
+
+    if context_utilization.total_budget_tokens == 0 {
+        anomalies.push(
+            "missing_compiled_context_artifact: no compiled context breakdown was captured"
+                .to_string(),
+        );
+        return anomalies;
+    }
+
+    match context_utilization.sections.get("conversations") {
+        Some(section) if section.used_tokens == 0 => anomalies.push(
+            "missing_conversations_context: benchmark task prompt did not make it into compiled context"
+                .to_string(),
+        ),
+        None => anomalies.push(
+            "missing_conversations_section: compiled context omitted conversations section"
+                .to_string(),
+        ),
+        _ => {}
+    }
+
+    match context_utilization.sections.get("exec_thread_outputs") {
+        Some(section) if section.used_tokens == 0 => anomalies.push(
+            "missing_exec_thread_context: coding exec-thread output did not make it into compiled context"
+                .to_string(),
+        ),
+        None => anomalies.push(
+            "missing_exec_thread_section: compiled context omitted exec-thread outputs section"
+                .to_string(),
+        ),
+        _ => {}
+    }
+
+    anomalies
 }
 
 fn compiled_context_to_utilization(compiled: CompiledContext) -> ContextUtilization {
@@ -1075,11 +1151,18 @@ pub fn format_report(result: &SuiteResult) -> String {
     ));
 
     let mut total_cost = 0.0_f64;
+    let mut total_harness_anomalies = 0_usize;
     for task in &result.tasks {
         let status = if task.passed { "PASS" } else { "FAIL" };
         let dots = ".".repeat(40_usize.saturating_sub(task.task_name.len()));
+        let anomaly_suffix = if task.harness_anomalies.is_empty() {
+            String::new()
+        } else {
+            total_harness_anomalies += task.harness_anomalies.len();
+            format!("  [anomaly:{}]", task.harness_anomalies.len())
+        };
         out.push_str(&format!(
-            "  {} {} {} {:>5.0}s {:>3} steps {:>6} tok  ${:.2}\n",
+            "  {} {} {} {:>5.0}s {:>3} steps {:>6} tok  ${:.2}{}\n",
             task.task_name,
             dots,
             status,
@@ -1087,6 +1170,7 @@ pub fn format_report(result: &SuiteResult) -> String {
             task.steps_taken,
             task.tokens.total,
             task.llm_cost_cents / 100.0,
+            anomaly_suffix,
         ));
         total_cost += task.llm_cost_cents;
     }
@@ -1094,7 +1178,7 @@ pub fn format_report(result: &SuiteResult) -> String {
     let pass_count = result.tasks.iter().filter(|t| t.passed).count();
     let total = result.tasks.len();
     out.push_str(&format!(
-        "\n{}\n  Pass rate:     {}/{} ({:.0}%)\n  Median time:   {:.1}s\n  Median steps:  {}\n  Median tokens: {}\n  Total cost:    ${:.2}\n{}\n",
+        "\n{}\n  Pass rate:     {}/{} ({:.0}%)\n  Median time:   {:.1}s\n  Median steps:  {}\n  Median tokens: {}\n  Total cost:    ${:.2}\n  Anomalies:     {}\n{}\n",
         "-".repeat(64),
         pass_count,
         total,
@@ -1103,6 +1187,7 @@ pub fn format_report(result: &SuiteResult) -> String {
         result.median_steps(),
         result.median_tokens(),
         total_cost / 100.0,
+        total_harness_anomalies,
         "=".repeat(64),
     ));
 
@@ -1203,7 +1288,7 @@ name = "add-test-for-parser"
 repo_path = "./benchmarks/repos/sample-rust"
 prompt = "Add a unit test for the parse_config function"
 timeout_secs = 300
-max_steps = 25
+max_ticks = 15
 
 [verify]
 command = "cargo test --lib test_parse_config"
@@ -1212,7 +1297,7 @@ expected_exit_code = 0
         let spec: TaskSpec = toml::from_str(toml_str).unwrap();
         assert_eq!(spec.task.name, "add-test-for-parser");
         assert_eq!(spec.task.timeout_secs, 300);
-        assert_eq!(spec.task.max_steps, 25);
+        assert_eq!(spec.task.max_ticks, Some(15));
         assert_eq!(spec.verify.expected_exit_code, 0);
     }
 
@@ -1229,7 +1314,6 @@ command = "true"
 "#;
         let spec: TaskSpec = toml::from_str(toml_str).unwrap();
         assert_eq!(spec.task.timeout_secs, 600);
-        assert_eq!(spec.task.max_steps, 50);
         assert_eq!(spec.verify.expected_exit_code, 0);
         assert_eq!(spec.task.max_ticks, None);
         assert!(spec.task.tags.is_empty());
@@ -1261,7 +1345,6 @@ expected_exit_code = 0
 test_patch = "../patches/test-01.patch"
 
 [vessel_overrides]
-max_steps_per_tick = 50
 timeout_secs = 600
 "#;
         let spec: TaskSpec = toml::from_str(toml_str).unwrap();
@@ -1311,7 +1394,7 @@ timeout_secs = 600
                         },
                     );
                     m.insert(
-                        "decide_lite".into(),
+                        "coding_exec".into(),
                         PhaseTokens {
                             tokens_in: 800,
                             tokens_out: 150,
@@ -1367,7 +1450,7 @@ timeout_secs = 600
             tick_details: vec![TickMetrics {
                 tick_number: 1,
                 duration_secs: 12.5,
-                inner_loop_steps: 8,
+                tool_steps: 8,
                 llm_calls: 3,
                 tokens_in: 3000,
                 tokens_out: 500,
@@ -1375,6 +1458,7 @@ timeout_secs = 600
                 actions_succeeded: 7,
                 completion_reason: "AgentComplete".into(),
             }],
+            harness_anomalies: vec!["missing_exec_thread_context".into()],
             difficulty: Some("easy".into()),
             language: Some("rust".into()),
             tags: vec!["unit-test".into()],
@@ -1390,18 +1474,19 @@ timeout_secs = 600
         assert_eq!(parsed.step_trace.len(), 1);
         assert_eq!(parsed.tick_details.len(), 1);
         assert_eq!(parsed.context_utilization.utilization_pct, 57.5);
+        assert_eq!(parsed.harness_anomalies.len(), 1);
     }
 
     #[test]
     fn build_vessel_config_applies_forced_overrides() {
-        use crate::config::{InnerLoopConfig, VesselConfig};
+        use crate::config::{CodingThreadConfig, VesselConfig};
 
         let base = VesselConfig {
             mission: "test mission".into(),
             data_dir: std::path::PathBuf::from("/tmp/test"),
-            inner_loop: InnerLoopConfig {
+            coding_thread: CodingThreadConfig {
                 enabled: false,
-                ..InnerLoopConfig::default()
+                ..CodingThreadConfig::default()
             },
             ..VesselConfig::default()
         };
@@ -1412,7 +1497,6 @@ timeout_secs = 600
                 repo_path: "../repos/sample".into(),
                 prompt: "do something".into(),
                 timeout_secs: 300,
-                max_steps: 25,
                 max_ticks: None,
                 difficulty: None,
                 language: None,
@@ -1432,13 +1516,15 @@ timeout_secs = 600
 
         let workspace = std::path::Path::new("/tmp/workspace");
         let data_dir = std::path::Path::new("/tmp/bench-data");
-        let config = HeadlessRunner::build_vessel_config(&base, &spec, workspace, data_dir);
+        let config = HeadlessRunner::build_vessel_config(&base, &spec, workspace, data_dir)
+            .unwrap();
 
-        assert!(config.inner_loop.enabled);
+        assert!(config.coding_thread.enabled);
         assert_eq!(
-            config.inner_loop.workspace_root,
+            config.coding_thread.workspace_root,
             Some(workspace.to_string_lossy().into_owned())
         );
+        assert!(config.coding_thread.return_to_idle_after_completion);
         assert_eq!(config.data_dir, data_dir);
         assert_eq!(
             config.tool_policy.default,
@@ -1448,21 +1534,21 @@ timeout_secs = 600
     }
 
     #[test]
-    fn build_vessel_config_applies_vessel_overrides() {
-        use crate::config::{InnerLoopConfig, VesselConfig};
+    fn build_vessel_config_rejects_removed_legacy_vessel_overrides() {
+        use crate::config::{CodingThreadConfig, VesselConfig};
 
         let base = VesselConfig {
             mission: "test".into(),
             data_dir: std::path::PathBuf::from("/tmp/test"),
-            inner_loop: InnerLoopConfig {
-                max_steps_per_tick: 25,
-                ..InnerLoopConfig::default()
+            coding_thread: CodingThreadConfig {
+                enabled: false,
+                ..CodingThreadConfig::default()
             },
             ..VesselConfig::default()
         };
 
         let mut overrides = toml::map::Map::new();
-        overrides.insert("max_steps_per_tick".into(), toml::Value::Integer(50));
+        overrides.insert("timeout_secs".into(), toml::Value::Integer(50));
 
         let spec = TaskSpec {
             task: TaskSection {
@@ -1470,7 +1556,6 @@ timeout_secs = 600
                 repo_path: ".".into(),
                 prompt: "do something".into(),
                 timeout_secs: 300,
-                max_steps: 25,
                 max_ticks: None,
                 difficulty: None,
                 language: None,
@@ -1488,14 +1573,18 @@ timeout_secs = 600
             vessel_overrides: Some(toml::Value::Table(overrides)),
         };
 
-        let config = HeadlessRunner::build_vessel_config(
+        let err = HeadlessRunner::build_vessel_config(
             &base,
             &spec,
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/data"),
-        );
+        )
+        .unwrap_err();
 
-        assert_eq!(config.inner_loop.max_steps_per_tick, 50);
+        assert!(
+            err.to_string().contains("removed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1629,6 +1718,49 @@ timeout_secs = 600
         assert!(report.contains("claude-sonnet-4-20250514"));
         assert!(report.contains("$0.02") || report.contains("$0.01"));
         assert!(report.contains("3,500") || report.contains("3500"));
+        assert!(report.contains("Anomalies:"));
+    }
+
+    #[test]
+    fn detect_benchmark_harness_anomalies_flags_missing_sections() {
+        let anomalies = detect_benchmark_harness_anomalies(
+            4,
+            &ContextUtilization {
+                total_budget_tokens: 16_384,
+                total_used_tokens: 120,
+                utilization_pct: 0.73,
+                sections: {
+                    let mut sections = HashMap::new();
+                    sections.insert(
+                        "conversations".into(),
+                        SectionUtilization {
+                            budget_tokens: 200,
+                            used_tokens: 0,
+                            truncated: false,
+                        },
+                    );
+                    sections.insert(
+                        "exec_thread_outputs".into(),
+                        SectionUtilization {
+                            budget_tokens: 80,
+                            used_tokens: 0,
+                            truncated: false,
+                        },
+                    );
+                    sections
+                },
+            },
+        );
+
+        assert_eq!(anomalies.len(), 2);
+        assert!(anomalies.iter().any(|a| a.contains("missing_conversations_context")));
+        assert!(anomalies.iter().any(|a| a.contains("missing_exec_thread_context")));
+    }
+
+    #[test]
+    fn detect_benchmark_harness_anomalies_ignores_empty_runs() {
+        let anomalies = detect_benchmark_harness_anomalies(0, &ContextUtilization::default());
+        assert!(anomalies.is_empty());
     }
 
     #[test]
@@ -1740,20 +1872,20 @@ command = "true"
     }
 
     #[test]
-    fn completion_reason_from_rationale_detects_known_inner_loop_reasons() {
+    fn completion_reason_from_reasoning_detects_known_completion_tags() {
         assert_eq!(
-            HeadlessRunner::completion_reason_from_rationale(
+            HeadlessRunner::completion_reason_from_reasoning(
                 "Finished work\n\n[completion: agent_complete]"
             ),
             Some("AgentComplete")
         );
         // step_limit is intentionally non-terminal — the master loop ticks over
         assert_eq!(
-            HeadlessRunner::completion_reason_from_rationale("notes [completion: step_limit]"),
+            HeadlessRunner::completion_reason_from_reasoning("notes [completion: step_limit]"),
             None
         );
         assert_eq!(
-            HeadlessRunner::completion_reason_from_rationale(
+            HeadlessRunner::completion_reason_from_reasoning(
                 "waiting for user [completion: awaiting_input]"
             ),
             Some("AwaitingInput")
@@ -1768,17 +1900,111 @@ command = "true"
     }
 
     #[test]
-    fn completion_reason_from_rationale_detects_error() {
+    fn completion_reason_from_reasoning_detects_error() {
         let rationale = "some reasoning\n\n[completion: error: LLM call failed]";
-        let reason = HeadlessRunner::completion_reason_from_rationale(rationale);
+        let reason = HeadlessRunner::completion_reason_from_reasoning(rationale);
         assert_eq!(reason, Some("Error"));
     }
 
     #[test]
-    fn completion_reason_from_rationale_ignores_plain_reasoning() {
+    fn completion_reason_from_reasoning_ignores_plain_reasoning() {
         assert_eq!(
-            HeadlessRunner::completion_reason_from_rationale("The task is done."),
+            HeadlessRunner::completion_reason_from_reasoning("The task is done."),
             None
+        );
+    }
+
+    #[test]
+    fn completion_reason_from_snapshot_returns_none_without_coding_thread() {
+        let snapshot = exoskeleton_core::StateSnapshot::initial(
+            exoskeleton_core::VesselId::new(),
+            "test".into(),
+        );
+
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_snapshot(&snapshot),
+            None
+        );
+    }
+
+    #[test]
+    fn completion_reason_from_snapshot_requires_idle_completion_reason() {
+        let mut snapshot = exoskeleton_core::StateSnapshot::initial(
+            exoskeleton_core::VesselId::new(),
+            "test".into(),
+        );
+        snapshot
+            .exec_thread_summaries
+            .push(exoskeleton_core::ExecThreadSummary {
+                thread_id: exoskeleton_core::ThreadId::new(),
+                kind: exoskeleton_core::ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status: exoskeleton_core::ExecThreadStatus::Idle,
+                last_output_summary: Some("standing by".into()),
+                current_focus: None,
+                work_phase: None,
+                evidence_complete: false,
+                proposal_confidence: None,
+                last_completion_reason: None,
+            });
+
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_snapshot(&snapshot),
+            None
+        );
+    }
+
+    #[test]
+    fn completion_reason_from_snapshot_treats_idle_with_completion_reason_as_complete() {
+        let mut snapshot = exoskeleton_core::StateSnapshot::initial(
+            exoskeleton_core::VesselId::new(),
+            "test".into(),
+        );
+        snapshot
+            .exec_thread_summaries
+            .push(exoskeleton_core::ExecThreadSummary {
+                thread_id: exoskeleton_core::ThreadId::new(),
+                kind: exoskeleton_core::ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status: exoskeleton_core::ExecThreadStatus::Idle,
+                last_output_summary: Some("completed work".into()),
+                current_focus: None,
+                work_phase: None,
+                evidence_complete: false,
+                proposal_confidence: None,
+                last_completion_reason: Some("task completed".into()),
+            });
+
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_snapshot(&snapshot),
+            Some("ExecCompleted".into())
+        );
+    }
+
+    #[test]
+    fn completion_reason_from_snapshot_keeps_completed_as_compatibility_state() {
+        let mut snapshot = exoskeleton_core::StateSnapshot::initial(
+            exoskeleton_core::VesselId::new(),
+            "test".into(),
+        );
+        snapshot
+            .exec_thread_summaries
+            .push(exoskeleton_core::ExecThreadSummary {
+                thread_id: exoskeleton_core::ThreadId::new(),
+                kind: exoskeleton_core::ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status: exoskeleton_core::ExecThreadStatus::Completed,
+                last_output_summary: Some("legacy completed".into()),
+                current_focus: None,
+                work_phase: None,
+                evidence_complete: false,
+                proposal_confidence: None,
+                last_completion_reason: Some("legacy".into()),
+            });
+
+        assert_eq!(
+            HeadlessRunner::completion_reason_from_snapshot(&snapshot),
+            Some("ExecCompleted".into())
         );
     }
 
@@ -1818,6 +2044,7 @@ command = "true"
             step_trace: vec![],
             context_utilization: ContextUtilization::default(),
             tick_details: vec![],
+            harness_anomalies: vec![],
             difficulty: None,
             language: None,
             tags: vec![],

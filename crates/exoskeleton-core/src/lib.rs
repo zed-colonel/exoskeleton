@@ -13,6 +13,7 @@ pub mod diff;
 pub mod envelope;
 pub mod error;
 pub mod event;
+pub mod exec_thread;
 pub mod id;
 pub mod inbox;
 pub mod introspection;
@@ -43,8 +44,12 @@ pub use diff::{CodeDiffContent, CodeDiffOperation, FileDiffEntry, TickDiffSummar
 pub use envelope::{EnvelopeKind, MessageEnvelope, RelationalSignal};
 pub use error::ExoError;
 pub use event::{
-    CapabilityRequestPayload, DiffSummary, EventEntry, EventLedger, EventType, InnerLoopStepDetail,
-    LiveEvent, PlanModeDetail, PolicyDetail, QuestionDetail,
+    CapabilityRequestPayload, DiffSummary, EventEntry, EventLedger, EventType,
+    ExecThreadLiveDetail, LiveEvent, PlanModeDetail, PolicyDetail, QuestionDetail,
+};
+pub use exec_thread::{
+    ExecThreadKind, ExecThreadLocalState, ExecThreadOutput, ExecThreadProposal,
+    ExecThreadProposalConfidence, ExecThreadSpec, ExecThreadStatus,
 };
 pub use id::{
     derive_external_principal_id, sha256_hex, ArtifactId, ArtifactIdError, ConversationId,
@@ -60,11 +65,13 @@ pub use relationship::{
     PrincipalSummary, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
     TrustDecayConfig,
 };
-pub use snapshot::{BudgetStatus, SnapshotStore, StateSnapshot, ThreadSummary, VesselStatus};
+pub use snapshot::{
+    BudgetStatus, ExecThreadSummary, SnapshotStore, StateSnapshot, ThreadSummary, VesselStatus,
+};
 pub use thread::{ThreadOutput, ThreadPriority, ThreadSchedule, ThreadSpec, ThreadStatus};
 pub use tick::{
-    ActionOutcome, ActionRecord, LlmCallRecord, ThreadContribution, TickPhase, TickRecord,
-    TickStore,
+    ActionOutcome, ActionRecord, ExecThreadContribution, LlmCallRecord, ThreadContribution,
+    TickPhase, TickRecord, TickStore,
 };
 pub use vessel_mode::VesselMode;
 pub use watch::{
@@ -107,6 +114,7 @@ mod tests {
                 vessel_mode: VesselMode::Normal,
                 working_memory: WorkingMemory::new(),
                 thread_summaries: Vec::new(),
+                exec_thread_summaries: Vec::new(),
                 relationship_snapshot_ref: None,
                 budget_status: BudgetStatus::unlimited(),
                 last_action_summary: None,
@@ -192,6 +200,7 @@ mod tests {
             snapshot_before: snap_artifact.id.clone(),
             snapshot_after: None,
             thread_contributions: Vec::new(),
+            exec_thread_contributions: Vec::new(),
             actions_taken: Vec::new(),
             llm_calls: Vec::new(),
             decision_rationale: None,

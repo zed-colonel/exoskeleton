@@ -30,7 +30,8 @@ Thumbs.db
 # ── AI coding tool configs (user-local) ─────────────────────────
 .claude/
 CLAUDE.md
-.codex
+.codex/
+AGENTS.md
 .superpowers/
 
 # ── Development data ────────────────────────────────────────────

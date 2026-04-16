@@ -13,8 +13,9 @@ use exoskeleton_core::conversation::{Conversation, ConversationState};
 use exoskeleton_core::plan::{Plan, PlanTaskStatus};
 use exoskeleton_core::working_memory::WorkingMemory;
 use exoskeleton_core::{
-    ArtifactId, EpisodicSummary, EventEntry, LongTermNote, PrincipalSummary, RelationshipSnapshot,
-    StateSnapshot, ThreadContribution, VesselId, WorkingMemoryEntry,
+    ArtifactId, EpisodicSummary, EventEntry, ExecThreadContribution, LongTermNote,
+    PrincipalSummary, RelationshipSnapshot, StateSnapshot, ThreadContribution, VesselId,
+    WorkingMemoryEntry,
 };
 
 /// Render the system section: vessel identity, mission, operating mode.
@@ -103,6 +104,24 @@ pub fn render_thread_outputs(contributions: &[ThreadContribution]) -> String {
     let mut s = "=== THREAD OUTPUTS ===\n".to_string();
     for tc in contributions {
         s.push_str(&format!("- [{}]: {}\n", tc.thread_id, tc.summary));
+    }
+    s
+}
+
+/// Render executable thread contributions from the most recent tick.
+pub fn render_exec_thread_outputs(contributions: &[ExecThreadContribution]) -> String {
+    if contributions.is_empty() {
+        return String::new();
+    }
+    let mut s = "=== EXEC THREAD OUTPUTS ===\n".to_string();
+    for contribution in contributions {
+        s.push_str(&format!(
+            "- [{:?}/{}]: {}\n",
+            contribution.kind, contribution.thread_id, contribution.summary
+        ));
+        if let Some(proposal) = contribution.proposed_action_summary.as_deref() {
+            s.push_str(&format!("  Recommended next action: {proposal}\n"));
+        }
     }
     s
 }

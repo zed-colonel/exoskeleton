@@ -100,7 +100,7 @@ pub fn orient(
         .ok();
 
     let workspace_root = kernel
-        .inner_loop_config
+        .coding_thread_config
         .workspace_root
         .as_deref()
         .map(PathBuf::from);
@@ -125,6 +125,7 @@ pub fn orient(
         snapshot,
         relationship_snapshot: relationship_snapshot.as_ref(),
         thread_contributions: &perception.thread_outputs,
+        exec_thread_contributions: &perception.exec_thread_outputs,
         recent_events: &recent_events,
         episodic_summaries: &episodic_summaries,
         long_term_notes: &long_term_notes,
@@ -280,6 +281,9 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
+            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
+                crate::exec_threads::InMemoryExecThreadStore::new(),
+            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -294,7 +298,7 @@ mod tests {
             watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
             max_watches: 20,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: crate::config::InnerLoopConfig::default(),
+            coding_thread_config: crate::config::CodingThreadConfig::default(),
             tool_policy: crate::kernel::policy::ToolPolicyConfig::default(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -309,6 +313,7 @@ mod tests {
             new_messages: vec![],
             active_conversations: vec![],
             thread_outputs: vec![],
+            exec_thread_outputs: vec![],
             pending_action_results: vec![],
         }
     }

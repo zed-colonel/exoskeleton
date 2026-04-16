@@ -69,6 +69,7 @@ mod tests {
                 snapshot: &snap,
                 relationship_snapshot: None,
                 thread_contributions: &[],
+                exec_thread_contributions: &[],
                 recent_events: &[],
                 episodic_summaries: &[],
                 long_term_notes: &[],

@@ -229,6 +229,16 @@ cargo fmt --all -- --check                            # Format check
 cargo doc --workspace --no-deps                       # Build docs
 ```
 
+### Install `exo` To User `bin/`
+
+```bash
+./scripts/install-exo-user-bin.sh          # Build release and install to ~/bin or ~/.local/bin
+./scripts/install-exo-user-bin.sh debug    # Install a debug build instead
+```
+
+The installer prefers `~/bin` when it exists, otherwise it installs to
+`~/.local/bin`. Set `EXO_USER_BIN_DIR` to override the destination.
+
 ---
 
 ## Sacred Invariants

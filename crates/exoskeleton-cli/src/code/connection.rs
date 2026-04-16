@@ -41,12 +41,23 @@ pub fn websocket_url(base_url: &str) -> String {
 
 /// Fetch vessel status and populate the App's status state.
 ///
-/// Returns the vessel_id string if successful.
-pub async fn fetch_vessel_status(client: &DaemonClient, app: &mut App) -> Result<String, CliError> {
-    let status = client
-        .status()
-        .await?
-        .ok_or_else(|| CliError::Other("vessel returned 204 (no status)".into()))?;
+/// Returns the vessel_id string if a snapshot is already available.
+pub async fn fetch_vessel_status(
+    client: &DaemonClient,
+    app: &mut App,
+) -> Result<Option<String>, CliError> {
+    let Some(status) = client.status().await? else {
+        app.connection = ConnectionStatus::Connected;
+        app.status = StatusState {
+            vessel_name: "Starting vessel...".into(),
+            vessel_mode: "booting".into(),
+            token_summary: String::new(),
+            step_summary: "Waiting for first completed tick".into(),
+            exec_summary: String::new(),
+        };
+        app.vessel_id = "pending".into();
+        return Ok(None);
+    };
 
     let vessel_id = status
         .get("vessel_id")
@@ -71,11 +82,12 @@ pub async fn fetch_vessel_status(client: &DaemonClient, app: &mut App) -> Result
         vessel_mode,
         token_summary: String::new(),
         step_summary: String::new(),
+        exec_summary: String::new(),
     };
     app.connection = ConnectionStatus::Connected;
     app.vessel_id = vessel_id.clone();
 
-    Ok(vessel_id)
+    Ok(Some(vessel_id))
 }
 
 /// Load recent conversation history into the App.

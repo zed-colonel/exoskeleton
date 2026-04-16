@@ -51,7 +51,7 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
         observatory_token_env: None,
         extra_destructive_tools: vec![],
         connectors_dir: None,
-        inner_loop: exoskeleton_host::config::InnerLoopConfig::default(),
+        coding_thread: exoskeleton_host::config::CodingThreadConfig::default(),
         tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
     }
 }
@@ -76,6 +76,7 @@ pub fn make_snapshot(vessel_id: VesselId, tick_number: u64) -> StateSnapshot {
         vessel_mode: exoskeleton_core::VesselMode::Normal,
         working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
         thread_summaries: Vec::new(),
+        exec_thread_summaries: Vec::new(),
         relationship_snapshot_ref: None,
         budget_status: BudgetStatus::unlimited(),
         last_action_summary: None,
@@ -96,6 +97,7 @@ pub fn make_tick(tick_number: u64) -> exoskeleton_core::TickRecord {
             format!("after-{tick_number}").as_bytes(),
         )),
         thread_contributions: Vec::new(),
+        exec_thread_contributions: Vec::new(),
         actions_taken: Vec::new(),
         llm_calls: Vec::new(),
         decision_rationale: None,

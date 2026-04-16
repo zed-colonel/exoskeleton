@@ -1083,6 +1083,7 @@ async fn get_tick_context_returns_breakdown() {
         snapshot_before: exoskeleton_core::ArtifactId::from_content(b"before-1"),
         snapshot_after: Some(exoskeleton_core::ArtifactId::from_content(b"after-1")),
         thread_contributions: Vec::new(),
+        exec_thread_contributions: Vec::new(),
         actions_taken: Vec::new(),
         llm_calls: Vec::new(),
         decision_rationale: None,

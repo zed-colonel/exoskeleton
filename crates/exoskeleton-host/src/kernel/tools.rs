@@ -374,8 +374,8 @@ pub fn process_cognitive_tool(name: &str, input: &Value) -> Result<CognitiveTool
 
 /// Shared accumulator state for cognitive tool results.
 ///
-/// Used by both Decide (full) and DecideLite (inner loop) to avoid duplicating
-/// the cognitive outcome folding logic.
+/// Used by reasoning components to avoid duplicating the cognitive outcome
+/// folding logic.
 #[derive(Default)]
 pub struct CognitiveAccumulator {
     pub reasoning_parts: Vec<String>,
@@ -430,7 +430,7 @@ pub fn build_decide_tools(kernel: &KernelContext) -> Vec<ToolDefinition> {
     tools
 }
 
-pub fn build_inner_loop_tools(kernel: &KernelContext) -> Vec<ToolDefinition> {
+pub fn build_coding_thread_tools(kernel: &KernelContext) -> Vec<ToolDefinition> {
     let mut tools = connector_tool_definitions(kernel);
     tools.extend(cognitive_tool_definitions());
     tools

@@ -27,7 +27,7 @@ impl<'a> ActivityWidget<'a> {
 
     /// Whether this widget should be visible (has content to display).
     pub fn is_visible(activity: &ActivityState) -> bool {
-        activity.is_active && !activity.label.is_empty()
+        (activity.is_active || activity.is_notice) && !activity.label.is_empty()
     }
 }
 
@@ -37,12 +37,15 @@ impl<'a> Widget for ActivityWidget<'a> {
             return;
         }
 
-        if !self.activity.is_active || self.activity.label.is_empty() {
+        if (!self.activity.is_active && !self.activity.is_notice) || self.activity.label.is_empty()
+        {
             return;
         }
 
         let indicator = if self.activity.is_streaming {
             '●'
+        } else if self.activity.is_notice {
+            '!'
         } else {
             SPINNER_FRAMES
                 .get(self.activity.spinner_phase)
@@ -51,6 +54,8 @@ impl<'a> Widget for ActivityWidget<'a> {
         };
         let indicator_color = if self.activity.is_streaming {
             Color::Green
+        } else if self.activity.is_notice {
+            Color::Yellow
         } else {
             Color::Cyan
         };
@@ -88,6 +93,7 @@ mod tests {
             is_active: true,
             is_streaming: false,
             streaming_tokens: 0,
+            is_notice: false,
         };
         let widget = ActivityWidget::new(&activity);
         let area = Rect::new(0, 0, 40, 1);
@@ -116,6 +122,7 @@ mod tests {
             is_active: true,
             is_streaming: false,
             streaming_tokens: 0,
+            is_notice: false,
         };
         let widget = ActivityWidget::new(&activity);
         let area = Rect::new(0, 0, 60, 1);
@@ -139,6 +146,7 @@ mod tests {
             is_active: false,
             is_streaming: false,
             streaming_tokens: 0,
+            is_notice: false,
         };
         assert!(
             !ActivityWidget::is_visible(&activity),
@@ -165,6 +173,7 @@ mod tests {
                 is_active: true,
                 is_streaming: false,
                 streaming_tokens: 0,
+                is_notice: false,
             };
             let widget = ActivityWidget::new(&activity);
             let area = Rect::new(0, 0, 40, 1);
@@ -187,6 +196,7 @@ mod tests {
             is_active: true,
             is_streaming: true,
             streaming_tokens: 42,
+            is_notice: false,
         };
         let widget = ActivityWidget::new(&activity);
         let area = Rect::new(0, 0, 60, 1);
@@ -206,6 +216,7 @@ mod tests {
             is_active: true,
             is_streaming: true,
             streaming_tokens: 99,
+            is_notice: false,
         };
         let widget = ActivityWidget::new(&activity);
         let area = Rect::new(0, 0, 60, 1);
@@ -214,5 +225,25 @@ mod tests {
 
         let content: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert!(content.contains("99 tokens"));
+    }
+
+    #[test]
+    fn activity_notice_is_visible_without_spinner() {
+        let activity = ActivityState {
+            label: "Coding blocked: awaiting operator input".into(),
+            spinner_phase: 0,
+            is_active: false,
+            is_streaming: false,
+            streaming_tokens: 0,
+            is_notice: true,
+        };
+        let widget = ActivityWidget::new(&activity);
+        let area = Rect::new(0, 0, 64, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = (0..64).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(content.contains('!'));
+        assert!(content.contains("Coding blocked"));
     }
 }

@@ -15,12 +15,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::benchmark::{
-    boot_vessel, extract_metrics, inject_and_poll, log_diagnostics, ContextUtilization, TaskResult,
-    TokenMetrics,
+    apply_coding_benchmark_overrides, boot_vessel, extract_metrics, inject_and_poll,
+    log_diagnostics, ContextUtilization, TaskResult, TokenMetrics,
 };
 use crate::config::VesselConfig;
-use crate::kernel::policy::{PolicyRule, ToolPolicyConfig};
-use exoskeleton_core::VesselId;
 
 /// Which SWE-bench dataset to fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,7 +216,7 @@ impl SweBenchRunner {
             .map_err(|e| format!("worktree preparation failed: {e}"))?;
         let workspace = worktree.path();
 
-        // 3. Build vessel config with forced overrides
+        // 3. Build vessel config with workspace-scoped coding benchmark overrides
         let config = Self::build_vessel_config(base_config, workspace);
 
         // 4. Boot vessel
@@ -226,17 +224,14 @@ impl SweBenchRunner {
 
         // 5-6. Inject prompt and poll
         // Outer timeout: allow enough time for all ticks to complete.
-        // Each tick's inner loop has its own timeout (inner_loop.timeout_secs),
-        // so the outer timeout needs to accommodate max_ticks * per-tick time
-        // plus overhead for vessel boot, reflect, amend between ticks.
-        // Each tick includes LLM inference + tool execution (some tools like
-        // cargo build can take minutes). Use 30 min per tick as a generous bound.
-        // The actual termination signal is max_ticks or agent_complete, not this
-        // timeout — this is just a safety net against infinite hangs.
+        // A coding tick may include multiple tool actions across the coding
+        // exec thread, master Decide, and Act. Some tools like cargo build can
+        // take minutes. Use 30 min per tick as a generous bound.
+        // The actual termination signal is max_ticks or exec-thread completion;
+        // this timeout is just a safety net against hangs.
         let per_tick_budget_secs = 1800_u64;
-        let timeout = std::time::Duration::from_secs(
-            per_tick_budget_secs * options.max_ticks as u64 + 120,
-        );
+        let timeout =
+            std::time::Duration::from_secs(per_tick_budget_secs * options.max_ticks as u64 + 120);
         let (completion_reason, inspector) = inject_and_poll(
             &vessel,
             &instance.problem_statement,
@@ -257,6 +252,10 @@ impl SweBenchRunner {
             .shutdown()
             .await
             .map_err(|e| format!("shutdown failed: {e}"))?;
+
+        for anomaly in &metrics.harness_anomalies {
+            eprintln!("  [warn] harness anomaly: {anomaly}");
+        }
 
         // 9. Extract agent's diff (before applying test_patch)
         let model_patch = Self::extract_diff(workspace)?;
@@ -330,6 +329,7 @@ impl SweBenchRunner {
                 step_trace: metrics.step_trace,
                 context_utilization: metrics.context_utilization,
                 tick_details: metrics.tick_details,
+                harness_anomalies: metrics.harness_anomalies,
                 difficulty: None,
                 language: Some("rust".into()),
                 tags: vec![],
@@ -351,14 +351,7 @@ impl SweBenchRunner {
         let data_dir = workspace.join(".exo-bench");
         // Create the data dir (ignore errors — vessel boot will fail if it can't access it)
         let _ = std::fs::create_dir_all(&data_dir);
-        config.data_dir = data_dir;
-        config.inner_loop.enabled = true;
-        config.inner_loop.workspace_root = Some(workspace.to_string_lossy().into_owned());
-        config.tool_policy = ToolPolicyConfig {
-            default: PolicyRule::Allow,
-            rules: HashMap::new(),
-        };
-        config.vessel_id = VesselId::new();
+        apply_coding_benchmark_overrides(&mut config, workspace, &data_dir);
         config
     }
 
@@ -401,6 +394,7 @@ impl SweBenchRunner {
                 step_trace: vec![],
                 context_utilization: ContextUtilization::default(),
                 tick_details: vec![],
+                harness_anomalies: vec![],
                 difficulty: None,
                 language: Some("rust".into()),
                 tags: vec![],

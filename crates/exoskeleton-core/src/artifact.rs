@@ -96,6 +96,8 @@ pub enum ArtifactKind {
     Receipt,
     /// An output artifact from a cognitive thread (produced on Cognitive AQ).
     ThreadOutput,
+    /// An output artifact from an executable thread.
+    ExecThreadOutput,
     /// An entry in the Relationship Ledger.
     RelationshipEntry,
     /// A memory entry (episodic summary or long-term note).

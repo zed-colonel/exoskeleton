@@ -130,6 +130,48 @@ enum Commands {
 
     /// Start a live coding session with a vessel.
     Code {
+        /// Boot a local vessel + daemon for this TUI session.
+        #[arg(long)]
+        local: bool,
+
+        /// Path to vessel.toml configuration file for local mode.
+        #[arg(long)]
+        config: Option<String>,
+
+        /// Override the data directory for local mode.
+        #[arg(long)]
+        data_dir: Option<String>,
+
+        /// Override the vessel mission for local mode.
+        #[arg(long)]
+        mission: Option<String>,
+
+        /// Override the repo workspace root for local mode.
+        /// Defaults to the current git root, or the current directory if not in a git repo.
+        #[arg(long)]
+        workspace_root: Option<String>,
+
+        /// Log level for the embedded local daemon.
+        #[arg(long, default_value = "warn")]
+        log_level: String,
+
+        /// LLM provider override for local mode (e.g., "anthropic", "openai", "ollama").
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Model name override for local mode.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Environment variable name for the API key in local mode.
+        #[arg(long)]
+        api_key_env: Option<String>,
+
+        /// Local model endpoint URL for local mode.
+        /// Implies --provider=ollama if --provider is not set.
+        #[arg(long)]
+        local_endpoint: Option<String>,
+
         /// The coding task to submit.
         task: Vec<String>,
     },
@@ -412,8 +454,9 @@ async fn main() {
 
     if let Err(e) = result {
         match &e {
-            CliError::Connection(_) => {
+            CliError::Connection(message) => {
                 eprintln!("error: cannot connect to daemon at {}", cli.addr);
+                eprintln!("detail: {message}");
                 eprintln!(
                     "hint: is the vessel running? start it with: exo start --config vessel.toml"
                 );
@@ -481,9 +524,54 @@ async fn run_client_command(cli: &Cli) -> Result<(), CliError> {
             commands::send::run_send(&client, &actual_source, message, cli.json).await
         }
 
-        Commands::Code { task } => {
+        Commands::Code {
+            local,
+            config,
+            data_dir,
+            mission,
+            workspace_root,
+            log_level,
+            provider,
+            model,
+            api_key_env,
+            local_endpoint,
+            task,
+        } => {
             let task_text = task.join(" ");
-            code::run_code_session(&cli.addr, &task_text).await
+            if *local {
+                code::run_local_code_session(
+                    code::LocalCodeSessionOptions {
+                        config_path: config.clone(),
+                        data_dir: data_dir.clone(),
+                        mission: mission.clone(),
+                        workspace_root: workspace_root.clone(),
+                        log_level: log_level.clone(),
+                        llm_overrides: commands::start::LlmOverrideOptions {
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            api_key_env: api_key_env.clone(),
+                            local_endpoint: local_endpoint.clone(),
+                        },
+                    },
+                    &task_text,
+                )
+                .await
+            } else {
+                if config.is_some()
+                    || data_dir.is_some()
+                    || mission.is_some()
+                    || workspace_root.is_some()
+                    || provider.is_some()
+                    || model.is_some()
+                    || api_key_env.is_some()
+                    || local_endpoint.is_some()
+                {
+                    return Err(CliError::Config(
+                        "--config, --data-dir, --mission, --workspace-root, --provider, --model, --api-key-env, and --local-endpoint require --local for `exo code`".into(),
+                    ));
+                }
+                code::run_code_session(&cli.addr, &task_text).await
+            }
         }
 
         Commands::Artifact { id } => commands::artifact::run_artifact(&client, id, cli.json).await,

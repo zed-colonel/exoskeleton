@@ -46,6 +46,8 @@ pub struct StatusState {
     pub token_summary: String,
     /// Step summary (e.g., "step 3/25").
     pub step_summary: String,
+    /// Exec-thread summary (e.g., "coding: active/editing high").
+    pub exec_summary: String,
 }
 
 impl Default for StatusState {
@@ -55,6 +57,7 @@ impl Default for StatusState {
             vessel_mode: "normal".into(),
             token_summary: String::new(),
             step_summary: String::new(),
+            exec_summary: String::new(),
         }
     }
 }
@@ -72,6 +75,8 @@ pub struct ActivityState {
     pub is_streaming: bool,
     /// Number of streaming text chunks received in the current response.
     pub streaming_tokens: u64,
+    /// Whether this is a non-spinning notice state such as a blocked coding thread.
+    pub is_notice: bool,
 }
 
 /// Thread information displayed in the debug banner.
@@ -83,6 +88,27 @@ pub struct DebugThreadInfo {
     pub state: String,
     /// Whether this thread recently contributed an insight (highlight in banner).
     pub contributed: bool,
+}
+
+/// Executable-thread information displayed in the debug banner.
+#[derive(Debug, Clone, Default)]
+pub struct DebugExecThreadInfo {
+    /// Thread display name.
+    pub name: String,
+    /// Current state label: "active", "idle", "blocked", or "failed".
+    pub state: String,
+    /// Optional work phase (e.g., "editing", "verifying").
+    pub phase: Option<String>,
+    /// Optional current focus text.
+    pub focus: Option<String>,
+    /// Optional proposal confidence label.
+    pub confidence: Option<String>,
+    /// Whether the thread reports evidence completeness.
+    pub evidence_complete: bool,
+    /// Optional completion reason for an idle completed work item.
+    pub completion_reason: Option<String>,
+    /// Whether this thread should be highlighted in the banner.
+    pub highlighted: bool,
 }
 
 /// Budget information displayed in the debug banner.
@@ -127,14 +153,14 @@ pub struct DebugState {
     pub visible: bool,
     /// Current tick number.
     pub tick_number: u64,
-    /// Whether the inner loop is currently active.
-    pub inner_loop_active: bool,
     /// Step count summary (e.g., "3/25 steps").
     pub step_count: String,
     /// Token count summary (e.g., "4,231/50,000 tok").
     pub token_count: String,
     /// Thread state information.
     pub threads: Vec<DebugThreadInfo>,
+    /// Executable-thread state information.
+    pub exec_threads: Vec<DebugExecThreadInfo>,
     /// Budget progress information.
     pub budget: DebugBudgetInfo,
     /// Active policy rules.
@@ -143,8 +169,6 @@ pub struct DebugState {
     pub plan_summary: Option<DebugPlanSummary>,
     /// Initial token budget captured from the first snapshot.
     pub initial_token_budget: Option<u64>,
-    /// Initial step limit captured from the first inner-loop step.
-    pub initial_step_limit: Option<u64>,
 }
 
 /// Braille spinner animation frames.
@@ -310,22 +334,26 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
             app.connection = ConnectionStatus::Disconnected;
             app.activity.label = "Reconnecting...".into();
             app.activity.is_active = true;
+            app.activity.is_notice = false;
             effects.push(SideEffect::ReconnectWithBackoff);
         }
         Message::WsReconnected => {
             app.connection = ConnectionStatus::Connected;
             app.activity.label = String::new();
             app.activity.is_active = false;
+            app.activity.is_notice = false;
         }
         Message::ReconnectAttempt(result) => match result {
             Ok(()) => {
                 app.connection = ConnectionStatus::Connected;
                 app.activity.label = String::new();
                 app.activity.is_active = false;
+                app.activity.is_notice = false;
             }
             Err(err) => {
                 app.activity.label = format!("Reconnecting... ({err})");
                 app.activity.is_active = true;
+                app.activity.is_notice = false;
             }
         },
         Message::SpinnerTick => {
@@ -338,14 +366,24 @@ pub fn update(app: &mut App, msg: Message) -> Vec<SideEffect> {
             append_text_delta(app, &delta);
         }
         Message::ApprovalResolved(_action) => {}
-        Message::MessageSent(result) => {
-            if let Err(err) = result {
+        Message::MessageSent(result) => match result {
+            Ok(()) => {
+                app.conversation.add_block(Block::SystemNote {
+                    text: "Request received. Vessel is orienting around your latest instruction."
+                        .into(),
+                    severity: NoteSeverity::Info,
+                });
+                app.activity.label = "Orienting around latest operator request".into();
+                app.activity.is_active = true;
+                app.activity.is_notice = false;
+            }
+            Err(err) => {
                 app.conversation.add_block(Block::SystemNote {
                     text: format!("Failed to send message: {err}"),
                     severity: NoteSeverity::Warning,
                 });
             }
-        }
+        },
         Message::ArtifactFetched {
             artifact_id,
             result,
@@ -683,6 +721,7 @@ fn append_text_delta(app: &mut App, delta: &str) {
     app.activity.streaming_tokens += 1;
     app.activity.label = format!("Streaming ({} tokens)", app.activity.streaming_tokens);
     app.activity.is_active = true;
+    app.activity.is_notice = false;
 }
 
 fn finalize_streaming_block(app: &mut App) {
@@ -696,6 +735,7 @@ fn finalize_streaming_block(app: &mut App) {
     }
     app.activity.is_streaming = false;
     app.activity.streaming_tokens = 0;
+    app.activity.is_notice = false;
 }
 
 /// Handle a WebSocket LiveEvent.
@@ -703,87 +743,46 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
     let mut effects = Vec::new();
 
     match event.event_type {
-        EventType::InnerLoopStarted => {
-            app.activity.label = "Thinking...".into();
-            app.activity.is_active = true;
-            app.activity.spinner_phase = 0;
-            app.activity.is_streaming = false;
-            app.activity.streaming_tokens = 0;
-            app.debug.inner_loop_active = true;
-        }
         EventType::LlmTextDelta => {
             if let Some(ref delta) = event.text_delta {
                 append_text_delta(app, delta);
             }
         }
-        EventType::InnerLoopStep => {
-            if let Some(ref detail) = event.inner_loop_detail {
+        EventType::ExecThreadUpdated => {
+            if let Some(ref detail) = event.exec_thread_detail {
                 finalize_streaming_block(app);
-                let tool_name = detail.tool_name.clone().unwrap_or_default();
-                let outcome =
-                    tool_outcome_from_str(detail.tool_outcome.as_deref().unwrap_or_default());
-
-                app.conversation.add_block(Block::ToolCall {
-                    tool_name: tool_name.clone(),
-                    args_summary: format!("step {}/{}", detail.step_number, detail.max_steps),
-                    outcome,
-                    collapsed: true,
-                    token_cost: Some(detail.tokens_this_step),
-                });
-
-                app.status.step_summary =
-                    format!("step {}/{}", detail.step_number, detail.max_steps);
-                app.status.token_summary = format_token_count(detail.tokens_total);
-                app.activity.label = format!("Running {tool_name}...");
-                app.activity.is_active = true;
-
-                app.debug.step_count = format!("{}/{} steps", detail.step_number, detail.max_steps);
-                app.debug.token_count = format!(
-                    "{}/{} tok",
-                    detail.tokens_total,
-                    app.debug
-                        .initial_token_budget
-                        .unwrap_or(detail.tokens_total)
-                );
-
-                if app.debug.initial_step_limit.is_none() {
-                    app.debug.initial_step_limit = Some(detail.max_steps as u64);
-                }
-
-                if let Some(max_steps) = app.debug.initial_step_limit {
-                    if max_steps > 0 {
-                        let used = detail.step_number as u64;
-                        app.debug.budget.step_percent_used =
-                            ((used * 100) / max_steps).min(100) as u8;
-                        app.debug.budget.step_label =
-                            format!("{}/{}", detail.step_number, max_steps);
+                if detail.kind == exoskeleton_core::ExecThreadKind::Coding {
+                    if let Some(ref proposed_action_summary) = detail.proposed_action_summary {
+                        app.conversation.add_block(Block::ToolCall {
+                            tool_name: extract_tool_name(proposed_action_summary),
+                            args_summary: truncate_str(proposed_action_summary, 80),
+                            outcome: ToolOutcome::Pending,
+                            collapsed: true,
+                            token_cost: None,
+                        });
                     }
-                }
-                if let Some(max_tokens) = app.debug.initial_token_budget {
-                    if max_tokens > 0 {
-                        let used = detail.tokens_total;
-                        app.debug.budget.token_percent_used =
-                            ((used * 100) / max_tokens).min(100) as u8;
-                        app.debug.budget.token_label =
-                            format!("{}/{}", detail.tokens_total, max_tokens);
+
+                    if let Some(reason) = &detail.completion_reason {
+                        let severity = if detail.status == exoskeleton_core::ExecThreadStatus::Failed
+                        {
+                            NoteSeverity::Warning
+                        } else {
+                            NoteSeverity::Info
+                        };
+                        app.conversation.add_block(Block::SystemNote {
+                            text: format!("Coding thread {}: {}", detail.name, reason),
+                            severity,
+                        });
                     }
+
+                    app.status.exec_summary = coding_exec_status_summary_from_live_detail(detail);
+                    app.activity.label = coding_exec_activity_label_from_live_detail(detail);
+                    app.activity.is_active =
+                        detail.status == exoskeleton_core::ExecThreadStatus::Active;
+                    app.activity.is_notice =
+                        detail.status == exoskeleton_core::ExecThreadStatus::Blocked;
+                    upsert_debug_exec_thread_from_live_detail(app, detail);
                 }
-            }
-        }
-        EventType::InnerLoopCompleted => {
-            if let Some(ref detail) = event.inner_loop_detail {
-                let reason = detail
-                    .completion_reason
-                    .clone()
-                    .unwrap_or_else(|| "unknown".into());
-                app.conversation.add_block(Block::SystemNote {
-                    text: format!(
-                        "Completed: {} ({} steps, {} tokens)",
-                        reason, detail.step_number, detail.tokens_total,
-                    ),
-                    severity: NoteSeverity::Info,
-                });
-                app.status.token_summary = format_token_count(detail.tokens_total);
             }
 
             if let Some(ref diff) = event.diff_summary {
@@ -810,9 +809,6 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
             }
 
             finalize_streaming_block(app);
-            app.activity.label = String::new();
-            app.activity.is_active = false;
-            app.debug.inner_loop_active = false;
         }
         EventType::ActionExecuted => {
             let summary = &event.summary;
@@ -839,6 +835,7 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                 app.status.vessel_mode = format!("{:?}", snapshot.vessel_mode).to_lowercase();
                 app.status.token_summary =
                     format_token_count(snapshot.budget_status.total_tokens_remaining());
+                app.status.exec_summary = coding_exec_status_summary(snapshot);
 
                 if let Some(ref plan) = snapshot.plan {
                     app.conversation
@@ -878,6 +875,11 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                             contributed,
                         }
                     })
+                    .collect();
+                app.debug.exec_threads = snapshot
+                    .exec_thread_summaries
+                    .iter()
+                    .map(debug_exec_thread_info_from_summary)
                     .collect();
 
                 let total_tokens = snapshot.budget_status.total_tokens_remaining();
@@ -919,10 +921,7 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                     app.debug.plan_summary = None;
                 }
 
-                if !snapshot.status.is_terminal() {
-                    app.activity.label = "Governance cycle...".into();
-                    app.activity.is_active = true;
-                }
+                apply_exec_thread_activity(app, snapshot);
             }
         }
         EventType::QuestionAsked => {
@@ -1045,6 +1044,238 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
     effects
 }
 
+fn coding_exec_status_summary(snapshot: &exoskeleton_core::StateSnapshot) -> String {
+    let Some(coding) = snapshot
+        .exec_thread_summaries
+        .iter()
+        .find(|summary| summary.kind == exoskeleton_core::ExecThreadKind::Coding)
+    else {
+        return String::new();
+    };
+
+    let mut parts = vec![format!(
+        "coding: {}",
+        exec_thread_status_label(coding.status)
+    )];
+    if let Some(phase) = &coding.work_phase {
+        if phase != "idle" {
+            parts.push(phase.clone());
+        }
+    }
+    if let Some(confidence) = coding.proposal_confidence {
+        parts.push(format!("{confidence:?}").to_lowercase());
+    }
+    if coding.evidence_complete {
+        parts.push("ready".into());
+    }
+    if coding.status == exoskeleton_core::ExecThreadStatus::Idle {
+        if let Some(reason) = &coding.last_completion_reason {
+            parts.push(format!("done: {}", truncate_str(reason, 24)));
+        }
+    }
+    parts.join(" ")
+}
+
+fn coding_exec_status_summary_from_live_detail(
+    detail: &exoskeleton_core::ExecThreadLiveDetail,
+) -> String {
+    let mut parts = vec![format!(
+        "coding: {}",
+        exec_thread_status_label(detail.status)
+    )];
+    if let Some(phase) = &detail.work_phase {
+        if phase != "idle" {
+            parts.push(phase.clone());
+        }
+    }
+    if let Some(confidence) = detail.proposal_confidence {
+        parts.push(format!("{confidence:?}").to_lowercase());
+    }
+    if detail.evidence_complete {
+        parts.push("ready".into());
+    }
+    if detail.status == exoskeleton_core::ExecThreadStatus::Idle {
+        if let Some(reason) = &detail.completion_reason {
+            parts.push(format!("done: {}", truncate_str(reason, 24)));
+        }
+    }
+    parts.join(" ")
+}
+
+fn debug_exec_thread_info_from_live_detail(
+    detail: &exoskeleton_core::ExecThreadLiveDetail,
+) -> DebugExecThreadInfo {
+    DebugExecThreadInfo {
+        name: detail.name.clone(),
+        state: exec_thread_status_label(detail.status).into(),
+        phase: detail.work_phase.clone(),
+        focus: Some(detail.summary.clone()),
+        confidence: detail
+            .proposal_confidence
+            .map(|confidence| format!("{confidence:?}").to_lowercase()),
+        evidence_complete: detail.evidence_complete,
+        completion_reason: detail.completion_reason.clone(),
+        highlighted: matches!(
+            detail.status,
+            exoskeleton_core::ExecThreadStatus::Active
+                | exoskeleton_core::ExecThreadStatus::Blocked
+        ) || detail.completion_reason.is_some(),
+    }
+}
+
+fn upsert_debug_exec_thread_from_live_detail(
+    app: &mut App,
+    detail: &exoskeleton_core::ExecThreadLiveDetail,
+) {
+    if let Some(existing) = app
+        .debug
+        .exec_threads
+        .iter_mut()
+        .find(|thread| thread.name == detail.name)
+    {
+        *existing = debug_exec_thread_info_from_live_detail(detail);
+    } else {
+        app.debug
+            .exec_threads
+            .push(debug_exec_thread_info_from_live_detail(detail));
+    }
+}
+
+fn debug_exec_thread_info_from_summary(
+    summary: &exoskeleton_core::ExecThreadSummary,
+) -> DebugExecThreadInfo {
+    DebugExecThreadInfo {
+        name: summary.name.clone(),
+        state: exec_thread_status_label(summary.status).into(),
+        phase: summary.work_phase.clone(),
+        focus: summary.current_focus.clone(),
+        confidence: summary
+            .proposal_confidence
+            .map(|confidence| format!("{confidence:?}").to_lowercase()),
+        evidence_complete: summary.evidence_complete,
+        completion_reason: summary.last_completion_reason.clone(),
+        highlighted: matches!(
+            summary.status,
+            exoskeleton_core::ExecThreadStatus::Active
+                | exoskeleton_core::ExecThreadStatus::Blocked
+        ) || summary.last_completion_reason.is_some(),
+    }
+}
+
+fn apply_exec_thread_activity(app: &mut App, snapshot: &exoskeleton_core::StateSnapshot) {
+    let coding = snapshot
+        .exec_thread_summaries
+        .iter()
+        .find(|summary| summary.kind == exoskeleton_core::ExecThreadKind::Coding);
+
+    match coding {
+        Some(summary) => match summary.status {
+            exoskeleton_core::ExecThreadStatus::Active => {
+                app.activity.label = coding_activity_label(summary);
+                app.activity.is_active = true;
+                app.activity.is_notice = false;
+            }
+            exoskeleton_core::ExecThreadStatus::Blocked => {
+                app.activity.label = coding_blocked_label(summary);
+                app.activity.is_active = false;
+                app.activity.is_notice = true;
+            }
+            _ if !snapshot.status.is_terminal() => {
+                app.activity.label = "Governance cycle...".into();
+                app.activity.is_active = true;
+                app.activity.is_notice = false;
+            }
+            _ => {
+                app.activity.label.clear();
+                app.activity.is_active = false;
+                app.activity.is_notice = false;
+            }
+        },
+        None if !snapshot.status.is_terminal() => {
+            app.activity.label = "Governance cycle...".into();
+            app.activity.is_active = true;
+            app.activity.is_notice = false;
+        }
+        None => {
+            app.activity.label.clear();
+            app.activity.is_active = false;
+            app.activity.is_notice = false;
+        }
+    }
+}
+
+fn coding_activity_label(summary: &exoskeleton_core::ExecThreadSummary) -> String {
+    let mut parts = vec!["Coding".to_string()];
+    if let Some(phase) = &summary.work_phase {
+        if phase != "idle" {
+            parts.push(format!("{}:", phase));
+        }
+    }
+    if let Some(focus) = &summary.current_focus {
+        parts.push(truncate_str(focus, 48));
+    } else if let Some(output) = &summary.last_output_summary {
+        parts.push(truncate_str(output, 48));
+    } else {
+        parts.push("working".into());
+    }
+    if let Some(confidence) = summary.proposal_confidence {
+        parts.push(format!("({})", format!("{confidence:?}").to_lowercase()));
+    }
+    if summary.evidence_complete {
+        parts.push("ready".into());
+    }
+    parts.join(" ")
+}
+
+fn coding_exec_activity_label_from_live_detail(
+    detail: &exoskeleton_core::ExecThreadLiveDetail,
+) -> String {
+    match detail.status {
+        exoskeleton_core::ExecThreadStatus::Active => {
+            let mut parts = vec!["Coding".to_string()];
+            if let Some(phase) = &detail.work_phase {
+                if phase != "idle" {
+                    parts.push(format!("{}:", phase));
+                }
+            }
+            parts.push(truncate_str(&detail.summary, 48));
+            if let Some(confidence) = detail.proposal_confidence {
+                parts.push(format!("({})", format!("{confidence:?}").to_lowercase()));
+            }
+            if detail.evidence_complete {
+                parts.push("ready".into());
+            }
+            parts.join(" ")
+        }
+        exoskeleton_core::ExecThreadStatus::Blocked => detail
+            .completion_reason
+            .as_ref()
+            .map(|reason| format!("Coding blocked: {}", truncate_str(reason, 48)))
+            .unwrap_or_else(|| "Coding blocked".into()),
+        _ => String::new(),
+    }
+}
+
+fn coding_blocked_label(summary: &exoskeleton_core::ExecThreadSummary) -> String {
+    let detail = summary
+        .last_completion_reason
+        .as_deref()
+        .or(summary.current_focus.as_deref())
+        .or(summary.last_output_summary.as_deref())
+        .unwrap_or("awaiting input");
+    format!("Coding blocked: {}", truncate_str(detail, 56))
+}
+
+fn exec_thread_status_label(status: exoskeleton_core::ExecThreadStatus) -> &'static str {
+    match status {
+        exoskeleton_core::ExecThreadStatus::Idle => "idle",
+        exoskeleton_core::ExecThreadStatus::Active => "active",
+        exoskeleton_core::ExecThreadStatus::Blocked => "blocked",
+        exoskeleton_core::ExecThreadStatus::Completed => "completed",
+        exoskeleton_core::ExecThreadStatus::Failed => "failed",
+    }
+}
+
 /// Handle a fetched artifact (currently used for CodeDiff full text).
 fn handle_artifact_fetched(
     app: &mut App,
@@ -1124,15 +1355,6 @@ fn handle_plan_status_fetched(
     }
 }
 
-fn tool_outcome_from_str(outcome: &str) -> ToolOutcome {
-    match outcome {
-        "success" => ToolOutcome::Success,
-        "pending" => ToolOutcome::Pending,
-        "denied" | "policy_denied" => ToolOutcome::PolicyDenied,
-        other => ToolOutcome::Error(other.to_string()),
-    }
-}
-
 /// Format a token count for display (e.g., 4231 -> "4,231 tok").
 fn format_token_count(tokens: u64) -> String {
     if tokens >= 1_000_000 {
@@ -1170,8 +1392,8 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use exoskeleton_core::{
-        CodeDiffOperation, DiffSummary, EventType, FileDiffEntry, InnerLoopStepDetail, LiveEvent,
-        PolicyDetail,
+        CodeDiffOperation, DiffSummary, EventType, ExecThreadKind, ExecThreadLiveDetail,
+        ExecThreadProposalConfidence, ExecThreadStatus, FileDiffEntry, LiveEvent, PolicyDetail,
     };
 
     use crate::code::widgets::approval::{ApprovalKind, ApprovalState};
@@ -1184,6 +1406,37 @@ mod tests {
 
     fn key_with_mods(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    fn coding_exec_event(
+        status: ExecThreadStatus,
+        summary: &str,
+        proposed_action_summary: Option<&str>,
+        completion_reason: Option<&str>,
+    ) -> LiveEvent {
+        LiveEvent {
+            event_type: EventType::ExecThreadUpdated,
+            summary: summary.into(),
+            exec_thread_detail: Some(ExecThreadLiveDetail {
+                thread_id: exoskeleton_core::id::ThreadId::new(),
+                kind: ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status,
+                work_phase: Some(match status {
+                    ExecThreadStatus::Active => "editing".into(),
+                    ExecThreadStatus::Blocked => "verifying".into(),
+                    _ => "idle".into(),
+                }),
+                summary: summary.into(),
+                proposal_id: proposed_action_summary.map(|_| "proposal-1".into()),
+                proposed_action_summary: proposed_action_summary.map(str::to_string),
+                evidence_complete: status == ExecThreadStatus::Active,
+                proposal_confidence: proposed_action_summary
+                    .map(|_| ExecThreadProposalConfidence::High),
+                completion_reason: completion_reason.map(str::to_string),
+            }),
+            ..LiveEvent::new(Some(1))
+        }
     }
 
     // ── TUI-T1: update_key_enter_sends_message ──
@@ -1217,25 +1470,17 @@ mod tests {
         assert_eq!(app.conversation.len(), 0);
     }
 
-    // ── TUI-T3: update_ws_event_inner_loop_step_adds_tool_call_block ──
+    // ── TUI-T3: update_ws_event_exec_thread_update_adds_tool_call_block ──
 
     #[test]
-    fn update_ws_event_inner_loop_step_adds_tool_call_block() {
+    fn update_ws_event_exec_thread_update_adds_tool_call_block() {
         let mut app = App::new();
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopStep,
-            summary: "Step 1/5: code.read (success)".into(),
-            inner_loop_detail: Some(InnerLoopStepDetail {
-                step_number: 1,
-                max_steps: 5,
-                tool_name: Some("code.read".into()),
-                tool_outcome: Some("success".into()),
-                tokens_this_step: 500,
-                tokens_total: 500,
-                completion_reason: None,
-            }),
-            ..LiveEvent::new(Some(1))
-        };
+        let event = coding_exec_event(
+            ExecThreadStatus::Active,
+            "Proposing code.read",
+            Some("code.read: inspect src/lib.rs"),
+            None,
+        );
 
         let effects = update(&mut app, Message::WsEvent(event));
 
@@ -1249,8 +1494,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_name, "code.read");
-                assert_eq!(*outcome, ToolOutcome::Success);
-                assert_eq!(*token_cost, Some(500));
+                assert_eq!(*outcome, ToolOutcome::Pending);
+                assert_eq!(*token_cost, None);
             }
             other => panic!("expected ToolCall block, got {other:?}"),
         }
@@ -1401,62 +1646,46 @@ mod tests {
         }
     }
 
-    // ── TUI-T19: update_ws_event_inner_loop_started_sets_activity ──
+    // ── TUI-T19: update_ws_event_exec_thread_active_sets_activity ──
 
     #[test]
-    fn update_ws_event_inner_loop_started_sets_activity() {
+    fn update_ws_event_exec_thread_active_sets_activity() {
         let mut app = App::new();
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopStarted,
-            summary: "Inner loop started".into(),
-            ..LiveEvent::new(Some(1))
-        };
+        let event = coding_exec_event(ExecThreadStatus::Active, "Proposing code.edit", None, None);
 
         update(&mut app, Message::WsEvent(event));
 
-        assert_eq!(app.activity.label, "Thinking...");
+        assert!(app.activity.label.contains("Coding"));
         assert!(app.activity.is_active);
     }
 
     #[test]
-    fn inner_loop_started_clears_streaming_state() {
+    fn exec_thread_active_clears_streaming_state() {
         let mut app = App::new();
         app.activity.is_streaming = true;
         app.activity.streaming_tokens = 42;
 
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopStarted,
-            summary: "Inner loop started".into(),
-            ..LiveEvent::new(Some(1))
-        };
+        let event = coding_exec_event(ExecThreadStatus::Active, "Proposing code.edit", None, None);
         update(&mut app, Message::WsEvent(event));
 
         assert!(!app.activity.is_streaming);
         assert_eq!(app.activity.streaming_tokens, 0);
     }
 
-    // ── TUI-T20: update_ws_event_inner_loop_completed_sets_idle ──
+    // ── TUI-T20: update_ws_event_exec_thread_idle_sets_idle ──
 
     #[test]
-    fn update_ws_event_inner_loop_completed_sets_idle() {
+    fn update_ws_event_exec_thread_idle_sets_idle() {
         let mut app = App::new();
         app.activity.is_active = true;
         app.activity.label = "Running code.edit...".into();
 
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopCompleted,
-            summary: "Inner loop completed".into(),
-            inner_loop_detail: Some(InnerLoopStepDetail {
-                step_number: 5,
-                max_steps: 25,
-                tool_name: None,
-                tool_outcome: None,
-                tokens_this_step: 0,
-                tokens_total: 4500,
-                completion_reason: Some("agent_complete".into()),
-            }),
-            ..LiveEvent::new(Some(1))
-        };
+        let event = coding_exec_event(
+            ExecThreadStatus::Idle,
+            "Task complete",
+            None,
+            Some("agent_complete"),
+        );
 
         update(&mut app, Message::WsEvent(event));
 
@@ -1465,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn inner_loop_completed_finalizes_streaming_block() {
+    fn exec_thread_idle_finalizes_streaming_block() {
         let mut app = App::new();
         app.conversation.add_block(Block::AgentText {
             text: "streaming content".into(),
@@ -1474,20 +1703,8 @@ mod tests {
         app.activity.is_streaming = true;
         app.activity.streaming_tokens = 10;
 
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopCompleted,
-            summary: "Completed".into(),
-            inner_loop_detail: Some(InnerLoopStepDetail {
-                step_number: 3,
-                max_steps: 25,
-                tool_name: None,
-                tool_outcome: None,
-                tokens_this_step: 0,
-                tokens_total: 2000,
-                completion_reason: Some("agent_complete".into()),
-            }),
-            ..LiveEvent::new(Some(1))
-        };
+        let event =
+            coding_exec_event(ExecThreadStatus::Idle, "Completed", None, Some("agent_complete"));
         update(&mut app, Message::WsEvent(event));
 
         let last_agent = app
@@ -1621,10 +1838,17 @@ mod tests {
     }
 
     #[test]
-    fn message_sent_ok_no_block() {
+    fn message_sent_ok_adds_acknowledgement() {
         let mut app = App::new();
         update(&mut app, Message::MessageSent(Ok(())));
-        assert_eq!(app.conversation.len(), 0);
+        assert_eq!(app.conversation.len(), 1);
+        match &app.conversation.blocks()[0] {
+            Block::SystemNote { text, severity } => {
+                assert_eq!(*severity, NoteSeverity::Info);
+                assert!(text.contains("Request received"));
+            }
+            other => panic!("expected SystemNote, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1741,37 +1965,29 @@ mod tests {
         assert!(app.conversation.auto_scroll());
     }
 
-    // ── T26: handle_inner_loop_completed_with_diff_creates_diff_block ──
+    // ── T26: handle_exec_thread_update_with_diff_creates_diff_block ──
 
     #[test]
-    fn handle_inner_loop_completed_with_diff_creates_diff_block() {
+    fn handle_exec_thread_update_with_diff_creates_diff_block() {
         let mut app = App::new();
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopCompleted,
-            summary: "Inner loop completed".into(),
-            inner_loop_detail: Some(InnerLoopStepDetail {
-                step_number: 3,
-                max_steps: 25,
-                tool_name: None,
-                tool_outcome: None,
-                tokens_this_step: 0,
-                tokens_total: 2000,
-                completion_reason: Some("agent_complete".into()),
-            }),
-            diff_summary: Some(DiffSummary {
-                files_modified: 1,
+        let mut event = coding_exec_event(
+            ExecThreadStatus::Idle,
+            "Task complete",
+            None,
+            Some("agent_complete"),
+        );
+        event.diff_summary = Some(DiffSummary {
+            files_modified: 1,
+            lines_added: 5,
+            lines_removed: 2,
+            net_delta: 3,
+            files: vec![FileDiffEntry {
+                path: "src/main.rs".into(),
                 lines_added: 5,
                 lines_removed: 2,
-                net_delta: 3,
-                files: vec![FileDiffEntry {
-                    path: "src/main.rs".into(),
-                    lines_added: 5,
-                    lines_removed: 2,
-                    operation: CodeDiffOperation::Edit,
-                }],
-            }),
-            ..LiveEvent::new(Some(1))
-        };
+                operation: CodeDiffOperation::Edit,
+            }],
+        });
 
         let _effects = update(&mut app, Message::WsEvent(event));
 
@@ -1985,6 +2201,7 @@ mod tests {
             id::{PlanTaskId, VesselId},
             plan::{Plan, PlanTask, PlanTaskStatus},
             thread::ThreadStatus,
+            ExecThreadKind, ExecThreadProposalConfidence, ExecThreadStatus, ExecThreadSummary,
             StateSnapshot, ThreadSummary,
         };
 
@@ -1998,6 +2215,18 @@ mod tests {
             status: ThreadStatus::Active,
             last_output_summary: Some("consider edge cases".into()),
             token_budget_remaining: 5000,
+        }];
+        snapshot.exec_thread_summaries = vec![ExecThreadSummary {
+            thread_id: exoskeleton_core::id::ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            name: "Coding".into(),
+            status: ExecThreadStatus::Active,
+            last_output_summary: Some("Ready to rename function".into()),
+            current_focus: Some("rename calculate_averge".into()),
+            work_phase: Some("editing".into()),
+            evidence_complete: true,
+            proposal_confidence: Some(ExecThreadProposalConfidence::High),
+            last_completion_reason: None,
         }];
         snapshot.plan = Some(Plan {
             objective: "Implement feature".into(),
@@ -2036,6 +2265,11 @@ mod tests {
         assert_eq!(app.debug.threads[0].name, "meta-cognition");
         assert!(app.debug.threads[0].contributed);
         assert!(app.debug.threads[0].state.contains("contributed"));
+        assert_eq!(app.debug.exec_threads.len(), 1);
+        assert_eq!(app.debug.exec_threads[0].name, "Coding");
+        assert_eq!(app.debug.exec_threads[0].state, "active");
+        assert_eq!(app.debug.exec_threads[0].phase.as_deref(), Some("editing"));
+        assert_eq!(app.status.exec_summary, "coding: active editing high ready");
 
         let plan = app.debug.plan_summary.as_ref().expect("plan should exist");
         assert_eq!(plan.completed, 1);
@@ -2044,69 +2278,82 @@ mod tests {
     }
 
     #[test]
-    fn inner_loop_step_populates_debug_state() {
+    fn tick_completed_sets_blocked_notice_from_coding_exec_thread() {
+        use exoskeleton_core::{
+            id::VesselId, ExecThreadKind, ExecThreadStatus, ExecThreadSummary, StateSnapshot,
+        };
+
         let mut app = App::new();
-        app.debug.initial_token_budget = Some(50_000);
+        let mut snapshot = StateSnapshot::initial(VesselId::new(), "test".into());
+        snapshot.exec_thread_summaries = vec![ExecThreadSummary {
+            thread_id: exoskeleton_core::id::ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            name: "Coding".into(),
+            status: ExecThreadStatus::Blocked,
+            last_output_summary: Some("Need operator answer".into()),
+            current_focus: Some("awaiting verification target".into()),
+            work_phase: Some("verifying".into()),
+            evidence_complete: false,
+            proposal_confidence: None,
+            last_completion_reason: Some("waiting for operator input".into()),
+        }];
 
         let event = LiveEvent {
-            event_type: EventType::InnerLoopStep,
-            summary: "Step 3/25".into(),
-            inner_loop_detail: Some(InnerLoopStepDetail {
-                step_number: 3,
-                max_steps: 25,
-                tool_name: Some("code.read".into()),
-                tool_outcome: Some("success".into()),
-                tokens_this_step: 200,
-                tokens_total: 4231,
-                completion_reason: None,
-            }),
-            ..LiveEvent::new(Some(1))
+            event_type: EventType::TickCompleted,
+            summary: "Tick 7 completed".into(),
+            snapshot: Some(snapshot),
+            ..LiveEvent::new(Some(7))
         };
 
         update(&mut app, Message::WsEvent(event));
 
-        assert_eq!(app.debug.step_count, "3/25 steps");
-        assert!(app.debug.token_count.contains("4231"));
-        assert_eq!(app.debug.budget.step_percent_used, 12);
+        assert!(app.activity.is_notice);
+        assert!(!app.activity.is_active);
+        assert!(app.activity.label.contains("Coding blocked"));
+        assert!(app.status.exec_summary.contains("coding: blocked"));
     }
 
     #[test]
-    fn inner_loop_started_sets_debug_active() {
+    fn exec_thread_update_sets_debug_active() {
         let mut app = App::new();
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopStarted,
-            summary: "Inner loop started".into(),
-            ..LiveEvent::new(Some(1))
-        };
+        let event = coding_exec_event(ExecThreadStatus::Active, "Ready to edit", None, None);
 
         update(&mut app, Message::WsEvent(event));
 
-        assert!(app.debug.inner_loop_active);
+        assert_eq!(app.debug.exec_threads[0].state, "active");
+        assert!(app.activity.is_active);
     }
 
     #[test]
-    fn inner_loop_completed_clears_debug_active() {
+    fn exec_thread_active_sets_debug_active() {
         let mut app = App::new();
-        app.debug.inner_loop_active = true;
-
-        let event = LiveEvent {
-            event_type: EventType::InnerLoopCompleted,
-            summary: "Inner loop completed".into(),
-            inner_loop_detail: Some(InnerLoopStepDetail {
-                step_number: 5,
-                max_steps: 25,
-                tool_name: None,
-                tool_outcome: None,
-                tokens_this_step: 0,
-                tokens_total: 5000,
-                completion_reason: Some("agent_complete".into()),
-            }),
-            ..LiveEvent::new(Some(1))
-        };
+        let event = coding_exec_event(ExecThreadStatus::Active, "Inner work", None, None);
 
         update(&mut app, Message::WsEvent(event));
 
-        assert!(!app.debug.inner_loop_active);
+        assert_eq!(app.debug.exec_threads[0].state, "active");
+    }
+
+    #[test]
+    fn exec_thread_idle_clears_debug_active() {
+        let mut app = App::new();
+        app.debug.exec_threads.push(DebugExecThreadInfo {
+            name: "Coding".into(),
+            state: "active".into(),
+            phase: Some("editing".into()),
+            focus: None,
+            confidence: None,
+            evidence_complete: false,
+            completion_reason: None,
+            highlighted: true,
+        });
+
+        let event =
+            coding_exec_event(ExecThreadStatus::Idle, "Inner work complete", None, Some("done"));
+
+        update(&mut app, Message::WsEvent(event));
+
+        assert_eq!(app.debug.exec_threads[0].state, "idle");
     }
 
     #[test]

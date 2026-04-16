@@ -14,6 +14,7 @@ use exoskeleton_core::{
     ThreadSchedule, ThreadStatus, VesselId,
 };
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
+use exoskeleton_host::exec_threads::{ExecThreadRegistry, InMemoryExecThreadStore};
 use exoskeleton_host::inbox::InMemoryInbox;
 use exoskeleton_host::kernel::{KernelContext, WiHostSlot};
 use exoskeleton_host::storage::StorageManager;
@@ -200,6 +201,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_output_tokens: kernel.max_output_tokens,
         master_loop_interval_secs: kernel.master_loop_interval_secs,
         thread_registry: kernel.thread_registry.clone(),
+        exec_thread_registry: kernel.exec_thread_registry.clone(),
         relationship_ledger: kernel.relationship_ledger.clone(),
         conversation_store: kernel.conversation_store.clone(),
         budget_tracker: kernel.budget_tracker.clone(),
@@ -214,7 +216,7 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         watch_store: kernel.watch_store.clone(),
         max_watches: kernel.max_watches,
         read_paths_this_tick: kernel.read_paths_this_tick.clone(),
-        inner_loop_config: kernel.inner_loop_config.clone(),
+        coding_thread_config: kernel.coding_thread_config.clone(),
         tool_policy: kernel.tool_policy.clone(),
         session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
         vessel_mode: kernel.vessel_mode.clone(),
@@ -285,6 +287,9 @@ async fn setup_builtin_threads(
         max_output_tokens: 4096,
         master_loop_interval_secs: 60,
         thread_registry,
+        exec_thread_registry: Arc::new(ExecThreadRegistry::new(Arc::new(
+            InMemoryExecThreadStore::new(),
+        ))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
         conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
@@ -299,7 +304,7 @@ async fn setup_builtin_threads(
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
         read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
+        coding_thread_config: exoskeleton_host::config::CodingThreadConfig::default(),
         tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
         session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
         vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),
@@ -362,6 +367,9 @@ async fn setup_builtin_threads_custom(
         max_output_tokens: 4096,
         master_loop_interval_secs: 60,
         thread_registry,
+        exec_thread_registry: Arc::new(ExecThreadRegistry::new(Arc::new(
+            InMemoryExecThreadStore::new(),
+        ))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
         conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
@@ -376,7 +384,7 @@ async fn setup_builtin_threads_custom(
         watch_store: Arc::new(exoskeleton_core::InMemoryWatchStore::new()),
         max_watches: 20,
         read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        inner_loop_config: exoskeleton_host::config::InnerLoopConfig::default(),
+        coding_thread_config: exoskeleton_host::config::CodingThreadConfig::default(),
         tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
         session_approvals: exoskeleton_host::kernel::policy::SessionApprovals::new(),
         vessel_mode: Arc::new(std::sync::Mutex::new(exoskeleton_core::VesselMode::Normal)),

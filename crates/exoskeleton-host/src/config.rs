@@ -139,67 +139,32 @@ impl Default for LlmConfig {
     }
 }
 
-/// Inner loop configuration for interactive coding sessions (E8-S1).
+/// Coding-thread configuration for interactive coding sessions (E8-S1).
 ///
-/// Controls the bounded inner interaction loop within PODAARA ticks.
-/// When `enabled = false` (default), the master loop behaves exactly as
-/// before (one Decide+Act per tick). When enabled, the agent can request
-/// iterative DecideLite→Act→Observe cycles within a single tick.
+/// This config enables the built-in coding executable thread and binds it to
+/// a workspace root. The master loop remains canonical; coding progresses via
+/// executable-thread proposals rather than a subordinate blocking loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InnerLoopConfig {
-    /// Enable the bounded inner interaction loop within PODAARA ticks.
-    /// When false, the master loop behaves exactly as before.
+pub struct CodingThreadConfig {
+    /// Enable built-in coding exec-thread registration.
     #[serde(default)]
     pub enabled: bool,
-    /// Maximum inner-loop steps (Decide→Act iterations) per tick.
-    #[serde(default = "default_inner_loop_max_steps")]
-    pub max_steps_per_tick: u32,
-    /// Maximum total tokens (input + output) consumed by inner-loop
-    /// LLM calls within one tick. Independent of the window budget.
-    #[serde(default = "default_inner_loop_max_tokens")]
-    pub max_tokens_per_session: u64,
-    /// Maximum wall-clock time (seconds) for the inner loop within one tick.
-    #[serde(default = "default_inner_loop_timeout")]
-    pub timeout_secs: u64,
-    /// Number of recent tool results to include in full when building
-    /// DecideLite context. Older results are summarized.
-    #[serde(default = "default_inner_loop_context_window_size")]
-    pub context_window_size: u32,
-    /// Number of identical consecutive tool calls (same tool + same args)
-    /// before doom-loop detection triggers and aborts the inner loop.
-    #[serde(default = "default_inner_loop_doom_threshold")]
-    pub doom_loop_threshold: u32,
     /// Workspace root path for repo analysis and git context.
     #[serde(default)]
     pub workspace_root: Option<String>,
+    /// When true, bounded coding sessions should return to an idle posture
+    /// after the current work item is completed rather than reopening
+    /// exploratory work on their own.
+    #[serde(default)]
+    pub return_to_idle_after_completion: bool,
 }
 
-fn default_inner_loop_max_steps() -> u32 {
-    25
-}
-fn default_inner_loop_max_tokens() -> u64 {
-    500_000
-}
-fn default_inner_loop_timeout() -> u64 {
-    300
-}
-fn default_inner_loop_context_window_size() -> u32 {
-    3
-}
-fn default_inner_loop_doom_threshold() -> u32 {
-    3
-}
-
-impl Default for InnerLoopConfig {
+impl Default for CodingThreadConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_steps_per_tick: 25,
-            max_tokens_per_session: 500_000,
-            timeout_secs: 300,
-            context_window_size: 3,
-            doom_loop_threshold: 3,
             workspace_root: None,
+            return_to_idle_after_completion: false,
         }
     }
 }
@@ -208,16 +173,12 @@ impl Default for InnerLoopConfig {
 pub struct CodingDefaults;
 
 impl CodingDefaults {
-    /// Build an InnerLoopConfig with coding-optimized settings.
-    pub fn inner_loop_config(workspace_root: Option<String>) -> InnerLoopConfig {
-        InnerLoopConfig {
+    /// Build a CodingThreadConfig with coding-optimized settings.
+    pub fn coding_thread_config(workspace_root: Option<String>) -> CodingThreadConfig {
+        CodingThreadConfig {
             enabled: true,
-            max_steps_per_tick: 25,
-            max_tokens_per_session: 500_000,
-            timeout_secs: 300,
-            context_window_size: 3,
-            doom_loop_threshold: 3,
             workspace_root,
+            return_to_idle_after_completion: true,
         }
     }
 
@@ -362,9 +323,9 @@ pub struct VesselConfig {
     /// Default: None (env override: EXO_CONNECTORS_DIR).
     pub connectors_dir: Option<PathBuf>,
 
-    // ── Inner loop settings (E8-S1) ──
-    /// Inner loop configuration for interactive coding sessions.
-    pub inner_loop: InnerLoopConfig,
+    // ── Coding-thread settings ──
+    /// Coding exec-thread configuration for interactive coding sessions.
+    pub coding_thread: CodingThreadConfig,
     /// Tool policy configuration for allow/deny/ask rules.
     pub tool_policy: ToolPolicyConfig,
 }
@@ -400,7 +361,7 @@ impl Default for VesselConfig {
             max_watches: exoskeleton_core::watch::DEFAULT_MAX_WATCHES,
             extra_destructive_tools: vec![],
             connectors_dir: None,
-            inner_loop: InnerLoopConfig::default(),
+            coding_thread: CodingThreadConfig::default(),
             tool_policy: ToolPolicyConfig::default(),
         }
     }
@@ -546,8 +507,8 @@ impl VesselConfig {
                     destructive: self.extra_destructive_tools.clone(),
                 })
             },
-            inner_loop: if self.inner_loop.enabled {
-                Some(self.inner_loop.clone())
+            coding_thread: if self.coding_thread.enabled {
+                Some(self.coding_thread.clone())
             } else {
                 None
             },
@@ -668,10 +629,10 @@ impl VesselConfig {
         if let Ok(val) = std::env::var("EXO_CONNECTORS_DIR") {
             self.connectors_dir = Some(PathBuf::from(val));
         }
-        if let Ok(val) = std::env::var("EXO_INNER_LOOP_ENABLED") {
+        if let Ok(val) = std::env::var("EXO_CODING_THREAD_ENABLED") {
             match val.to_lowercase().as_str() {
-                "true" | "1" | "yes" => self.inner_loop.enabled = true,
-                "false" | "0" | "no" => self.inner_loop.enabled = false,
+                "true" | "1" | "yes" => self.coding_thread.enabled = true,
+                "false" | "0" | "no" => self.coding_thread.enabled = false,
                 _ => {}
             }
         }
@@ -773,6 +734,7 @@ fn default_5() -> u32 {
 /// All NonZeroUsize values are represented as plain usize (validated on conversion).
 /// Optional fields use serde defaults.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VesselConfigFile {
     /// `[vessel]` section.
     pub vessel: VesselSection,
@@ -800,9 +762,9 @@ pub struct VesselConfigFile {
     /// `[connectors]` section — runtime connector configuration.
     #[serde(default)]
     pub connectors: Option<ConnectorsSection>,
-    /// `[inner_loop]` section — inner loop for interactive coding sessions.
+    /// `[coding_thread]` section — interactive coding configuration.
     #[serde(default)]
-    pub inner_loop: Option<InnerLoopConfig>,
+    pub coding_thread: Option<CodingThreadConfig>,
     /// `[tool_policy]` section — per-tool allow/deny/ask rules.
     #[serde(default)]
     pub tool_policy: Option<ToolPolicyConfig>,
@@ -1163,7 +1125,7 @@ impl TryFrom<VesselConfigFile> for VesselConfig {
                 .map(|c| c.destructive.clone())
                 .unwrap_or_default(),
             connectors_dir: file.connectors.as_ref().and_then(|c| c.dir.clone()),
-            inner_loop: file.inner_loop.unwrap_or_default(),
+            coding_thread: file.coding_thread.unwrap_or_default(),
             tool_policy: file.tool_policy.unwrap_or_default(),
         })
     }
@@ -2288,44 +2250,49 @@ max_decide_turns = 0
         assert_eq!(config.max_decide_turns, 1);
     }
 
-    // ── E8S1-T16: inner_loop_config_defaults ──
+    // ── E8S1-T16: coding_thread_config_defaults ──
 
     #[test]
-    fn inner_loop_config_defaults() {
-        let config = InnerLoopConfig::default();
+    fn coding_thread_config_defaults() {
+        let config = CodingThreadConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.max_steps_per_tick, 25);
-        assert_eq!(config.max_tokens_per_session, 500_000);
-        assert_eq!(config.timeout_secs, 300);
-        assert_eq!(config.context_window_size, 3);
-        assert_eq!(config.doom_loop_threshold, 3);
         assert_eq!(config.workspace_root, None);
+        assert!(!config.return_to_idle_after_completion);
     }
 
-    // ── E8S1-T17: inner_loop_config_toml_roundtrip ──
+    // ── E8S1-T17: coding_thread_config_toml_roundtrip ──
 
     #[test]
-    fn inner_loop_config_toml_roundtrip() {
-        let config = InnerLoopConfig {
+    fn coding_thread_config_toml_roundtrip() {
+        let config = CodingThreadConfig {
             enabled: true,
-            max_steps_per_tick: 50,
-            max_tokens_per_session: 1_000_000,
-            timeout_secs: 600,
-            context_window_size: 4,
-            doom_loop_threshold: 5,
             workspace_root: None,
+            return_to_idle_after_completion: true,
         };
         let toml_str = toml::to_string(&config).unwrap();
-        let parsed: InnerLoopConfig = toml::from_str(&toml_str).unwrap();
+        let parsed: CodingThreadConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.enabled);
-        assert_eq!(parsed.max_steps_per_tick, 50);
-        assert_eq!(parsed.max_tokens_per_session, 1_000_000);
-        assert_eq!(parsed.timeout_secs, 600);
-        assert_eq!(parsed.context_window_size, 4);
-        assert_eq!(parsed.doom_loop_threshold, 5);
         assert_eq!(parsed.workspace_root, None);
+        assert!(parsed.return_to_idle_after_completion);
 
-        // Also verify full vessel config with inner_loop section
+        // Also verify full vessel config with the [coding_thread] section.
+        let vessel_toml = r#"
+[vessel]
+mission = "test"
+data_dir = "/tmp/exo"
+
+[coding_thread]
+enabled = true
+"#;
+        let file: VesselConfigFile = toml::from_str(vessel_toml).unwrap();
+        let vessel_config = VesselConfig::try_from(file).unwrap();
+        assert!(vessel_config.coding_thread.enabled);
+        assert_eq!(vessel_config.coding_thread.workspace_root, None);
+        assert!(!vessel_config.coding_thread.return_to_idle_after_completion);
+    }
+
+    #[test]
+    fn legacy_inner_loop_section_is_rejected() {
         let vessel_toml = r#"
 [vessel]
 mission = "test"
@@ -2333,34 +2300,21 @@ data_dir = "/tmp/exo"
 
 [inner_loop]
 enabled = true
-max_steps_per_tick = 30
-max_tokens_per_session = 750000
-timeout_secs = 180
-context_window_size = 6
-doom_loop_threshold = 4
+workspace_root = "/tmp/ws"
 "#;
-        let file: VesselConfigFile = toml::from_str(vessel_toml).unwrap();
-        let vessel_config = VesselConfig::try_from(file).unwrap();
-        assert!(vessel_config.inner_loop.enabled);
-        assert_eq!(vessel_config.inner_loop.max_steps_per_tick, 30);
-        assert_eq!(vessel_config.inner_loop.max_tokens_per_session, 750_000);
-        assert_eq!(vessel_config.inner_loop.timeout_secs, 180);
-        assert_eq!(vessel_config.inner_loop.context_window_size, 6);
-        assert_eq!(vessel_config.inner_loop.doom_loop_threshold, 4);
-        assert_eq!(vessel_config.inner_loop.workspace_root, None);
+        assert!(toml::from_str::<VesselConfigFile>(vessel_toml).is_err());
     }
 
     #[test]
-    fn coding_inner_loop_enabled() {
-        let config = CodingDefaults::inner_loop_config(None);
+    fn coding_thread_enabled() {
+        let config = CodingDefaults::coding_thread_config(None);
         assert!(config.enabled);
-        assert_eq!(config.max_steps_per_tick, 25);
-        assert_eq!(config.max_tokens_per_session, 500_000);
+        assert!(config.return_to_idle_after_completion);
     }
 
     #[test]
-    fn coding_inner_loop_with_workspace() {
-        let config = CodingDefaults::inner_loop_config(Some("/home/user/project".into()));
+    fn coding_thread_with_workspace() {
+        let config = CodingDefaults::coding_thread_config(Some("/home/user/project".into()));
         assert_eq!(config.workspace_root.as_deref(), Some("/home/user/project"));
     }
 
@@ -2386,31 +2340,28 @@ doom_loop_threshold = 4
         );
     }
 
-    // ── E8S1-T18: inner_loop_config_env_override ──
+    // ── E8S1-T18: coding_thread_config_env_override ──
 
     #[test]
-    fn inner_loop_config_env_override() {
-        // Test EXO_INNER_LOOP_ENABLED=true enables the inner loop
-        std::env::set_var("EXO_INNER_LOOP_ENABLED", "true");
+    fn coding_thread_config_env_override() {
+        std::env::set_var("EXO_CODING_THREAD_ENABLED", "true");
         let mut config = VesselConfig {
             mission: "test".into(),
             ..Default::default()
         };
-        assert!(!config.inner_loop.enabled);
+        assert!(!config.coding_thread.enabled);
         config.apply_env_overrides().unwrap();
-        assert!(config.inner_loop.enabled);
+        assert!(config.coding_thread.enabled);
 
-        // Test EXO_INNER_LOOP_ENABLED=false disables it
-        std::env::set_var("EXO_INNER_LOOP_ENABLED", "false");
+        std::env::set_var("EXO_CODING_THREAD_ENABLED", "false");
         config.apply_env_overrides().unwrap();
-        assert!(!config.inner_loop.enabled);
+        assert!(!config.coding_thread.enabled);
 
-        // Test EXO_INNER_LOOP_ENABLED=1 also enables
-        std::env::set_var("EXO_INNER_LOOP_ENABLED", "1");
+        std::env::set_var("EXO_CODING_THREAD_ENABLED", "1");
         config.apply_env_overrides().unwrap();
-        assert!(config.inner_loop.enabled);
+        assert!(config.coding_thread.enabled);
 
         // Clean up
-        std::env::remove_var("EXO_INNER_LOOP_ENABLED");
+        std::env::remove_var("EXO_CODING_THREAD_ENABLED");
     }
 }

@@ -1,11 +1,11 @@
 //! Debug banner widget for `exo code`.
 //!
-//! Renders a 4-line info banner between the status bar and conversation area
-//! when toggled by F1. Shows tick number, thread states, visual budget
-//! progress bars, and active policy rules.
+//! Renders a multi-line info banner between the status bar and conversation area
+//! when toggled by F1. Shows tick number, cognitive thread states, executable
+//! thread states, visual budget progress bars, and active policy rules.
 //!
 //! Graceful degradation:
-//! - Width >= 100: full banner (bars + thread details + policy)
+//! - Width >= 100: full banner (threads + exec threads + bars + policy)
 //! - Width 60-99: numeric budgets, truncated thread names
 //! - Width < 60: 2-line minimal banner (tick + budget only)
 
@@ -38,7 +38,7 @@ impl<'a> DebugBannerWidget<'a> {
         if !state.visible {
             return 0;
         }
-        let base = if width < 60 { 2 } else { 4 };
+        let base = if width < 60 { 2 } else { 5 };
         let plan_line = if state.plan_summary.is_some() && width >= 60 {
             1
         } else {
@@ -50,12 +50,26 @@ impl<'a> DebugBannerWidget<'a> {
 
 /// Render the tick info line.
 ///
-/// Format: `TICK #47 | inner-loop active | 3/25 steps | 4,231/50,000 tok`
+/// Format: `TICK #47 | coding active | 3/25 steps | 4,231/50,000 tok`
 fn render_tick_line(state: &DebugState) -> Line<'static> {
-    let loop_status = if state.inner_loop_active {
-        "inner-loop active"
+    let loop_status = if let Some(exec) = state.exec_threads.first() {
+        let mut summary = format!("{} {}", exec.name.to_lowercase(), exec.state);
+        if let Some(phase) = &exec.phase {
+            if phase != "idle" {
+                summary.push('/');
+                summary.push_str(phase);
+            }
+        }
+        if let Some(confidence) = &exec.confidence {
+            summary.push(' ');
+            summary.push_str(confidence);
+        }
+        if exec.evidence_complete {
+            summary.push_str(" ready");
+        }
+        summary
     } else {
-        "idle"
+        "idle".into()
     };
 
     let mut spans = vec![
@@ -66,7 +80,7 @@ fn render_tick_line(state: &DebugState) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" │ {loop_status}"),
+            format!(" │ {}", loop_status),
             Style::default().fg(Color::DarkGray),
         ),
     ];
@@ -83,6 +97,84 @@ fn render_tick_line(state: &DebugState) -> Line<'static> {
             format!(" │ {}", state.token_count),
             Style::default().fg(Color::DarkGray),
         ));
+    }
+
+    Line::from(spans)
+}
+
+fn render_exec_line(state: &DebugState, max_width: u16) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        "  Exec: ".to_string(),
+        Style::default().fg(Color::DarkGray),
+    )];
+
+    if state.exec_threads.is_empty() {
+        spans.push(Span::styled(
+            "none".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        return Line::from(spans);
+    }
+
+    let mut remaining_width = max_width.saturating_sub(8) as usize;
+
+    for (i, exec) in state.exec_threads.iter().enumerate() {
+        if i > 0 {
+            if remaining_width < 5 {
+                break;
+            }
+            spans.push(Span::styled(
+                " │ ".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            remaining_width = remaining_width.saturating_sub(3);
+        }
+
+        let mut entry = format!("{} ({})", exec.name, exec.state);
+        if let Some(phase) = &exec.phase {
+            if phase != "idle" {
+                entry.push('/');
+                entry.push_str(phase);
+            }
+        }
+        if let Some(confidence) = &exec.confidence {
+            entry.push(' ');
+            entry.push_str(confidence);
+        }
+        if exec.evidence_complete {
+            entry.push_str(" ready");
+        }
+        if let Some(focus) = &exec.focus {
+            entry.push_str(" focus=");
+            entry.push_str(&truncate_string(
+                focus,
+                if max_width < 100 { 12 } else { 24 },
+            ));
+        } else if let Some(reason) = &exec.completion_reason {
+            entry.push_str(" done=");
+            entry.push_str(&truncate_string(
+                reason,
+                if max_width < 100 { 12 } else { 24 },
+            ));
+        }
+
+        let entry = if max_width < 100 {
+            truncate_string(&entry, 28)
+        } else {
+            entry
+        };
+        let entry_len = entry.len();
+        if entry_len > remaining_width {
+            break;
+        }
+
+        let color = if exec.highlighted {
+            Color::LightCyan
+        } else {
+            Color::DarkGray
+        };
+        spans.push(Span::styled(entry, Style::default().fg(color)));
+        remaining_width = remaining_width.saturating_sub(entry_len);
     }
 
     Line::from(spans)
@@ -309,6 +401,12 @@ impl<'a> Widget for DebugBannerWidget<'a> {
         }
 
         if y < area.y + area.height {
+            let exec_line = render_exec_line(self.state, width);
+            buf.set_line(area.x, y, &exec_line, area.width);
+            y += 1;
+        }
+
+        if y < area.y + area.height {
             let budget_line = render_budget_line(&self.state.budget, width);
             buf.set_line(area.x, y, &budget_line, area.width);
             y += 1;
@@ -334,7 +432,8 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
     use crate::code::app::{
-        DebugBudgetInfo, DebugPlanSummary, DebugPolicyInfo, DebugState, DebugThreadInfo,
+        DebugBudgetInfo, DebugExecThreadInfo, DebugPlanSummary, DebugPolicyInfo, DebugState,
+        DebugThreadInfo,
     };
 
     use super::{render_bar, render_budget_line, render_plan_line, DebugBannerWidget};
@@ -343,7 +442,6 @@ mod tests {
         DebugState {
             visible: true,
             tick_number: 47,
-            inner_loop_active: true,
             step_count: "3/25 steps".into(),
             token_count: "4,231/50,000 tok".into(),
             threads: vec![
@@ -358,6 +456,16 @@ mod tests {
                     contributed: false,
                 },
             ],
+            exec_threads: vec![DebugExecThreadInfo {
+                name: "Coding".into(),
+                state: "active".into(),
+                phase: Some("editing".into()),
+                focus: Some("rename calculate_averge".into()),
+                confidence: Some("high".into()),
+                evidence_complete: true,
+                completion_reason: None,
+                highlighted: true,
+            }],
             budget: DebugBudgetInfo {
                 token_percent_used: 8,
                 token_label: "4,231/50,000".into(),
@@ -380,7 +488,6 @@ mod tests {
             ],
             plan_summary: None,
             initial_token_budget: Some(50_000),
-            initial_step_limit: Some(25),
         }
     }
 
@@ -390,7 +497,7 @@ mod tests {
     fn debug_banner_renders_tick_line() {
         let state = make_debug_state();
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
@@ -415,7 +522,7 @@ mod tests {
     fn debug_banner_renders_thread_line() {
         let state = make_debug_state();
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
@@ -440,11 +547,11 @@ mod tests {
     fn debug_banner_renders_budget_bars() {
         let state = make_debug_state();
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let budget_line: String = (0..120).map(|x| buf[(x, 2)].symbol().to_string()).collect();
+        let budget_line: String = (0..120).map(|x| buf[(x, 3)].symbol().to_string()).collect();
         assert!(
             budget_line.contains("Budget:"),
             "budget line should start with Budget:, got: {budget_line}"
@@ -469,11 +576,11 @@ mod tests {
     fn debug_banner_renders_policy_line() {
         let state = make_debug_state();
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let policy_line: String = (0..120).map(|x| buf[(x, 3)].symbol().to_string()).collect();
+        let policy_line: String = (0..120).map(|x| buf[(x, 4)].symbol().to_string()).collect();
         assert!(
             policy_line.contains("shell.exec=ask"),
             "policy line should show ask policy, got: {policy_line}"
@@ -494,11 +601,11 @@ mod tests {
     fn debug_banner_narrow_terminal_numeric_only() {
         let state = make_debug_state();
         let widget = DebugBannerWidget::new(&state, 80);
-        let area = Rect::new(0, 0, 80, 5);
+        let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let budget_line: String = (0..80).map(|x| buf[(x, 2)].symbol().to_string()).collect();
+        let budget_line: String = (0..80).map(|x| buf[(x, 3)].symbol().to_string()).collect();
         assert!(
             budget_line.contains("8% tokens"),
             "narrow budget should show percentage, got: {budget_line}"
@@ -553,14 +660,14 @@ mod tests {
             objective: "Implement feature X".into(),
         });
 
-        assert_eq!(DebugBannerWidget::height(&state, 120), 5);
+        assert_eq!(DebugBannerWidget::height(&state, 120), 6);
 
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let plan_line: String = (0..120).map(|x| buf[(x, 4)].symbol().to_string()).collect();
+        let plan_line: String = (0..120).map(|x| buf[(x, 5)].symbol().to_string()).collect();
         assert!(
             plan_line.contains("2/5 tasks"),
             "plan line should show progress, got: {plan_line}"
@@ -583,7 +690,7 @@ mod tests {
         };
 
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
@@ -661,7 +768,7 @@ mod tests {
         state.threads.clear();
 
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
@@ -678,14 +785,29 @@ mod tests {
         state.policies.clear();
 
         let widget = DebugBannerWidget::new(&state, 120);
-        let area = Rect::new(0, 0, 120, 5);
+        let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let policy_line: String = (0..120).map(|x| buf[(x, 3)].symbol().to_string()).collect();
+        let policy_line: String = (0..120).map(|x| buf[(x, 4)].symbol().to_string()).collect();
         assert!(
             policy_line.contains("default"),
             "empty policies should show 'default', got: {policy_line}"
         );
+    }
+
+    #[test]
+    fn debug_banner_renders_exec_thread_line() {
+        let state = make_debug_state();
+        let widget = DebugBannerWidget::new(&state, 120);
+        let area = Rect::new(0, 0, 120, 6);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let exec_line: String = (0..120).map(|x| buf[(x, 2)].symbol().to_string()).collect();
+        assert!(exec_line.contains("Exec:"));
+        assert!(exec_line.contains("Coding"));
+        assert!(exec_line.contains("editing"));
+        assert!(exec_line.contains("high"));
     }
 }

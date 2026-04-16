@@ -7,6 +7,8 @@
 //! 4. Accumulates WI and virtual tool calls as planned actions
 //! 5. Continues only when there are inline tool results to feed back
 
+use std::path::Path;
+
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{ContentBlock, LlmBackend, LlmMessage, LlmRequest, LlmRole};
 use exoskeleton_core::tick::LlmCallRecord;
@@ -116,6 +118,8 @@ pub fn decide(
                     params: input.clone(),
                     rationale: action_rationale(&turn_reasoning, name),
                     plan_task_id: None,
+                    origin_exec_thread_id: None,
+                    proposal_id: None,
                 });
             }
         }
@@ -222,8 +226,6 @@ fn build_decision_result(
     response_artifact_id: ArtifactId,
 ) -> Result<DecisionResult, ExoError> {
     let reasoning = accumulator.reasoning_parts.join("\n");
-    let inner_loop_requested = !accumulator.actions.is_empty();
-
     let decision_json = json!({
         "reasoning": reasoning,
         "reply": accumulator.reply,
@@ -233,7 +235,6 @@ fn build_decision_result(
         "memory_notes": accumulator.memory_notes,
         "watch_proposals": accumulator.watch_proposals,
         "vessel_mode_request": accumulator.vessel_mode_request,
-        "inner_loop_requested": inner_loop_requested,
     });
     let decision_artifact = Artifact::from_json(ArtifactKind::Decision, &decision_json)?;
     kernel.artifact_store.put(&decision_artifact)?;
@@ -250,7 +251,6 @@ fn build_decision_result(
         llm_call_record: merged_record,
         response_artifact_id,
         watch_proposals: accumulator.watch_proposals,
-        inner_loop_requested,
         vessel_mode_request: accumulator.vessel_mode_request,
     })
 }
@@ -261,11 +261,18 @@ fn build_system_prompt(kernel: &KernelContext) -> Result<String, ExoError> {
         &[
             ("vessel_id", &kernel.vessel_id.to_string()),
             ("mission", &kernel.mission),
+            (
+                "environment_context",
+                &render_environment_context(
+                    kernel.coding_thread_config.workspace_root.as_deref(),
+                    Path::new("/sandbox").exists(),
+                ),
+            ),
         ],
     )?;
 
     let vessel_mode = *kernel.vessel_mode.lock().unwrap();
-    if kernel.inner_loop_config.enabled || vessel_mode != exoskeleton_core::VesselMode::Normal {
+    if kernel.coding_thread_config.enabled || vessel_mode != exoskeleton_core::VesselMode::Normal {
         let plan_section = match vessel_mode {
             exoskeleton_core::VesselMode::Planning => {
                 "You are in Planning mode. Restrict yourself to read-only external tools and use cognitive tools to draft or refine a plan.".to_string()
@@ -288,6 +295,46 @@ fn build_system_prompt(kernel: &KernelContext) -> Result<String, ExoError> {
     }
 
     Ok(system)
+}
+
+fn render_environment_context(workspace_root: Option<&str>, sandbox_exists: bool) -> String {
+    let mut lines = Vec::new();
+    match workspace_root {
+        Some(root) => {
+            lines.push(format!("Active code workspace root: {root}"));
+            lines.push(
+                "Treat that workspace root as the default in-scope repository for code.* tools."
+                    .into(),
+            );
+        }
+        None => {
+            lines.push("No explicit workspace root is configured for this vessel.".into());
+            lines.push(
+                "Infer the in-scope repo from the task prompt, operator context, and recent successful reads."
+                    .into(),
+            );
+        }
+    }
+    lines.push(
+        "Do not assume /data or /data/workspace unless the task prompt or operator explicitly identifies those paths."
+            .into(),
+    );
+    lines.push(
+        "The vessel state data directory is not your code workspace unless the task explicitly says so."
+            .into(),
+    );
+    if sandbox_exists {
+        lines.push(
+            "The /sandbox directory is available as scratch space for sandbox.exec experiments."
+                .into(),
+        );
+    } else {
+        lines.push(
+            "A /sandbox scratch directory may or may not be available depending on runtime; verify before relying on it."
+                .into(),
+        );
+    }
+    lines.join("\n")
 }
 
 /// Determine which LLM backend to use for this tick's Decide step.
@@ -398,4 +445,24 @@ fn extract_high_threat(kernel: &KernelContext) -> bool {
         assessment.severity,
         exoskeleton_threads::ThreatSeverity::High | exoskeleton_threads::ThreatSeverity::Critical
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_environment_context;
+
+    #[test]
+    fn environment_context_uses_workspace_root_when_present() {
+        let rendered = render_environment_context(Some("/home/keiths/src/sample-rust"), false);
+        assert!(rendered.contains("Active code workspace root: /home/keiths/src/sample-rust"));
+        assert!(rendered.contains("Do not assume /data or /data/workspace"));
+        assert!(rendered.contains("state data directory is not your code workspace"));
+    }
+
+    #[test]
+    fn environment_context_handles_missing_workspace_root() {
+        let rendered = render_environment_context(None, true);
+        assert!(rendered.contains("No explicit workspace root is configured"));
+        assert!(rendered.contains("/sandbox directory is available"));
+    }
 }

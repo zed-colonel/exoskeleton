@@ -92,8 +92,12 @@ impl PromptRegistry {
             include_str!("../../../prompts/charters/initiative.md"),
         );
         registry.insert(
-            "inner-loop-system",
-            include_str!("../../../prompts/inner-loop-system.md"),
+            "coding-thread-system",
+            include_str!("../../../prompts/coding-thread-system.md"),
+        );
+        registry.insert(
+            "charter-coding-thread",
+            include_str!("../../../prompts/charters/coding-thread.md"),
         );
         registry
     }
@@ -216,12 +220,12 @@ mod tests {
         );
     }
 
-    // ── E0-T9: with_defaults has all nine prompts ──
+    // ── E0-T9: with_defaults has the full compiled-in prompt set ──
 
     #[test]
-    fn with_defaults_has_all_thirteen_prompts() {
+    fn with_defaults_has_all_prompts() {
         let registry = PromptRegistry::with_defaults();
-        assert_eq!(registry.len(), 15, "should have 15 compiled-in prompts");
+        assert_eq!(registry.len(), 16, "should have 16 compiled-in prompts");
 
         let expected_keys = [
             "decide-system",
@@ -238,7 +242,8 @@ mod tests {
             "bootstrap-preamble",
             "charter-creative-synthesis",
             "charter-initiative",
-            "inner-loop-system",
+            "coding-thread-system",
+            "charter-coding-thread",
         ];
         for key in &expected_keys {
             assert!(
@@ -312,6 +317,10 @@ mod tests {
                 &[
                     ("vessel_id", "test-vessel-123"),
                     ("mission", "explore the cosmos"),
+                    (
+                        "environment_context",
+                        "You are running locally in /tmp/test-workspace.",
+                    ),
                 ],
             )
             .unwrap();

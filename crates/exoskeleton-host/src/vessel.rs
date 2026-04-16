@@ -39,6 +39,7 @@ use crate::cognitive_engine::{
     CognitivePayload, CognitiveTaskType,
 };
 use crate::config::VesselConfig;
+use crate::exec_threads::{register_builtin_exec_threads, ExecThreadRegistry};
 use crate::inspect::VesselInspector;
 use crate::kernel::{KernelContext, MasterLoopPayload, WiHostSlot};
 use crate::llm::client::LlmClient;
@@ -153,6 +154,8 @@ impl Vessel {
         // 7. Build KernelContext
         let artifact_store: Arc<dyn ArtifactStore> = storage.artifact_store().clone();
         let thread_registry = Arc::new(ThreadRegistry::new(storage.thread_store().clone()));
+        let exec_thread_registry =
+            Arc::new(ExecThreadRegistry::new(storage.exec_thread_store().clone()));
         let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
             storage.relationship_store().clone();
         // 7.5 Create budget trackers (Sprint 9)
@@ -199,6 +202,7 @@ impl Vessel {
             max_output_tokens: config.llm_config.max_output_tokens,
             master_loop_interval_secs: config.master_loop_interval_secs,
             thread_registry: thread_registry.clone(),
+            exec_thread_registry: exec_thread_registry.clone(),
             relationship_ledger: relationship_ledger.clone(),
             conversation_store: storage.conversation_store().clone(),
             budget_tracker: budget_tracker.clone(),
@@ -213,7 +217,7 @@ impl Vessel {
             watch_store: storage.watch_store().clone() as Arc<dyn exoskeleton_core::WatchStore>,
             max_watches: config.max_watches,
             read_paths_this_tick: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            inner_loop_config: config.inner_loop.clone(),
+            coding_thread_config: config.coding_thread.clone(),
             tool_policy: config.tool_policy.clone(),
             session_approvals: crate::kernel::policy::SessionApprovals::new(),
             vessel_mode: Arc::new(std::sync::Mutex::new(initial_vessel_mode)),
@@ -258,6 +262,12 @@ impl Vessel {
             &kernel_context.thread_registry,
             &prompt_registry,
             thread_overrides.as_ref(),
+        )?;
+        register_builtin_exec_threads(
+            &kernel_context.exec_thread_registry,
+            &prompt_registry,
+            config.coding_thread.workspace_root.clone(),
+            config.coding_thread.enabled,
         )?;
 
         // 9. Bootstrap Cognitive AQ engine with KernelContext

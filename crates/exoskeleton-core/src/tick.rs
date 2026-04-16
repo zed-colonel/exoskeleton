@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::exec_thread::ExecThreadKind;
 use crate::id::{ArtifactId, ThreadId, TickId};
 use crate::ExoError;
 
@@ -33,6 +34,9 @@ pub struct TickRecord {
     pub snapshot_after: Option<ArtifactId>,
     /// Artifacts contributed by cognitive threads during this tick.
     pub thread_contributions: Vec<ThreadContribution>,
+    /// Artifacts contributed by executable threads during this tick.
+    #[serde(default)]
+    pub exec_thread_contributions: Vec<ExecThreadContribution>,
     /// Actions executed in the Act step (via WI Host / Tool AQ).
     pub actions_taken: Vec<ActionRecord>,
     /// LLM invocations made during this tick (via Cognitive AQ).
@@ -108,6 +112,19 @@ pub struct ThreadContribution {
     pub summary: String,
 }
 
+/// An executable thread's contribution to a tick.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ExecThreadContribution {
+    pub thread_id: ThreadId,
+    pub kind: ExecThreadKind,
+    pub artifact_id: ArtifactId,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_action_summary: Option<String>,
+}
+
 /// Record of one action executed in the Act step (crossing to Tool AQ via WI Host).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ActionRecord {
@@ -120,6 +137,12 @@ pub struct ActionRecord {
     pub receipt_ref: Option<ArtifactId>,
     /// Outcome of the action.
     pub outcome: ActionOutcome,
+    /// Executable thread that originated this adopted action, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_exec_thread_id: Option<ThreadId>,
+    /// Proposal identifier that originated this adopted action, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
 }
 
 /// Outcome of a tool invocation.
@@ -288,11 +311,14 @@ mod tests {
                 artifact_id: ArtifactId::from_content(b"thread out"),
                 summary: "Threat analysis complete".into(),
             }],
+            exec_thread_contributions: vec![],
             actions_taken: vec![ActionRecord {
                 action_type: "fs.write".into(),
                 target: "/tmp/output.txt".into(),
                 receipt_ref: Some(ArtifactId::from_content(b"receipt")),
                 outcome: ActionOutcome::Success,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             }],
             llm_calls: vec![LlmCallRecord {
                 model: "local-7b".into(),

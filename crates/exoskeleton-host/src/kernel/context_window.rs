@@ -130,6 +130,8 @@ mod tests {
                 params,
                 rationale: "test".into(),
                 plan_task_id: None,
+                origin_exec_thread_id: None,
+                proposal_id: None,
             },
             result: result.map_err(|err| err.to_string()),
             record: ActionRecord {
@@ -141,6 +143,8 @@ mod tests {
                 } else {
                     ActionOutcome::Failure
                 },
+                origin_exec_thread_id: None,
+                proposal_id: None,
             },
             tool_result: exoskeleton_core::llm::ContentBlock::ToolResult {
                 tool_use_id: format!("call_{tool}"),

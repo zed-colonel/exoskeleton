@@ -39,24 +39,28 @@ pub fn from_ws_text(text: &str) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use exoskeleton_core::EventType;
+    use exoskeleton_core::{EventType, ExecThreadKind, ExecThreadLiveDetail, ExecThreadStatus};
 
     use super::*;
 
-    // ── TUI-T7: live_event_to_message_inner_loop_step ──
+    // ── TUI-T7: live_event_to_message_exec_thread_update ──
 
     #[test]
-    fn live_event_to_message_inner_loop_step() {
+    fn live_event_to_message_exec_thread_update() {
         let event = LiveEvent {
-            event_type: EventType::InnerLoopStep,
-            summary: "Step 1/5: code.read (success)".into(),
-            inner_loop_detail: Some(exoskeleton_core::InnerLoopStepDetail {
-                step_number: 1,
-                max_steps: 5,
-                tool_name: Some("code.read".into()),
-                tool_outcome: Some("success".into()),
-                tokens_this_step: 500,
-                tokens_total: 500,
+            event_type: EventType::ExecThreadUpdated,
+            summary: "Coding proposal".into(),
+            exec_thread_detail: Some(ExecThreadLiveDetail {
+                thread_id: exoskeleton_core::id::ThreadId::new(),
+                kind: ExecThreadKind::Coding,
+                name: "Coding".into(),
+                status: ExecThreadStatus::Active,
+                work_phase: Some("editing".into()),
+                summary: "Coding proposal".into(),
+                proposal_id: Some("proposal-1".into()),
+                proposed_action_summary: Some("code.edit: src/lib.rs".into()),
+                evidence_complete: true,
+                proposal_confidence: None,
                 completion_reason: None,
             }),
             ..LiveEvent::new(Some(1))
@@ -66,8 +70,8 @@ mod tests {
         assert!(msg.is_some());
         match msg.unwrap() {
             Message::WsEvent(e) => {
-                assert_eq!(e.event_type, EventType::InnerLoopStep);
-                assert!(e.inner_loop_detail.is_some());
+                assert_eq!(e.event_type, EventType::ExecThreadUpdated);
+                assert!(e.exec_thread_detail.is_some());
             }
             other => panic!("expected WsEvent, got {other:?}"),
         }

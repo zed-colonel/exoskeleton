@@ -177,6 +177,7 @@ mod tests {
             vessel_mode: exoskeleton_core::VesselMode::Normal,
             working_memory: exoskeleton_core::working_memory::WorkingMemory::new(),
             thread_summaries: Vec::new(),
+            exec_thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
             last_action_summary: None,
@@ -306,6 +307,7 @@ mod tests {
                 last_output_summary: Some("All clear".into()),
                 token_budget_remaining: 5000,
             }],
+            exec_thread_summaries: Vec::new(),
             relationship_snapshot_ref: Some(ArtifactId::from_content(b"rel")),
             budget_status: BudgetStatus {
                 local_tokens_remaining: 80_000,

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::exec_thread::ExecThreadStatus;
 use crate::id::{ArtifactId, ThreadId, VesselId};
 use crate::plan::Plan;
 use crate::thread::ThreadStatus;
@@ -39,6 +40,9 @@ pub struct StateSnapshot {
     pub working_memory: WorkingMemory,
     /// Compact summary of each active cognitive thread's state.
     pub thread_summaries: Vec<ThreadSummary>,
+    /// Compact summary of each registered executable thread's state.
+    #[serde(default)]
+    pub exec_thread_summaries: Vec<ExecThreadSummary>,
     /// Reference to the compiled relationship snapshot artifact.
     /// `None` if no relationship data exists yet (first tick, or no principals).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,6 +75,7 @@ impl StateSnapshot {
             vessel_mode: VesselMode::Normal,
             working_memory: WorkingMemory::new(),
             thread_summaries: Vec::new(),
+            exec_thread_summaries: Vec::new(),
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
             last_action_summary: None,
@@ -122,6 +127,27 @@ pub struct ThreadSummary {
     pub last_output_summary: Option<String>,
     /// Remaining token budget for this thread (Cognitive AQ budget, I6).
     pub token_budget_remaining: u64,
+}
+
+/// Compact summary of one executable thread's state for inclusion in the snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ExecThreadSummary {
+    pub thread_id: ThreadId,
+    pub kind: crate::ExecThreadKind,
+    pub name: String,
+    pub status: ExecThreadStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_focus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_phase: Option<String>,
+    #[serde(default)]
+    pub evidence_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_confidence: Option<crate::ExecThreadProposalConfidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completion_reason: Option<String>,
 }
 
 /// Remaining budget across all tracked dimensions.
@@ -232,6 +258,7 @@ mod tests {
                 last_output_summary: Some("No threats detected".into()),
                 token_budget_remaining: 5000,
             }],
+            exec_thread_summaries: vec![],
             relationship_snapshot_ref: Some(ArtifactId::from_content(b"rel")),
             budget_status: BudgetStatus {
                 local_tokens_remaining: 80_000,
@@ -364,6 +391,7 @@ mod tests {
                 }],
             },
             thread_summaries: vec![],
+            exec_thread_summaries: vec![],
             relationship_snapshot_ref: None,
             budget_status: BudgetStatus::unlimited(),
             last_action_summary: None,

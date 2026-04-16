@@ -18,19 +18,25 @@ use exoskeleton_core::conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
 };
 use exoskeleton_core::diff::{CodeDiffContent, CodeDiffOperation, FileDiffEntry, TickDiffSummary};
+use exoskeleton_core::exec_thread::{
+    ExecThreadKind, ExecThreadProposalConfidence, ExecThreadStatus,
+};
 use exoskeleton_core::event::{
-    CapabilityRequestPayload, DiffSummary, EventEntry, EventType, InnerLoopStepDetail, LiveEvent,
-    PlanModeDetail, PolicyDetail, QuestionDetail,
+    CapabilityRequestPayload, DiffSummary, EventEntry, EventType, ExecThreadLiveDetail,
+    LiveEvent, PlanModeDetail, PolicyDetail, QuestionDetail,
 };
 use exoskeleton_core::memory::{EpisodicSummary, LongTermNote};
 use exoskeleton_core::plan::{Plan, PlanTask, PlanTaskStatus};
 use exoskeleton_core::relationship::{
     PrincipalSummary, RelationalSignalType, RelationshipRecord, RelationshipSnapshot,
 };
-use exoskeleton_core::snapshot::{BudgetStatus, StateSnapshot, ThreadSummary, VesselStatus};
+use exoskeleton_core::snapshot::{
+    BudgetStatus, ExecThreadSummary, StateSnapshot, ThreadSummary, VesselStatus,
+};
 use exoskeleton_core::thread::{ThreadPriority, ThreadSchedule, ThreadStatus};
 use exoskeleton_core::tick::{
-    ActionOutcome, ActionRecord, LlmCallRecord, ThreadContribution, TickPhase, TickRecord,
+    ActionOutcome, ActionRecord, ExecThreadContribution, LlmCallRecord, ThreadContribution,
+    TickPhase, TickRecord,
 };
 use exoskeleton_core::working_memory::{WorkingMemory, WorkingMemoryEntry};
 use exoskeleton_core::{
@@ -88,10 +94,13 @@ fn generate() -> String {
     emit!(output, &cfg, ThreadPriority);
     emit!(output, &cfg, ThreadSchedule);
     emit!(output, &cfg, ThreadStatus);
+    emit!(output, &cfg, ExecThreadKind);
+    emit!(output, &cfg, ExecThreadStatus);
     emit!(output, &cfg, ThrashLevel);
     emit!(output, &cfg, PlanTaskStatus);
     emit!(output, &cfg, ConversationState);
     emit!(output, &cfg, VesselMode);
+    emit!(output, &cfg, ExecThreadProposalConfidence);
 
     // ── Plan & Working Memory types (E1-S1) ──
     emit!(output, &cfg, Plan);
@@ -102,15 +111,17 @@ fn generate() -> String {
     // ── Core structs ──
     emit!(output, &cfg, BudgetStatus);
     emit!(output, &cfg, ThreadSummary);
+    emit!(output, &cfg, ExecThreadSummary);
     emit!(output, &cfg, StateSnapshot);
     emit!(output, &cfg, ThreadContribution);
+    emit!(output, &cfg, ExecThreadContribution);
     emit!(output, &cfg, ActionRecord);
     emit!(output, &cfg, LlmCallRecord);
     emit!(output, &cfg, TickRecord);
     emit!(output, &cfg, EventEntry);
     emit!(output, &cfg, LiveEvent);
     emit!(output, &cfg, CapabilityRequestPayload);
-    emit!(output, &cfg, InnerLoopStepDetail);
+    emit!(output, &cfg, ExecThreadLiveDetail);
     emit!(output, &cfg, QuestionDetail);
     emit!(output, &cfg, PolicyDetail);
     emit!(output, &cfg, PlanModeDetail);

@@ -5,9 +5,7 @@ You are in the Decide phase of your PODAARA cognitive loop. Based on the context
 
 ## Environment
 
-Your working directory is /data. The /data/workspace directory is available for files you create.
-The /sandbox directory is a scratch space for experimental code execution (used by sandbox.exec).
-The filesystem starts empty — you must create any files you need with fs.write before reading them.
+{{environment_context}}
 
 ## Collaborator Stance
 

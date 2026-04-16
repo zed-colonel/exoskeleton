@@ -12,8 +12,8 @@ use exoskeleton_core::conversation::Conversation;
 use exoskeleton_core::plan::Plan;
 use exoskeleton_core::working_memory::WorkingMemory;
 use exoskeleton_core::{
-    ArtifactId, EpisodicSummary, EventEntry, ExoError, LongTermNote, RelationshipSnapshot,
-    StateSnapshot, ThreadContribution, VesselId,
+    ArtifactId, EpisodicSummary, EventEntry, ExecThreadContribution, ExoError, LongTermNote,
+    RelationshipSnapshot, StateSnapshot, ThreadContribution, VesselId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,8 @@ pub struct ContextSources<'a> {
     pub relationship_snapshot: Option<&'a RelationshipSnapshot>,
     /// Latest thread contributions (from ThreadRegistry, Sprint 6).
     pub thread_contributions: &'a [ThreadContribution],
+    /// Latest executable thread contributions.
+    pub exec_thread_contributions: &'a [ExecThreadContribution],
     /// Recent events (from EventLedger).
     pub recent_events: &'a [EventEntry],
     /// Episodic memory summaries (from MemoryStore).
@@ -148,6 +150,8 @@ pub struct SectionPriorities {
     pub working_memory: SectionAllocation,
     /// Latest cognitive thread outputs.
     pub thread_outputs: SectionAllocation,
+    /// Latest executable thread outputs.
+    pub exec_thread_outputs: SectionAllocation,
     /// Recent events from the EventLedger.
     pub recent_events: SectionAllocation,
     /// Episodic memory summaries.
@@ -193,7 +197,11 @@ impl Default for SectionPriorities {
             },
             thread_outputs: SectionAllocation {
                 priority: SectionPriority::Medium,
-                target_pct: 0.11,
+                target_pct: 0.055,
+            },
+            exec_thread_outputs: SectionAllocation {
+                priority: SectionPriority::Medium,
+                target_pct: 0.055,
             },
             recent_events: SectionAllocation {
                 priority: SectionPriority::Medium,
@@ -224,6 +232,7 @@ impl SectionPriorities {
             ("conversations", &self.conversations),
             ("working_memory", &self.working_memory),
             ("thread_outputs", &self.thread_outputs),
+            ("exec_thread_outputs", &self.exec_thread_outputs),
             ("recent_events", &self.recent_events),
             ("episodic_memory", &self.episodic_memory),
             ("long_term_memory", &self.long_term_memory),
@@ -550,6 +559,11 @@ impl ContextCompiler {
                 p.thread_outputs.priority,
             ),
             (
+                "exec_thread_outputs",
+                render::render_exec_thread_outputs(sources.exec_thread_contributions),
+                p.exec_thread_outputs.priority,
+            ),
+            (
                 "recent_events",
                 render::render_recent_events(sources.recent_events),
                 p.recent_events.priority,
@@ -583,8 +597,8 @@ struct SectionState {
 mod tests {
     use chrono::Utc;
     use exoskeleton_core::{
-        ArtifactId, BudgetStatus, EventType, LedgerEntryId, PrincipalId, PrincipalSummary,
-        ThreadId, ThreadStatus, ThreadSummary, VesselStatus,
+        ArtifactId, BudgetStatus, EventType, ExecThreadKind, LedgerEntryId, PrincipalId,
+        PrincipalSummary, ThreadId, ThreadStatus, ThreadSummary, VesselStatus,
     };
 
     use super::*;
@@ -619,6 +633,7 @@ mod tests {
             snapshot,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -643,6 +658,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -671,6 +687,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -777,6 +794,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &notes,
@@ -815,6 +833,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &[],
@@ -843,6 +862,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -884,6 +904,14 @@ mod tests {
             artifact_id: ArtifactId::from_content(b"tc"),
             summary: "Thread analysis complete".into(),
         }];
+        let exec_contributions = vec![ExecThreadContribution {
+            thread_id: ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            artifact_id: ArtifactId::from_content(b"etc-order"),
+            summary: "Prepared code edit".into(),
+            proposal_id: Some("proposal-order".into()),
+            proposed_action_summary: Some("Edit src/lib.rs".into()),
+        }];
 
         let events = vec![EventEntry {
             id: LedgerEntryId::new(),
@@ -919,6 +947,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: Some(&rel_snap),
             thread_contributions: &contributions,
+            exec_thread_contributions: &exec_contributions,
             recent_events: &events,
             episodic_summaries: &episodic,
             long_term_notes: &notes,
@@ -937,12 +966,13 @@ mod tests {
         let prompt = &result.prompt;
 
         // Verify fixed order: system, state, plan, relationship, conversations,
-        // working_memory, threads, events, episodic, long_term
+        // working_memory, threads, exec threads, events, episodic, long_term
         let sys_pos = prompt.find("=== SYSTEM ===").unwrap();
         let state_pos = prompt.find("=== STATE").unwrap();
         let rel_pos = prompt.find("=== RELATIONSHIPS ===").unwrap();
         let wm_pos = prompt.find("=== WORKING MEMORY ===").unwrap();
         let thread_pos = prompt.find("=== THREAD OUTPUTS ===").unwrap();
+        let exec_thread_pos = prompt.find("=== EXEC THREAD OUTPUTS ===").unwrap();
         let events_pos = prompt.find("=== RECENT EVENTS ===").unwrap();
         let ep_pos = prompt.find("=== EPISODIC MEMORY ===").unwrap();
         let lt_pos = prompt.find("=== LONG-TERM MEMORY ===").unwrap();
@@ -951,7 +981,8 @@ mod tests {
         assert!(state_pos < rel_pos);
         assert!(rel_pos < wm_pos);
         assert!(wm_pos < thread_pos);
-        assert!(thread_pos < events_pos);
+        assert!(thread_pos < exec_thread_pos);
+        assert!(exec_thread_pos < events_pos);
         assert!(events_pos < ep_pos);
         assert!(ep_pos < lt_pos);
     }
@@ -980,6 +1011,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &events,
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -1024,6 +1056,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &[],
@@ -1078,6 +1111,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &episodic,
             long_term_notes: &notes,
@@ -1108,8 +1142,8 @@ mod tests {
         let sources = make_full_sources(&snap);
         let result = compiler.compile(&sources).unwrap();
 
-        // Should have entries for all 12 sections after E10-S2 additions.
-        assert_eq!(result.sections.len(), 12);
+        // Should have entries for all 13 sections after exec-thread additions.
+        assert_eq!(result.sections.len(), 13);
         let names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"system"));
         assert!(names.contains(&"state_snapshot"));
@@ -1120,6 +1154,7 @@ mod tests {
         assert!(names.contains(&"conversations"));
         assert!(names.contains(&"working_memory"));
         assert!(names.contains(&"thread_outputs"));
+        assert!(names.contains(&"exec_thread_outputs"));
         assert!(names.contains(&"recent_events"));
         assert!(names.contains(&"episodic_memory"));
         assert!(names.contains(&"long_term_memory"));
@@ -1146,6 +1181,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &notes,
@@ -1191,6 +1227,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -1222,6 +1259,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -1314,6 +1352,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &events,
             episodic_summaries: &episodic,
             long_term_notes: &notes,
@@ -1375,6 +1414,14 @@ mod tests {
             artifact_id: ArtifactId::from_content(b"tc"),
             summary: "Analysis complete".into(),
         }];
+        let exec_contributions = vec![ExecThreadContribution {
+            thread_id: ThreadId::new(),
+            kind: ExecThreadKind::Coding,
+            artifact_id: ArtifactId::from_content(b"etc"),
+            summary: "Prepared code edit".into(),
+            proposal_id: Some("proposal-1".into()),
+            proposed_action_summary: Some("Edit src/lib.rs".into()),
+        }];
 
         let events = vec![EventEntry {
             id: LedgerEntryId::new(),
@@ -1410,6 +1457,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: Some(&rel_snap),
             thread_contributions: &contributions,
+            exec_thread_contributions: &exec_contributions,
             recent_events: &events,
             episodic_summaries: &episodic,
             long_term_notes: &notes,
@@ -1431,6 +1479,7 @@ mod tests {
         assert!(result.prompt.contains("=== RELATIONSHIPS ==="));
         assert!(result.prompt.contains("=== WORKING MEMORY ==="));
         assert!(result.prompt.contains("=== THREAD OUTPUTS ==="));
+        assert!(result.prompt.contains("=== EXEC THREAD OUTPUTS ==="));
         assert!(result.prompt.contains("=== RECENT EVENTS ==="));
         assert!(result.prompt.contains("=== EPISODIC MEMORY ==="));
         assert!(result.prompt.contains("=== LONG-TERM MEMORY ==="));
@@ -1448,6 +1497,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -1476,6 +1526,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &notes,
@@ -1519,6 +1570,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &notes,
@@ -1567,6 +1619,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],
@@ -1645,6 +1698,7 @@ mod tests {
             snapshot: &snap,
             relationship_snapshot: None,
             thread_contributions: &[],
+            exec_thread_contributions: &[],
             recent_events: &[],
             episodic_summaries: &[],
             long_term_notes: &[],

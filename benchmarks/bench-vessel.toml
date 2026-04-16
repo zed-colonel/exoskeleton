@@ -30,16 +30,9 @@ default_backend = "frontier"
 max_output_tokens = 4096
 timeout_secs = 120
 
-# --- Inner Loop ---
-[inner_loop]
+# --- Coding Session ---
+[coding_thread]
 enabled = true
-# Increased from 25 to 35 to provide headroom for medium/hard tasks.
-# Easy tasks use 6-14 steps; 35 accommodates multi-file edits.
-max_steps_per_tick = 35
-max_tokens_per_session = 500000
-timeout_secs = 300
-context_window_size = 3
-doom_loop_threshold = 3
 
 # --- Engine Timing ---
 [cognitive]

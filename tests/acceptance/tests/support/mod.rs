@@ -55,7 +55,7 @@ pub fn test_config(dir: &Path) -> VesselConfig {
         max_watches: 20,
         extra_destructive_tools: vec![],
         connectors_dir: None,
-        inner_loop: exoskeleton_host::config::InnerLoopConfig::default(),
+        coding_thread: exoskeleton_host::config::CodingThreadConfig::default(),
         tool_policy: exoskeleton_host::kernel::policy::ToolPolicyConfig::default(),
     }
 }
