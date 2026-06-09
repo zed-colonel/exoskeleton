@@ -208,9 +208,6 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
-            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
-                crate::exec_threads::InMemoryExecThreadStore::new(),
-            ))),
             relationship_ledger: ledger,
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,

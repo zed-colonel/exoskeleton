@@ -4,7 +4,7 @@
 //! vessel state for safety threats. Produces recommendations only — NEVER
 //! invokes tools (IBP §3.4).
 
-use exoskeleton_core::{ThreadPriority, ThreadSchedule, ThreadSpec};
+use exoskeleton_core::{ThreadFlavor, ThreadPriority, ThreadRole, ThreadSchedule, ThreadSpec};
 use serde::{Deserialize, Serialize};
 
 use super::THREAT_MONITOR_ID;
@@ -38,11 +38,14 @@ Respond with JSON:
 pub fn spec() -> ThreadSpec {
     ThreadSpec {
         thread_id: THREAT_MONITOR_ID,
+        role: ThreadRole::ThreatMonitor,
+        flavor: ThreadFlavor::Cognitive,
         name: "Threat Monitor".into(),
         charter: THREAT_MONITOR_CHARTER.into(),
         priority: ThreadPriority::Critical,
         token_budget: 4096,
         schedule: ThreadSchedule::EveryTick,
+        workspace_root: None,
     }
 }
 

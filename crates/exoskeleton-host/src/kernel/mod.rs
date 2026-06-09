@@ -9,7 +9,6 @@ pub mod compaction;
 pub mod context_window;
 pub mod decide;
 pub mod diff_tracker;
-pub mod exec_threads;
 pub mod git_context;
 pub mod orient;
 pub mod perceive;
@@ -24,7 +23,6 @@ pub mod watches;
 
 use std::sync::Arc;
 
-use crate::exec_threads::ExecThreadRegistry;
 use actionqueue_executor_local::{CancellationToken, HandlerOutput};
 use chrono::Utc;
 use exoskeleton_core::conversation::ConversationStore;
@@ -41,7 +39,6 @@ use exoskeleton_threads::ThreadRegistry;
 pub use types::{
     ActResult, ActionExecution, AlignmentResult, DecisionResult, MasterLoopPayload,
     OrientationResult, PerceptionResult, PlannedAction, ReflectionResult, SnapshotDelta,
-    ThreadPayload,
 };
 use worldinterface_host::host::EmbeddedHost;
 
@@ -66,10 +63,8 @@ pub struct KernelContext {
     pub mission: String,
     pub max_output_tokens: u64,
     pub master_loop_interval_secs: u64,
-    /// Thread registry for cognitive thread lifecycle management (Sprint 6).
+    /// Unified thread registry for both cognitive and executable thread lifecycle management.
     pub thread_registry: Arc<ThreadRegistry>,
-    /// Executable thread registry for proposal-producing worker threads.
-    pub exec_thread_registry: Arc<ExecThreadRegistry>,
     /// Relationship ledger for relational signal persistence (Sprint 8).
     pub relationship_ledger: Arc<dyn RelationshipLedger>,
     /// Conversation store for multi-turn interaction tracking (E1-S2).
@@ -254,46 +249,19 @@ pub fn run_tick(
     }
 
     // 7.5 Execute due threads (Sprint 6)
-    let thread_contributions = match threads::execute_due_threads(
+    let thread_contributions = threads::execute_due_registered_threads(
         handler,
         kernel,
         &snapshot,
         &perception,
         tick_id,
         cancellation,
-    ) {
-        Ok(tc) => tc,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "thread execution failed; continuing without threads"
-            );
-            Vec::new()
-        }
-    };
-
-    let exec_thread_contributions = match exec_threads::execute_due_exec_threads(
-        handler,
-        kernel,
-        &snapshot,
-        &perception,
-        tick_id,
-        cancellation,
-    ) {
-        Ok(tc) => tc,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "exec thread execution failed; continuing without exec threads"
-            );
-            Vec::new()
-        }
-    };
+    );
 
     // Merge thread outputs into perception
     let perception = PerceptionResult {
-        thread_outputs: thread_contributions,
-        exec_thread_outputs: exec_thread_contributions,
+        thread_outputs: thread_contributions.thread_outputs,
+        exec_thread_outputs: thread_contributions.exec_thread_outputs,
         ..perception
     };
 
@@ -340,8 +308,7 @@ pub fn run_tick(
     };
     let decision = annotate_exec_thread_origins(kernel, decision);
     let decision = reconcile_exec_thread_proposals(kernel, decision);
-    let suppress_external_actions =
-        should_hold_bounded_coding_session_idle(kernel, &perception);
+    let suppress_external_actions = should_hold_bounded_coding_session_idle(kernel, &perception);
     let decision = suppress_actions_for_bounded_coding_idle(decision, suppress_external_actions);
 
     if let Some(requested_mode) = decision.vessel_mode_request {
@@ -594,7 +561,7 @@ pub fn run_tick(
             }
 
             let should_wake_for_exec = kernel
-                .exec_thread_registry
+                .thread_registry
                 .exec_thread_summaries()
                 .map(|summaries| {
                     summaries.into_iter().any(|s| {
@@ -646,26 +613,36 @@ fn annotate_exec_thread_origins(
     kernel: &KernelContext,
     mut decision: DecisionResult,
 ) -> DecisionResult {
-    let proposals: Vec<(exoskeleton_core::ThreadId, String, String)> = kernel
-        .exec_thread_registry
-        .list()
+    let proposals: Vec<(
+        exoskeleton_core::ThreadId,
+        String,
+        serde_json::Value,
+        String,
+    )> = kernel
+        .thread_registry
+        .list_executable()
         .ok()
         .into_iter()
         .flatten()
         .filter(|(spec, status)| {
-            spec.kind == exoskeleton_core::ExecThreadKind::Coding
+            spec.role == exoskeleton_core::ThreadRole::Coding
                 && *status != exoskeleton_core::ExecThreadStatus::Failed
         })
         .filter_map(|(spec, _)| {
             kernel
-                .exec_thread_registry
-                .recent_outputs(spec.thread_id, 1)
+                .thread_registry
+                .recent_exec_outputs(spec.thread_id, 1)
                 .ok()
                 .and_then(|mut outputs| outputs.pop())
                 .and_then(|output| {
-                    output
-                        .proposed_action
-                        .map(|proposal| (spec.thread_id, proposal.tool_name, proposal.proposal_id))
+                    output.proposed_action.map(|proposal| {
+                        (
+                            spec.thread_id,
+                            proposal.tool_name,
+                            proposal.params,
+                            proposal.proposal_id,
+                        )
+                    })
                 })
         })
         .collect();
@@ -674,10 +651,10 @@ fn annotate_exec_thread_origins(
         if action.origin_exec_thread_id.is_some() {
             continue;
         }
-        let mut matches = proposals
-            .iter()
-            .filter(|(_, tool_name, _)| tool_name == &action.tool_name);
-        if let Some((thread_id, _, proposal_id)) = matches.next() {
+        let mut matches = proposals.iter().filter(|(_, tool_name, params, _)| {
+            tool_name == &action.tool_name && params == &action.params
+        });
+        if let Some((thread_id, _, _, proposal_id)) = matches.next() {
             if matches.next().is_none() {
                 action.origin_exec_thread_id = Some(*thread_id);
                 action.proposal_id = Some(proposal_id.clone());
@@ -693,7 +670,7 @@ fn should_hold_bounded_coding_session_idle(
     perception: &PerceptionResult,
 ) -> bool {
     let summaries = kernel
-        .exec_thread_registry
+        .thread_registry
         .exec_thread_summaries()
         .unwrap_or_default();
     bounded_coding_idle_visible(
@@ -744,19 +721,9 @@ fn reconcile_exec_thread_proposals(
         return decision;
     }
 
-    if decision
-        .actions
-        .iter()
-        .any(|action| is_mutating_code_action(&action.tool_name))
-    {
-        return decision;
-    }
-
-    if !decision
-        .actions
-        .iter()
-        .all(|action| is_exploratory_code_action(&action.tool_name))
-    {
+    if !decision.actions.iter().all(|action| {
+        is_exploratory_code_action(&action.tool_name) || is_mutating_code_action(&action.tool_name)
+    }) {
         return decision;
     }
 
@@ -780,6 +747,14 @@ fn reconcile_exec_thread_proposals(
     let Some(proposal) = output.proposed_action.as_ref() else {
         return decision;
     };
+    if decision.actions.len() == 1 {
+        let action = &mut decision.actions[0];
+        if action.tool_name == proposal.tool_name && action.params == proposal.params {
+            action.origin_exec_thread_id = Some(thread_id);
+            action.proposal_id = Some(proposal.proposal_id.clone());
+            return decision;
+        }
+    }
 
     tracing::info!(
         thread_id = %thread_id,
@@ -807,19 +782,19 @@ fn latest_coding_exec_thread_proposals(
     exoskeleton_core::ExecThreadOutput,
 )> {
     kernel
-        .exec_thread_registry
-        .list()
+        .thread_registry
+        .list_executable()
         .ok()
         .into_iter()
         .flatten()
         .filter(|(spec, status)| {
-            spec.kind == exoskeleton_core::ExecThreadKind::Coding
+            spec.role == exoskeleton_core::ThreadRole::Coding
                 && *status != exoskeleton_core::ExecThreadStatus::Failed
         })
         .filter_map(|(spec, _)| {
             kernel
-                .exec_thread_registry
-                .recent_outputs(spec.thread_id, 1)
+                .thread_registry
+                .recent_exec_outputs(spec.thread_id, 1)
                 .ok()
                 .and_then(|mut outputs| outputs.pop())
                 .map(|output| (spec.thread_id, output))
@@ -830,7 +805,17 @@ fn latest_coding_exec_thread_proposals(
 fn is_exploratory_code_action(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "code.read" | "code.grep" | "code.ls" | "code.glob" | "fs.read"
+        "code.read"
+            | "code.read_symbol"
+            | "code.grep"
+            | "code.ls"
+            | "code.glob"
+            | "repo.context"
+            | "repo.locate"
+            | "code.symbol"
+            | "code.references"
+            | "code.impls"
+            | "fs.read"
     )
 }
 
@@ -854,8 +839,8 @@ mod tests {
     use exoskeleton_core::VesselMode;
 
     use crate::kernel::diff_tracker::DiffTracker;
-    use crate::kernel::{DecisionResult, SnapshotDelta};
     use crate::kernel::types::{ActResult, ActionExecution, PlannedAction};
+    use crate::kernel::{DecisionResult, SnapshotDelta};
 
     /// E8S2-T13: `read_paths_this_tick` is cleared at the start of each tick.
     ///
@@ -961,9 +946,15 @@ mod tests {
     #[test]
     fn exploratory_code_actions_include_legacy_listing_tools() {
         assert!(super::is_exploratory_code_action("code.read"));
+        assert!(super::is_exploratory_code_action("code.read_symbol"));
         assert!(super::is_exploratory_code_action("code.grep"));
         assert!(super::is_exploratory_code_action("code.ls"));
         assert!(super::is_exploratory_code_action("code.glob"));
+        assert!(super::is_exploratory_code_action("repo.context"));
+        assert!(super::is_exploratory_code_action("repo.locate"));
+        assert!(super::is_exploratory_code_action("code.symbol"));
+        assert!(super::is_exploratory_code_action("code.references"));
+        assert!(super::is_exploratory_code_action("code.impls"));
         assert!(!super::is_exploratory_code_action("code.edit"));
     }
 
@@ -983,7 +974,9 @@ mod tests {
         }];
 
         assert!(super::bounded_coding_idle_visible(true, false, &summaries));
-        assert!(!super::bounded_coding_idle_visible(false, false, &summaries));
+        assert!(!super::bounded_coding_idle_visible(
+            false, false, &summaries
+        ));
         assert!(!super::bounded_coding_idle_visible(true, true, &summaries));
     }
 

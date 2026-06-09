@@ -4,7 +4,7 @@
 //! for quality, coherence, and mission alignment. Produces recommendations
 //! only — NEVER invokes tools (IBP §3.4).
 
-use exoskeleton_core::{ThreadPriority, ThreadSchedule, ThreadSpec};
+use exoskeleton_core::{ThreadFlavor, ThreadPriority, ThreadRole, ThreadSchedule, ThreadSpec};
 use serde::{Deserialize, Serialize};
 
 use super::SELF_CRITIQUE_ID;
@@ -43,11 +43,14 @@ Respond with JSON:
 pub fn spec() -> ThreadSpec {
     ThreadSpec {
         thread_id: SELF_CRITIQUE_ID,
+        role: ThreadRole::SelfCritique,
+        flavor: ThreadFlavor::Cognitive,
         name: "Self-Critique".into(),
         charter: SELF_CRITIQUE_CHARTER.into(),
         priority: ThreadPriority::High,
         token_budget: 4096,
         schedule: ThreadSchedule::EveryTick,
+        workspace_root: None,
     }
 }
 

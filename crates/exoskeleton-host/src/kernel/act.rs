@@ -59,8 +59,17 @@ fn action_target_summary(action: &super::types::PlannedAction) -> String {
         .unwrap_or_else(|| action.params.to_string())
 }
 
+fn action_target_summary_with_result(
+    action: &super::types::PlannedAction,
+    result_value: Option<&serde_json::Value>,
+) -> String {
+    resolved_action_path(&action.tool_name, &action.params, result_value)
+        .map(str::to_owned)
+        .unwrap_or_else(|| action_target_summary(action))
+}
+
 fn is_read_action_type(tool_name: &str) -> bool {
-    matches!(tool_name, "code.read" | "fs.read")
+    matches!(tool_name, "code.read" | "code.read_symbol" | "fs.read")
 }
 
 fn is_mutating_action_type(tool_name: &str) -> bool {
@@ -72,8 +81,13 @@ fn is_mutating_action_type(tool_name: &str) -> bool {
 
 fn path_requirement_for_tool(tool_name: &str) -> Option<PathRequirement> {
     match tool_name {
-        "code.read" | "fs.read" | "code.edit" => Some(PathRequirement::ExistingFile),
-        "code.grep" | "code.ls" | "code.glob" => Some(PathRequirement::ExistingPath),
+        "code.read" | "fs.read" | "code.edit" | "code.apply_patch" => {
+            Some(PathRequirement::ExistingFile)
+        }
+        "code.grep" | "code.ls" | "code.glob" | "repo.context" | "repo.locate" | "code.symbol"
+        | "code.read_symbol" | "code.references" | "code.impls" | "code.test" => {
+            Some(PathRequirement::ExistingPath)
+        }
         _ => None,
     }
 }
@@ -178,11 +192,7 @@ fn recent_path_context(kernel: &KernelContext, target_path: &str) -> Option<Rece
     None
 }
 
-fn satisfies_read_before_write(
-    kernel: &KernelContext,
-    tool_name: &str,
-    target_path: &str,
-) -> bool {
+fn satisfies_read_before_write(kernel: &KernelContext, tool_name: &str, target_path: &str) -> bool {
     match recent_path_context(kernel, target_path) {
         Some(RecentPathContext::Read) => true,
         Some(RecentPathContext::Mutation) => {
@@ -666,7 +676,7 @@ pub fn act(
 
         let record = ActionRecord {
             action_type: action.tool_name.clone(),
-            target: action_target_summary(action),
+            target: action_target_summary_with_result(action, result_value.as_ref().ok()),
             receipt_ref,
             outcome,
             origin_exec_thread_id: action.origin_exec_thread_id,
@@ -729,6 +739,12 @@ pub fn act(
                 .inc();
         }
 
+        let resolved_read_path = resolved_action_path(
+            &action.tool_name,
+            &action.params,
+            result_value.as_ref().ok(),
+        )
+        .map(str::to_owned);
         let track_read_path = result_value.is_ok();
 
         let pending_question = action.tool_name == "agent.ask_user"
@@ -756,9 +772,7 @@ pub fn act(
         });
 
         if track_read_path {
-            if let (Some(desc), Some(path)) =
-                (descriptor.as_ref(), extract_action_path(&action.params))
-            {
+            if let (Some(desc), Some(path)) = (descriptor.as_ref(), resolved_read_path.as_deref()) {
                 if desc.is_read_only {
                     if let Ok(mut guard) = kernel.read_paths_this_tick.lock() {
                         guard.insert(path.to_string());
@@ -853,6 +867,24 @@ fn extract_action_path(params: &serde_json::Value) -> Option<&str> {
         .or_else(|| params.get("path").and_then(serde_json::Value::as_str))
 }
 
+fn resolved_action_path<'a>(
+    tool_name: &str,
+    params: &'a serde_json::Value,
+    result_value: Option<&'a serde_json::Value>,
+) -> Option<&'a str> {
+    if tool_name == "code.read_symbol" {
+        if let Some(result_value) = result_value {
+            if let Some(file_path) = result_value
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+            {
+                return Some(file_path);
+            }
+        }
+    }
+    extract_action_path(params)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -898,9 +930,6 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
-            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
-                crate::exec_threads::InMemoryExecThreadStore::new(),
-            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -965,9 +994,6 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
-            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
-                crate::exec_threads::InMemoryExecThreadStore::new(),
-            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -1645,8 +1671,7 @@ mod tests {
 
         kernel.read_paths_this_tick.lock().unwrap().clear();
 
-        let follow_up_alignment =
-            alignment_with(vec![code_edit_action(&file, "new\n", "newer\n")]);
+        let follow_up_alignment = alignment_with(vec![code_edit_action(&file, "new\n", "newer\n")]);
         let next_tick_id = TickId::new();
         let follow_up_result = tokio::task::spawn_blocking({
             let kernel = clone_kernel_for_blocking(&kernel);
@@ -2067,7 +2092,6 @@ mod tests {
             max_output_tokens: kernel.max_output_tokens,
             master_loop_interval_secs: kernel.master_loop_interval_secs,
             thread_registry: kernel.thread_registry.clone(),
-            exec_thread_registry: kernel.exec_thread_registry.clone(),
             relationship_ledger: kernel.relationship_ledger.clone(),
             conversation_store: kernel.conversation_store.clone(),
             budget_tracker: kernel.budget_tracker.clone(),

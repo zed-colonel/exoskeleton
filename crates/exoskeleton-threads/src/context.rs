@@ -192,7 +192,8 @@ pub fn compile_thread_context(
 #[cfg(test)]
 mod tests {
     use exoskeleton_core::{
-        ArtifactId, ThreadId, ThreadPriority, ThreadSchedule, ThreadSpec, TickId, VesselId,
+        ArtifactId, ThreadFlavor, ThreadId, ThreadPriority, ThreadRole, ThreadSchedule, ThreadSpec,
+        TickId, VesselId,
     };
     use exoskeleton_memory::ApproximateTokenCounter;
 
@@ -201,11 +202,14 @@ mod tests {
     fn test_thread(name: &str, budget: u64) -> ThreadSpec {
         ThreadSpec {
             thread_id: ThreadId::new(),
+            role: ThreadRole::Other,
+            flavor: ThreadFlavor::Cognitive,
             name: name.into(),
             charter: "Monitor for alignment threats".into(),
             priority: ThreadPriority::High,
             token_budget: budget,
             schedule: ThreadSchedule::EveryTick,
+            workspace_root: None,
         }
     }
 

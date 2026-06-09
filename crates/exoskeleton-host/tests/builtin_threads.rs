@@ -14,7 +14,6 @@ use exoskeleton_core::{
     ThreadSchedule, ThreadStatus, VesselId,
 };
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
-use exoskeleton_host::exec_threads::{ExecThreadRegistry, InMemoryExecThreadStore};
 use exoskeleton_host::inbox::InMemoryInbox;
 use exoskeleton_host::kernel::{KernelContext, WiHostSlot};
 use exoskeleton_host::storage::StorageManager;
@@ -201,7 +200,6 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_output_tokens: kernel.max_output_tokens,
         master_loop_interval_secs: kernel.master_loop_interval_secs,
         thread_registry: kernel.thread_registry.clone(),
-        exec_thread_registry: kernel.exec_thread_registry.clone(),
         relationship_ledger: kernel.relationship_ledger.clone(),
         conversation_store: kernel.conversation_store.clone(),
         budget_tracker: kernel.budget_tracker.clone(),
@@ -287,9 +285,6 @@ async fn setup_builtin_threads(
         max_output_tokens: 4096,
         master_loop_interval_secs: 60,
         thread_registry,
-        exec_thread_registry: Arc::new(ExecThreadRegistry::new(Arc::new(
-            InMemoryExecThreadStore::new(),
-        ))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
         conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
@@ -367,9 +362,6 @@ async fn setup_builtin_threads_custom(
         max_output_tokens: 4096,
         master_loop_interval_secs: 60,
         thread_registry,
-        exec_thread_registry: Arc::new(ExecThreadRegistry::new(Arc::new(
-            InMemoryExecThreadStore::new(),
-        ))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
         conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,

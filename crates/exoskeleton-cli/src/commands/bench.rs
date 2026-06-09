@@ -10,8 +10,8 @@ use crate::commands::start::{apply_llm_overrides, LlmOverrideOptions};
 use chrono::Utc;
 use exoskeleton_host::benchmark::{
     format_comparison, format_report, format_step_verbose, load_suite, load_task_spec,
-    prepare_workspace, run_verification, ContextUtilization, HeadlessRunner, SuiteResult,
-    TaskResult, TokenMetrics,
+    prepare_workspace, run_verification, BehaviorMetrics, ContextUtilization, HeadlessRunner,
+    SuiteResult, TaskResult, TokenMetrics,
 };
 
 /// Run the `exo bench` command.
@@ -254,6 +254,7 @@ async fn run_benchmark_task_dry(
         step_trace: vec![],
         context_utilization: ContextUtilization::default(),
         tick_details: vec![],
+        behavior_metrics: BehaviorMetrics::default(),
         harness_anomalies: vec![],
         difficulty: spec.task.difficulty.clone(),
         language: spec.task.language.clone(),
@@ -490,6 +491,12 @@ mod tests {
             step_trace: vec![],
             context_utilization: ContextUtilization::default(),
             tick_details: vec![],
+            behavior_metrics: BehaviorMetrics {
+                first_file_read_step: Some(2),
+                first_mutation_step: Some(5),
+                search_steps_before_first_read: 1,
+                ..BehaviorMetrics::default()
+            },
             harness_anomalies: vec![],
             difficulty: Some("easy".into()),
             language: Some("rust".into()),

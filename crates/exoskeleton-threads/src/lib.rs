@@ -11,21 +11,27 @@
 pub mod builtin;
 pub mod context;
 pub mod registry;
+pub mod runtime;
 pub mod scheduling;
 pub mod store;
 
 pub use builtin::{
-    register_builtin_threads, CharterProposalDraft, CognitivePattern, CreativeSynthesis,
-    Hypothesis, MemoryConsolidation, MemoryNote, MetaCognitionAnalysis, NovelConnection,
-    PatternSeverity, SelfCritique, ThreadConfigOverrides, Threat, ThreatAssessment, ThreatSeverity,
-    WatchSuggestion, CREATIVE_SYNTHESIS_ID, MEMORY_CONSOLIDATION_ID, META_COGNITION_ID,
+    register_builtin_coding_thread, register_builtin_threads, CharterProposalDraft,
+    CodingPolicyProfile, CognitivePattern, CreativeSynthesis, Hypothesis, MemoryConsolidation,
+    MemoryNote, MetaCognitionAnalysis, NovelConnection, PatternSeverity, SelfCritique,
+    ThreadConfigOverrides, Threat, ThreatAssessment, ThreatSeverity, WatchSuggestion,
+    CODING_THREAD_ID, CREATIVE_SYNTHESIS_ID, MEMORY_CONSOLIDATION_ID, META_COGNITION_ID,
     SELF_CRITIQUE_ID, THREAT_MONITOR_ID,
 };
 pub use context::compile_thread_context;
 pub use registry::ThreadRegistry;
+pub use runtime::{
+    coding_feedback_from_actions, CodingActionFeedback, ExecutableThreadContext,
+    ExecutableThreadPerception, ThreadLlmResponse, ThreadRuntime,
+};
 pub use scheduling::is_thread_due;
 use serde::{Deserialize, Serialize};
-pub use store::{InMemoryThreadStore, ThreadStore};
+pub use store::{InMemoryThreadStore, RegisteredThreadStatus, ThreadStore};
 
 /// Structured response from a cognitive thread's LLM call.
 ///

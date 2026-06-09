@@ -12,7 +12,7 @@ use exoskeleton_core::tick::{
 use exoskeleton_core::working_memory::WorkingMemoryOp;
 use exoskeleton_core::{
     ArtifactId, EventEntry, MessageEnvelope, PlanTaskId, RelationshipRecord, RelationshipSnapshot,
-    ThreadId, TickId, VesselId, VesselMode,
+    ThreadId, VesselId, VesselMode,
 };
 use exoskeleton_memory::CompiledContext;
 use serde::{Deserialize, Serialize};
@@ -21,13 +21,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MasterLoopPayload {
     pub vessel_id: VesselId,
-}
-
-/// Payload for thread execution tasks on the Cognitive AQ.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadPayload {
-    pub thread_id: ThreadId,
-    pub tick_id: TickId,
 }
 
 /// Output of the Perceive step.

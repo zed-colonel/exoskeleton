@@ -4,7 +4,7 @@
 //! experience to find unexpected connections between domains, generate
 //! testable hypotheses, and suggest experiments.
 
-use exoskeleton_core::{ThreadPriority, ThreadSchedule, ThreadSpec};
+use exoskeleton_core::{ThreadFlavor, ThreadPriority, ThreadRole, ThreadSchedule, ThreadSpec};
 use serde::{Deserialize, Serialize};
 
 use super::CREATIVE_SYNTHESIS_ID;
@@ -57,11 +57,14 @@ Respond with JSON:
 pub fn spec() -> ThreadSpec {
     ThreadSpec {
         thread_id: CREATIVE_SYNTHESIS_ID,
+        role: ThreadRole::CreativeSynthesis,
+        flavor: ThreadFlavor::Cognitive,
         name: "Creative-Synthesis".into(),
         charter: CREATIVE_SYNTHESIS_CHARTER.into(),
         priority: ThreadPriority::Background,
         token_budget: 8192,
         schedule: ThreadSchedule::EveryNTicks(15),
+        workspace_root: None,
     }
 }
 

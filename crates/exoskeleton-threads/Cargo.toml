@@ -12,7 +12,11 @@ categories = ["asynchronous", "concurrency"]
 [dependencies]
 exoskeleton-core = { workspace = true }
 exoskeleton-memory = { workspace = true }
+actionqueue-executor-local = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

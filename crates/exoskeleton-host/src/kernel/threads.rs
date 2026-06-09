@@ -1,25 +1,78 @@
-//! Thread execution within the master loop.
+//! Unified thread execution within the master loop.
 //!
-//! Cognitive threads are sub-tasks that run between Perceive and Orient
-//! in the PODAARA cycle. Each thread gets a compiled context slice, calls
-//! the LLM backend directly (H-1 deadlock prevention), and produces
-//! recommendation artifacts.
-//!
-//! Threads NEVER invoke tools (IBP §3.4) and NEVER cross to the Tool AQ.
-//! Thread outputs are artifacts only (IBP §4.3).
+//! Both cognitive and executable threads run between Perceive and Orient in
+//! the PODAARA cycle. Cognitive threads produce recommendation artifacts.
+//! Executable threads produce proposal/state artifacts. Neither path crosses
+//! the Tool AQ directly; only the Act step does that.
 
 use actionqueue_executor_local::CancellationToken;
 use exoskeleton_core::llm::{LlmMessage, LlmRequest, LlmRole};
-use exoskeleton_core::tick::ThreadContribution;
+use exoskeleton_core::tick::{ExecThreadContribution, ThreadContribution};
 use exoskeleton_core::{
-    Artifact, ArtifactId, ArtifactKind, EventEntry, EventType, ExoError, LedgerEntryId, LiveEvent,
-    StateSnapshot, ThreadOutput, ThreadSpec, TickId,
+    Artifact, ArtifactId, ArtifactKind, EventEntry, EventType, ExecThreadLiveDetail, ExoError,
+    LedgerEntryId, LiveEvent, StateSnapshot, ThreadOutput, ThreadSpec, TickId,
 };
 use exoskeleton_memory::ApproximateTokenCounter;
-use exoskeleton_threads::{compile_thread_context, ThreadResponse};
+use exoskeleton_threads::builtin::{execute_coding_thread, should_run_coding_thread};
+use exoskeleton_threads::runtime::SemanticActionFeedback;
+use exoskeleton_threads::{
+    coding_feedback_from_actions, compile_thread_context, ExecutableThreadContext,
+    ExecutableThreadPerception, ThreadResponse, ThreadRuntime,
+};
+use serde_json::Value;
 
 use super::{KernelContext, PerceptionResult};
 use crate::cognitive_engine::CognitiveHandler;
+
+#[derive(Debug, Default)]
+pub struct ThreadExecutionContributions {
+    pub thread_outputs: Vec<ThreadContribution>,
+    pub exec_thread_outputs: Vec<ExecThreadContribution>,
+}
+
+pub fn execute_due_registered_threads(
+    handler: &CognitiveHandler,
+    kernel: &KernelContext,
+    snapshot: &StateSnapshot,
+    perception: &PerceptionResult,
+    tick_id: TickId,
+    cancellation: &CancellationToken,
+) -> ThreadExecutionContributions {
+    let thread_outputs =
+        match execute_due_threads(handler, kernel, snapshot, perception, tick_id, cancellation) {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "cognitive thread execution failed; continuing without cognitive threads"
+                );
+                Vec::new()
+            }
+        };
+
+    let exec_thread_outputs = match execute_due_executable_threads(
+        handler,
+        kernel,
+        snapshot,
+        perception,
+        tick_id,
+        cancellation,
+    ) {
+        Ok(outputs) => outputs,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "executable thread execution failed; continuing without executable threads"
+            );
+            Vec::new()
+        }
+    };
+
+    ThreadExecutionContributions {
+        thread_outputs,
+        exec_thread_outputs,
+    }
+}
 
 /// Execute a single cognitive thread for one tick.
 ///
@@ -431,6 +484,379 @@ pub fn execute_due_threads(
     Ok(contributions)
 }
 
+fn execute_due_executable_threads(
+    handler: &CognitiveHandler,
+    kernel: &KernelContext,
+    snapshot: &StateSnapshot,
+    perception: &PerceptionResult,
+    tick_id: TickId,
+    cancellation: &CancellationToken,
+) -> Result<Vec<ExecThreadContribution>, ExoError> {
+    let runtime = HostThreadRuntime { handler, kernel };
+    let exec_perception = ExecutableThreadPerception {
+        new_messages: perception.new_messages.clone(),
+        active_conversations: perception.active_conversations.clone(),
+        thread_outputs: perception.thread_outputs.clone(),
+        exec_thread_outputs: perception.exec_thread_outputs.clone(),
+        pending_action_results: perception.pending_action_results.clone(),
+    };
+
+    let mut contributions = Vec::new();
+    for (spec, status) in kernel.thread_registry.list_executable()? {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        if spec.role != exoskeleton_core::ThreadRole::Coding {
+            continue;
+        }
+
+        let local_state = kernel.thread_registry.local_state(spec.thread_id)?;
+        if !should_run_coding_thread(status, &exec_perception, &local_state) {
+            continue;
+        }
+
+        let output = execute_coding_thread(
+            &runtime,
+            ExecutableThreadContext {
+                spec: &spec,
+                snapshot,
+                perception: &exec_perception,
+                tick_id,
+            },
+            local_state,
+            &kernel.coding_thread_config.policy_profile,
+            handler.default_backend,
+            kernel.max_output_tokens,
+            cancellation,
+        )?;
+
+        let contribution = ExecThreadContribution {
+            thread_id: output.thread_id,
+            kind: output.kind,
+            artifact_id: output.artifact_id.clone(),
+            summary: output.summary.clone(),
+            proposal_id: output
+                .proposed_action
+                .as_ref()
+                .map(|p| p.proposal_id.clone()),
+            proposed_action_summary: output
+                .proposed_action
+                .as_ref()
+                .map(summarize_exec_thread_proposal),
+        };
+
+        kernel
+            .thread_registry
+            .update_executable_status(output.thread_id, output.status)?;
+        kernel
+            .thread_registry
+            .save_local_state(output.thread_id, &output.local_state)?;
+        kernel.thread_registry.save_exec_output(&output)?;
+
+        emit_exec_thread_update(kernel, snapshot.tick_number + 1, tick_id, &spec, &output);
+        contributions.push(contribution);
+    }
+
+    Ok(contributions)
+}
+
+fn emit_exec_thread_update(
+    kernel: &KernelContext,
+    tick_number: u64,
+    tick_id: TickId,
+    spec: &ThreadSpec,
+    output: &exoskeleton_core::ExecThreadOutput,
+) {
+    let summary = format!(
+        "Exec thread '{}' {:?}: {}",
+        spec.name, output.status, output.summary
+    );
+
+    let event = EventEntry {
+        id: LedgerEntryId::new(),
+        tick_id: Some(tick_id),
+        event_type: EventType::ExecThreadUpdated,
+        payload_ref: Some(output.artifact_id.clone()),
+        summary: summary.clone(),
+        timestamp: chrono::Utc::now(),
+    };
+    if let Err(e) = kernel.event_ledger.append(&event) {
+        tracing::warn!(error = %e, "failed to log exec thread update event");
+    }
+
+    let completion_reason = output.local_state.last_completion_reason.clone();
+    let detail = ExecThreadLiveDetail {
+        thread_id: output.thread_id,
+        kind: output.kind,
+        name: spec.name.clone(),
+        status: output.status,
+        work_phase: output.local_state.work_phase.clone(),
+        summary: output.summary.clone(),
+        proposal_id: output
+            .proposed_action
+            .as_ref()
+            .map(|p| p.proposal_id.clone()),
+        proposed_action_summary: output
+            .proposed_action
+            .as_ref()
+            .map(summarize_exec_thread_proposal),
+        evidence_complete: output.evidence_complete,
+        proposal_confidence: output.proposal_confidence,
+        completion_reason,
+    };
+
+    let _ = kernel.event_tx.send(LiveEvent {
+        event_type: EventType::ExecThreadUpdated,
+        summary,
+        exec_thread_detail: Some(detail),
+        ..LiveEvent::new(Some(tick_number))
+    });
+}
+
+struct HostThreadRuntime<'a> {
+    handler: &'a CognitiveHandler,
+    kernel: &'a KernelContext,
+}
+
+impl ThreadRuntime for HostThreadRuntime<'_> {
+    fn prompt(&self, key: &str) -> Option<String> {
+        self.kernel
+            .prompt_registry
+            .get(key)
+            .map(ToString::to_string)
+    }
+
+    fn put_artifact(&self, artifact: &Artifact) -> Result<ArtifactId, ExoError> {
+        self.kernel.artifact_store.put(artifact)
+    }
+
+    fn get_artifact_text(&self, artifact_id: &ArtifactId) -> Result<Option<String>, ExoError> {
+        Ok(self
+            .kernel
+            .artifact_store
+            .get(artifact_id)?
+            .and_then(|artifact| String::from_utf8(artifact.content).ok()))
+    }
+
+    fn llm_call(
+        &self,
+        request: &LlmRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<exoskeleton_threads::ThreadLlmResponse, ExoError> {
+        let result = crate::llm::direct::handler_direct_llm_call(
+            self.handler,
+            self.kernel,
+            request,
+            cancellation,
+        )?;
+        Ok(exoskeleton_threads::ThreadLlmResponse {
+            text: result.response.text(),
+            tokens_in: result.response.tokens_in,
+            tokens_out: result.response.tokens_out,
+        })
+    }
+
+    fn latest_coding_feedback(
+        &self,
+        thread_id: exoskeleton_core::ThreadId,
+    ) -> Result<exoskeleton_threads::CodingActionFeedback, ExoError> {
+        let Some(tick) = self.kernel.tick_store.latest()? else {
+            return Ok(exoskeleton_threads::CodingActionFeedback::default());
+        };
+        let mut feedback = coding_feedback_from_actions(thread_id, tick.actions_taken.iter());
+        feedback.semantic_resolution = latest_semantic_feedback(
+            self.kernel.artifact_store.as_ref(),
+            thread_id,
+            &tick.actions_taken,
+        );
+        apply_latest_verification_feedback(
+            self.kernel.artifact_store.as_ref(),
+            thread_id,
+            &tick.actions_taken,
+            &mut feedback,
+        );
+        Ok(feedback)
+    }
+}
+
+fn summarize_exec_thread_proposal(proposal: &exoskeleton_core::ExecThreadProposal) -> String {
+    let params = compact_proposal_params(&proposal.params, 800);
+    format!(
+        "{} params={} rationale={}",
+        proposal.tool_name, params, proposal.rationale
+    )
+}
+
+fn compact_proposal_params(params: &serde_json::Value, max_len: usize) -> String {
+    let rendered = serde_json::to_string(params).unwrap_or_else(|_| "{}".into());
+    if rendered.len() <= max_len {
+        rendered
+    } else {
+        format!("{}...", &rendered[..max_len])
+    }
+}
+
+fn latest_semantic_feedback(
+    artifact_store: &dyn exoskeleton_core::ArtifactStore,
+    thread_id: exoskeleton_core::ThreadId,
+    actions: &[exoskeleton_core::tick::ActionRecord],
+) -> Option<SemanticActionFeedback> {
+    actions.iter().rev().find_map(|action| {
+        if action.origin_exec_thread_id != Some(thread_id)
+            || action.outcome != exoskeleton_core::ActionOutcome::Success
+        {
+            return None;
+        }
+        let receipt_ref = action.receipt_ref.as_ref()?;
+        let artifact = artifact_store.get(receipt_ref).ok().flatten()?;
+        let value: Value = serde_json::from_slice(&artifact.content).ok()?;
+        semantic_feedback_from_receipt(&action.action_type, &value)
+    })
+}
+
+fn apply_latest_verification_feedback(
+    artifact_store: &dyn exoskeleton_core::ArtifactStore,
+    thread_id: exoskeleton_core::ThreadId,
+    actions: &[exoskeleton_core::tick::ActionRecord],
+    feedback: &mut exoskeleton_threads::CodingActionFeedback,
+) {
+    let Some(action) = actions.iter().rev().find(|action| {
+        action.origin_exec_thread_id == Some(thread_id)
+            && action.action_type == "code.test"
+            && action.outcome == exoskeleton_core::ActionOutcome::Success
+    }) else {
+        return;
+    };
+
+    let Some(receipt_ref) = action.receipt_ref.as_ref() else {
+        return;
+    };
+    let Some(artifact) = artifact_store.get(receipt_ref).ok().flatten() else {
+        return;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&artifact.content) else {
+        return;
+    };
+
+    match value.get("passed").and_then(Value::as_bool) {
+        Some(true) => feedback.verification_success = true,
+        Some(false) => {
+            feedback.verification_success = false;
+            feedback.verification_failure = true;
+        }
+        None => {}
+    }
+}
+
+fn semantic_feedback_from_receipt(
+    tool_name: &str,
+    receipt: &Value,
+) -> Option<SemanticActionFeedback> {
+    match tool_name {
+        "code.read_symbol" => {
+            let symbol = receipt.get("symbol")?;
+            Some(SemanticActionFeedback {
+                tool_name: tool_name.to_string(),
+                query: symbol
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                symbol_id: symbol
+                    .get("symbol_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                name: symbol
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                kind: symbol
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                file_path: receipt
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                start_line: receipt
+                    .get("range")
+                    .and_then(|range| range.get("start_line"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+                end_line: receipt
+                    .get("range")
+                    .and_then(|range| range.get("end_line"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+            })
+        }
+        "code.symbol" => {
+            let top = receipt.get("matches").and_then(Value::as_array)?.first()?;
+            Some(SemanticActionFeedback {
+                tool_name: tool_name.to_string(),
+                query: top.get("name").and_then(Value::as_str).map(str::to_string),
+                symbol_id: top
+                    .get("symbol_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                name: top.get("name").and_then(Value::as_str).map(str::to_string),
+                kind: top.get("kind").and_then(Value::as_str).map(str::to_string),
+                file_path: top
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                start_line: top
+                    .get("range")
+                    .and_then(|range| range.get("start_line"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+                end_line: top
+                    .get("range")
+                    .and_then(|range| range.get("end_line"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+            })
+        }
+        "code.impls" => {
+            let top = receipt.get("impls").and_then(Value::as_array)?.first()?;
+            let trait_name = top.get("trait_name").and_then(Value::as_str);
+            let type_name = top.get("type_name").and_then(Value::as_str);
+            let query = trait_name.or(type_name).map(str::to_string);
+            let name = match (type_name, trait_name) {
+                (Some(type_name), Some(trait_name)) => {
+                    Some(format!("{trait_name} for {type_name}"))
+                }
+                (Some(type_name), None) => Some(type_name.to_string()),
+                _ => None,
+            };
+            Some(SemanticActionFeedback {
+                tool_name: tool_name.to_string(),
+                query,
+                symbol_id: top
+                    .get("symbol_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                name,
+                kind: Some("impl".into()),
+                file_path: top
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                start_line: top
+                    .get("range")
+                    .and_then(|range| range.get("start_line"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+                end_line: top
+                    .get("range")
+                    .and_then(|range| range.get("end_line"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn should_pause_thread_while_waiting_on_operator(
     kernel: &KernelContext,
     thread: &ThreadSpec,
@@ -577,9 +1003,6 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry,
-            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
-                crate::exec_threads::InMemoryExecThreadStore::new(),
-            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -607,11 +1030,14 @@ mod tests {
     fn test_thread(name: &str) -> ThreadSpec {
         ThreadSpec {
             thread_id: ThreadId::new(),
+            role: exoskeleton_core::ThreadRole::Other,
+            flavor: exoskeleton_core::ThreadFlavor::Cognitive,
             name: name.into(),
             charter: "Monitor for threats".into(),
             priority: ThreadPriority::Normal,
             token_budget: 4000,
             schedule: ThreadSchedule::EveryTick,
+            workspace_root: None,
         }
     }
 

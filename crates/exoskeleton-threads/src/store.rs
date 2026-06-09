@@ -1,34 +1,67 @@
 //! Thread persistence layer.
 //!
-//! The `ThreadStore` trait provides durable storage for thread specifications
-//! and operational state. Implementations must be `Send + Sync`.
+//! The `ThreadStore` trait provides durable storage for both cognitive and
+//! executable thread specifications plus their operational state.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use exoskeleton_core::{ExoError, ThreadId, ThreadOutput, ThreadSpec, ThreadStatus};
+use exoskeleton_core::{
+    ExecThreadLocalState, ExecThreadOutput, ExecThreadStatus, ExoError, ThreadExecutionPayload,
+    ThreadExecutionResult, ThreadId, ThreadOutput, ThreadSpec, ThreadStatus,
+};
+
+/// Flavor-aware operational status stored for a registered thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegisteredThreadStatus {
+    Cognitive(ThreadStatus),
+    Executable(ExecThreadStatus),
+}
+
+impl RegisteredThreadStatus {
+    pub fn cognitive_active() -> Self {
+        Self::Cognitive(ThreadStatus::Active)
+    }
+
+    pub fn executable_active() -> Self {
+        Self::Executable(ExecThreadStatus::Active)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Cognitive(status) => status.is_terminal(),
+            Self::Executable(status) => status.is_terminal(),
+        }
+    }
+}
 
 /// Durable storage for thread specifications and operational state.
 ///
 /// Implementations must be `Send + Sync` so they can be shared across
-/// async tasks and threads within the Cognitive AQ.
+/// async tasks and threads within the vessel runtime.
 pub trait ThreadStore: Send + Sync {
     /// Save (upsert) a thread specification with its current status.
-    fn save(&self, spec: &ThreadSpec, status: ThreadStatus) -> Result<(), ExoError>;
+    fn save(&self, spec: &ThreadSpec, status: RegisteredThreadStatus) -> Result<(), ExoError>;
 
-    /// Retrieve a thread specification and its status by ID.
-    fn get(&self, thread_id: ThreadId) -> Result<Option<(ThreadSpec, ThreadStatus)>, ExoError>;
+    /// Retrieve a thread specification and its flavor-aware status by ID.
+    fn get(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<(ThreadSpec, RegisteredThreadStatus)>, ExoError>;
 
     /// List all stored thread specifications with their statuses.
-    fn list(&self) -> Result<Vec<(ThreadSpec, ThreadStatus)>, ExoError>;
+    fn list(&self) -> Result<Vec<(ThreadSpec, RegisteredThreadStatus)>, ExoError>;
 
     /// Remove a thread by ID. Idempotent: returns `Ok(())` even if not found.
     fn remove(&self, thread_id: ThreadId) -> Result<(), ExoError>;
 
     /// Update the status of an existing thread.
-    ///
-    /// Returns `ExoError::Storage` if the thread ID is not found.
-    fn update_status(&self, thread_id: ThreadId, status: ThreadStatus) -> Result<(), ExoError>;
+    fn update_status(
+        &self,
+        thread_id: ThreadId,
+        status: RegisteredThreadStatus,
+    ) -> Result<(), ExoError>;
 
     /// Record the tick number of the last execution for a thread.
     fn save_last_run(&self, thread_id: ThreadId, tick_number: u64) -> Result<(), ExoError>;
@@ -36,39 +69,90 @@ pub trait ThreadStore: Send + Sync {
     /// Retrieve the tick number of the last execution for a thread.
     fn get_last_run(&self, thread_id: ThreadId) -> Result<Option<u64>, ExoError>;
 
-    /// Retrieve the most recent outputs for a thread, newest first.
+    /// Retrieve the most recent execution results for a thread, newest first.
+    fn recent_execution_results(
+        &self,
+        thread_id: ThreadId,
+        limit: usize,
+    ) -> Result<Vec<ThreadExecutionResult>, ExoError>;
+
+    /// Append an execution result to the thread's output history.
+    fn save_execution_result(&self, output: &ThreadExecutionResult) -> Result<(), ExoError>;
+
+    /// Retrieve executable-thread local state if present.
+    fn get_local_state(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<ExecThreadLocalState>, ExoError>;
+
+    /// Persist executable-thread local state.
+    fn save_local_state(
+        &self,
+        thread_id: ThreadId,
+        local_state: &ExecThreadLocalState,
+    ) -> Result<(), ExoError>;
+
+    /// Update the charter text of an existing thread.
+    fn update_charter(&self, thread_id: ThreadId, charter: String) -> Result<(), ExoError>;
+
+    /// Retrieve the most recent cognitive outputs for a thread, newest first.
     fn recent_outputs(
         &self,
         thread_id: ThreadId,
         limit: usize,
-    ) -> Result<Vec<ThreadOutput>, ExoError>;
+    ) -> Result<Vec<ThreadOutput>, ExoError> {
+        Ok(self
+            .recent_execution_results(thread_id, limit)?
+            .into_iter()
+            .filter_map(|result| match result.payload {
+                ThreadExecutionPayload::Cognitive(output) => Some(output),
+                ThreadExecutionPayload::Executable(_) => None,
+            })
+            .collect())
+    }
 
-    /// Append an output to the thread's output history.
-    fn save_output(&self, output: &ThreadOutput) -> Result<(), ExoError>;
+    /// Append a cognitive-thread output to the thread's output history.
+    fn save_output(&self, output: &ThreadOutput) -> Result<(), ExoError> {
+        self.save_execution_result(&output.clone().into())
+    }
 
-    /// Update the charter text of an existing thread.
-    ///
-    /// Returns `ExoError::Storage` if the thread ID is not found.
-    fn update_charter(&self, thread_id: ThreadId, charter: String) -> Result<(), ExoError>;
+    /// Retrieve the most recent executable outputs for a thread, newest first.
+    fn recent_exec_outputs(
+        &self,
+        thread_id: ThreadId,
+        limit: usize,
+    ) -> Result<Vec<ExecThreadOutput>, ExoError> {
+        Ok(self
+            .recent_execution_results(thread_id, limit)?
+            .into_iter()
+            .filter_map(|result| match result.payload {
+                ThreadExecutionPayload::Cognitive(_) => None,
+                ThreadExecutionPayload::Executable(output) => Some(output),
+            })
+            .collect())
+    }
+
+    /// Append an executable-thread output to the thread's output history.
+    fn save_exec_output(&self, output: &ExecThreadOutput) -> Result<(), ExoError> {
+        self.save_execution_result(&output.clone().into())
+    }
 }
 
 /// In-memory thread store for testing.
-///
-/// All data is held in `RwLock`-guarded `HashMap`s. Not suitable for
-/// production use since data is lost on process exit.
 pub struct InMemoryThreadStore {
-    specs: RwLock<HashMap<ThreadId, (ThreadSpec, ThreadStatus)>>,
+    specs: RwLock<HashMap<ThreadId, (ThreadSpec, RegisteredThreadStatus)>>,
     last_runs: RwLock<HashMap<ThreadId, u64>>,
-    outputs: RwLock<HashMap<ThreadId, Vec<ThreadOutput>>>,
+    outputs: RwLock<HashMap<ThreadId, Vec<ThreadExecutionResult>>>,
+    local_state: RwLock<HashMap<ThreadId, ExecThreadLocalState>>,
 }
 
 impl InMemoryThreadStore {
-    /// Create a new, empty in-memory thread store.
     pub fn new() -> Self {
         Self {
             specs: RwLock::new(HashMap::new()),
             last_runs: RwLock::new(HashMap::new()),
             outputs: RwLock::new(HashMap::new()),
+            local_state: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -80,7 +164,7 @@ impl Default for InMemoryThreadStore {
 }
 
 impl ThreadStore for InMemoryThreadStore {
-    fn save(&self, spec: &ThreadSpec, status: ThreadStatus) -> Result<(), ExoError> {
+    fn save(&self, spec: &ThreadSpec, status: RegisteredThreadStatus) -> Result<(), ExoError> {
         let mut specs = self
             .specs
             .write()
@@ -89,7 +173,10 @@ impl ThreadStore for InMemoryThreadStore {
         Ok(())
     }
 
-    fn get(&self, thread_id: ThreadId) -> Result<Option<(ThreadSpec, ThreadStatus)>, ExoError> {
+    fn get(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<(ThreadSpec, RegisteredThreadStatus)>, ExoError> {
         let specs = self
             .specs
             .read()
@@ -97,7 +184,7 @@ impl ThreadStore for InMemoryThreadStore {
         Ok(specs.get(&thread_id).cloned())
     }
 
-    fn list(&self) -> Result<Vec<(ThreadSpec, ThreadStatus)>, ExoError> {
+    fn list(&self) -> Result<Vec<(ThreadSpec, RegisteredThreadStatus)>, ExoError> {
         let specs = self
             .specs
             .read()
@@ -114,7 +201,11 @@ impl ThreadStore for InMemoryThreadStore {
         Ok(())
     }
 
-    fn update_status(&self, thread_id: ThreadId, status: ThreadStatus) -> Result<(), ExoError> {
+    fn update_status(
+        &self,
+        thread_id: ThreadId,
+        status: RegisteredThreadStatus,
+    ) -> Result<(), ExoError> {
         let mut specs = self
             .specs
             .write()
@@ -145,21 +236,20 @@ impl ThreadStore for InMemoryThreadStore {
         Ok(last_runs.get(&thread_id).copied())
     }
 
-    fn recent_outputs(
+    fn recent_execution_results(
         &self,
         thread_id: ThreadId,
         limit: usize,
-    ) -> Result<Vec<ThreadOutput>, ExoError> {
+    ) -> Result<Vec<ThreadExecutionResult>, ExoError> {
         let outputs = self
             .outputs
             .read()
             .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
         match outputs.get(&thread_id) {
             Some(thread_outputs) => {
-                // Return newest first, up to `limit`.
                 let len = thread_outputs.len();
                 let start = len.saturating_sub(limit);
-                let mut result: Vec<ThreadOutput> = thread_outputs[start..].to_vec();
+                let mut result: Vec<ThreadExecutionResult> = thread_outputs[start..].to_vec();
                 result.reverse();
                 Ok(result)
             }
@@ -167,7 +257,7 @@ impl ThreadStore for InMemoryThreadStore {
         }
     }
 
-    fn save_output(&self, output: &ThreadOutput) -> Result<(), ExoError> {
+    fn save_execution_result(&self, output: &ThreadExecutionResult) -> Result<(), ExoError> {
         let mut outputs = self
             .outputs
             .write()
@@ -176,6 +266,30 @@ impl ThreadStore for InMemoryThreadStore {
             .entry(output.thread_id)
             .or_default()
             .push(output.clone());
+        Ok(())
+    }
+
+    fn get_local_state(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<ExecThreadLocalState>, ExoError> {
+        let local_state = self
+            .local_state
+            .read()
+            .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
+        Ok(local_state.get(&thread_id).cloned())
+    }
+
+    fn save_local_state(
+        &self,
+        thread_id: ThreadId,
+        local_state: &ExecThreadLocalState,
+    ) -> Result<(), ExoError> {
+        let mut guard = self
+            .local_state
+            .write()
+            .map_err(|e| ExoError::Storage(format!("lock poisoned: {e}")))?;
+        guard.insert(thread_id, local_state.clone());
         Ok(())
     }
 
@@ -197,24 +311,27 @@ impl ThreadStore for InMemoryThreadStore {
 #[cfg(test)]
 mod tests {
     use exoskeleton_core::{
-        ArtifactId, ThreadId, ThreadPriority, ThreadSchedule, ThreadSpec, ThreadStatus, TickId,
+        ArtifactId, ExecThreadKind, ExecThreadLocalState, ExecThreadOutput, ExecThreadStatus,
+        ThreadExecutionPayload, ThreadFlavor, ThreadId, ThreadPriority, ThreadRole, ThreadSchedule,
+        ThreadSpec, ThreadStatus, TickId,
     };
 
     use super::*;
 
-    /// Helper: create a `ThreadSpec` with sensible defaults for testing.
     fn make_spec(name: &str) -> ThreadSpec {
         ThreadSpec {
             thread_id: ThreadId::new(),
+            role: ThreadRole::Other,
+            flavor: ThreadFlavor::Cognitive,
             name: name.into(),
             charter: format!("Charter for {name}"),
             priority: ThreadPriority::Normal,
             token_budget: 4096,
             schedule: ThreadSchedule::EveryTick,
+            workspace_root: None,
         }
     }
 
-    /// Helper: create a `ThreadOutput` for a given thread.
     fn make_output(thread_id: ThreadId, summary: &str) -> ThreadOutput {
         ThreadOutput {
             thread_id,
@@ -230,13 +347,15 @@ mod tests {
         let store = InMemoryThreadStore::new();
         let spec = make_spec("Alpha");
 
-        store.save(&spec, ThreadStatus::Active).unwrap();
+        store
+            .save(&spec, RegisteredThreadStatus::cognitive_active())
+            .unwrap();
 
         let result = store.get(spec.thread_id).unwrap();
         assert!(result.is_some());
         let (got_spec, got_status) = result.unwrap();
         assert_eq!(got_spec, spec);
-        assert_eq!(got_status, ThreadStatus::Active);
+        assert_eq!(got_status, RegisteredThreadStatus::cognitive_active());
     }
 
     #[test]
@@ -245,19 +364,15 @@ mod tests {
         let specs: Vec<ThreadSpec> = vec![make_spec("One"), make_spec("Two"), make_spec("Three")];
 
         for spec in &specs {
-            store.save(spec, ThreadStatus::Active).unwrap();
+            store
+                .save(spec, RegisteredThreadStatus::cognitive_active())
+                .unwrap();
         }
 
         let list = store.list().unwrap();
         assert_eq!(list.len(), 3);
-
-        // All three thread IDs should be present.
         for spec in &specs {
-            assert!(
-                list.iter().any(|(s, _)| s.thread_id == spec.thread_id),
-                "Missing thread {}",
-                spec.name
-            );
+            assert!(list.iter().any(|(s, _)| s.thread_id == spec.thread_id));
         }
     }
 
@@ -266,14 +381,12 @@ mod tests {
         let store = InMemoryThreadStore::new();
         let spec = make_spec("Removable");
 
-        store.save(&spec, ThreadStatus::Active).unwrap();
+        store
+            .save(&spec, RegisteredThreadStatus::cognitive_active())
+            .unwrap();
         store.remove(spec.thread_id).unwrap();
         assert!(store.get(spec.thread_id).unwrap().is_none());
-
-        // Removing again should succeed (idempotent).
         store.remove(spec.thread_id).unwrap();
-
-        // Removing a never-inserted ID should also succeed.
         store.remove(ThreadId::new()).unwrap();
     }
 
@@ -282,27 +395,30 @@ mod tests {
         let store = InMemoryThreadStore::new();
         let spec = make_spec("Updatable");
 
-        store.save(&spec, ThreadStatus::Active).unwrap();
         store
-            .update_status(spec.thread_id, ThreadStatus::Suspended)
+            .save(&spec, RegisteredThreadStatus::cognitive_active())
+            .unwrap();
+        store
+            .update_status(
+                spec.thread_id,
+                RegisteredThreadStatus::Cognitive(ThreadStatus::Suspended),
+            )
             .unwrap();
 
         let (_, status) = store.get(spec.thread_id).unwrap().unwrap();
-        assert_eq!(status, ThreadStatus::Suspended);
+        assert_eq!(
+            status,
+            RegisteredThreadStatus::Cognitive(ThreadStatus::Suspended)
+        );
     }
 
     #[test]
     fn store_update_status_nonexistent_fails() {
         let store = InMemoryThreadStore::new();
-        let result = store.update_status(ThreadId::new(), ThreadStatus::Active);
+        let result =
+            store.update_status(ThreadId::new(), RegisteredThreadStatus::cognitive_active());
         assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("thread not found"),
-            "Expected 'thread not found' in error, got: {msg}"
-        );
+        assert!(result.unwrap_err().to_string().contains("thread not found"));
     }
 
     #[test]
@@ -310,13 +426,9 @@ mod tests {
         let store = InMemoryThreadStore::new();
         let tid = ThreadId::new();
 
-        // Initially no last run.
         assert!(store.get_last_run(tid).unwrap().is_none());
-
         store.save_last_run(tid, 5).unwrap();
         assert_eq!(store.get_last_run(tid).unwrap(), Some(5));
-
-        // Overwrite with a later tick.
         store.save_last_run(tid, 12).unwrap();
         assert_eq!(store.get_last_run(tid).unwrap(), Some(12));
     }
@@ -326,19 +438,18 @@ mod tests {
         let store = InMemoryThreadStore::new();
         let tid = ThreadId::new();
 
-        // Save 5 outputs in chronological order.
         for i in 0..5 {
-            let output = ThreadOutput {
-                thread_id: tid,
-                tick_id: TickId::new(),
-                artifact_id: ArtifactId::from_content(format!("output-{i}").as_bytes()),
-                summary: format!("output-{i}"),
-                recommendations: vec![],
-            };
-            store.save_output(&output).unwrap();
+            store
+                .save_output(&ThreadOutput {
+                    thread_id: tid,
+                    tick_id: TickId::new(),
+                    artifact_id: ArtifactId::from_content(format!("output-{i}").as_bytes()),
+                    summary: format!("output-{i}"),
+                    recommendations: vec![],
+                })
+                .unwrap();
         }
 
-        // Request 3 most recent -- should be newest first.
         let recent = store.recent_outputs(tid, 3).unwrap();
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].summary, "output-4");
@@ -355,14 +466,8 @@ mod tests {
         store.save_output(&output).unwrap();
 
         let recent = store.recent_outputs(tid, 10).unwrap();
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].thread_id, tid);
-        assert_eq!(recent[0].summary, "test-output");
-        assert_eq!(recent[0].recommendations, vec!["rec from test-output"]);
-        assert_eq!(recent[0].artifact_id, output.artifact_id);
+        assert_eq!(recent, vec![output]);
     }
-
-    // ── E0-T19: update_charter changes text ──
 
     #[test]
     fn update_charter_changes_text() {
@@ -370,8 +475,9 @@ mod tests {
         let spec = make_spec("Updatable");
         let tid = spec.thread_id;
 
-        store.save(&spec, ThreadStatus::Active).unwrap();
-
+        store
+            .save(&spec, RegisteredThreadStatus::cognitive_active())
+            .unwrap();
         store
             .update_charter(tid, "New charter text".into())
             .unwrap();
@@ -385,5 +491,64 @@ mod tests {
         let store = InMemoryThreadStore::new();
         let result = store.update_charter(ThreadId::new(), "anything".into());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn store_roundtrips_exec_local_state() {
+        let store = InMemoryThreadStore::new();
+        let spec = ThreadSpec {
+            flavor: ThreadFlavor::Executable,
+            role: ThreadRole::Coding,
+            ..make_spec("Coding")
+        };
+        let state = ExecThreadLocalState {
+            current_focus: Some("focus".into()),
+            ..ExecThreadLocalState::default()
+        };
+
+        store
+            .save(&spec, RegisteredThreadStatus::executable_active())
+            .unwrap();
+        store.save_local_state(spec.thread_id, &state).unwrap();
+
+        assert_eq!(store.get_local_state(spec.thread_id).unwrap(), Some(state));
+    }
+
+    #[test]
+    fn store_filters_exec_results_out_of_cognitive_recent_outputs() {
+        let store = InMemoryThreadStore::new();
+        let spec = ThreadSpec {
+            flavor: ThreadFlavor::Executable,
+            role: ThreadRole::Coding,
+            ..make_spec("Coding")
+        };
+        let exec_output = ExecThreadOutput {
+            thread_id: spec.thread_id,
+            tick_id: TickId::new(),
+            artifact_id: ArtifactId::from_content(b"exec"),
+            kind: ExecThreadKind::Coding,
+            summary: "exec".into(),
+            status: ExecThreadStatus::Active,
+            evidence_complete: false,
+            proposal_confidence: None,
+            proposed_action: None,
+            local_state: ExecThreadLocalState::default(),
+        };
+
+        store
+            .save(&spec, RegisteredThreadStatus::executable_active())
+            .unwrap();
+        store.save_exec_output(&exec_output).unwrap();
+
+        assert!(store.recent_outputs(spec.thread_id, 5).unwrap().is_empty());
+        assert_eq!(
+            store.recent_exec_outputs(spec.thread_id, 5).unwrap(),
+            vec![exec_output]
+        );
+        let unified = store.recent_execution_results(spec.thread_id, 5).unwrap();
+        assert!(matches!(
+            unified[0].payload,
+            ThreadExecutionPayload::Executable(_)
+        ));
     }
 }

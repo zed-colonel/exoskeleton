@@ -333,7 +333,7 @@ async fn handler_master_loop_still_stub() {
 }
 
 #[tokio::test]
-async fn handler_thread_invalid_payload() {
+async fn handler_removed_thread_task_type_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let config = test_config(dir.path());
     ensure_data_dirs(&config).unwrap();
@@ -344,11 +344,7 @@ async fn handler_thread_invalid_payload() {
         bootstrap_cognitive_engine_with_backends(&config, None, None, artifact_store, None)
             .unwrap();
 
-    let payload = CognitivePayload {
-        task_type: CognitiveTaskType::Thread,
-        data: serde_json::Value::Null,
-    };
-    let payload_bytes = serde_json::to_vec(&payload).unwrap();
+    let payload_bytes = br#"{"task_type":"thread"}"#.to_vec();
 
     use actionqueue_core::ids::TaskId;
     use actionqueue_core::task::constraints::TaskConstraints;
@@ -384,8 +380,8 @@ async fn handler_thread_invalid_payload() {
         let attempts = projection.get_attempt_history(&run.id()).unwrap();
         let error = attempts.last().unwrap().error().unwrap();
         assert!(
-            error.contains("invalid thread payload"),
-            "Expected 'invalid thread payload' message, got: {error}"
+            error.contains("invalid cognitive payload") && error.contains("unknown variant"),
+            "Expected removed task type rejection, got: {error}"
         );
     }
 

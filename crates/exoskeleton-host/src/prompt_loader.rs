@@ -27,7 +27,10 @@ const PROMPT_FILES: &[(&str, &str)] = &[
         "charter-memory-consolidation",
         "charters/memory-consolidation.md",
     ),
-    ("charter-creative-synthesis", "charters/creative-synthesis.md"),
+    (
+        "charter-creative-synthesis",
+        "charters/creative-synthesis.md",
+    ),
     ("charter-initiative", "charters/initiative.md"),
     ("charter-coding-thread", "charters/coding-thread.md"),
     ("bootstrap-first-contact", "bootstrap/first-contact.md"),

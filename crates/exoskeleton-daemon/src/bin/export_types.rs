@@ -18,12 +18,12 @@ use exoskeleton_core::conversation::{
     Conversation, ConversationMessage, ConversationMessageWithContent, ConversationState,
 };
 use exoskeleton_core::diff::{CodeDiffContent, CodeDiffOperation, FileDiffEntry, TickDiffSummary};
+use exoskeleton_core::event::{
+    CapabilityRequestPayload, DiffSummary, EventEntry, EventType, ExecThreadLiveDetail, LiveEvent,
+    PlanModeDetail, PolicyDetail, QuestionDetail,
+};
 use exoskeleton_core::exec_thread::{
     ExecThreadKind, ExecThreadProposalConfidence, ExecThreadStatus,
-};
-use exoskeleton_core::event::{
-    CapabilityRequestPayload, DiffSummary, EventEntry, EventType, ExecThreadLiveDetail,
-    LiveEvent, PlanModeDetail, PolicyDetail, QuestionDetail,
 };
 use exoskeleton_core::memory::{EpisodicSummary, LongTermNote};
 use exoskeleton_core::plan::{Plan, PlanTask, PlanTaskStatus};
@@ -33,7 +33,9 @@ use exoskeleton_core::relationship::{
 use exoskeleton_core::snapshot::{
     BudgetStatus, ExecThreadSummary, StateSnapshot, ThreadSummary, VesselStatus,
 };
-use exoskeleton_core::thread::{ThreadPriority, ThreadSchedule, ThreadStatus};
+use exoskeleton_core::thread::{
+    ThreadFlavor, ThreadPriority, ThreadRole, ThreadSchedule, ThreadStatus,
+};
 use exoskeleton_core::tick::{
     ActionOutcome, ActionRecord, ExecThreadContribution, LlmCallRecord, ThreadContribution,
     TickPhase, TickRecord,
@@ -94,6 +96,8 @@ fn generate() -> String {
     emit!(output, &cfg, ThreadPriority);
     emit!(output, &cfg, ThreadSchedule);
     emit!(output, &cfg, ThreadStatus);
+    emit!(output, &cfg, ThreadFlavor);
+    emit!(output, &cfg, ThreadRole);
     emit!(output, &cfg, ExecThreadKind);
     emit!(output, &cfg, ExecThreadStatus);
     emit!(output, &cfg, ThrashLevel);

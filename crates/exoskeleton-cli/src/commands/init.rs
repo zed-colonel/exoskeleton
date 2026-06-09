@@ -79,8 +79,7 @@ run_every_n_ticks = 15
         repo_name = repo_name,
         mission = quote_toml_string(&mission),
         data_dir = quote_toml_string(&exo_dir.join("data").to_string_lossy()),
-        workspace_root =
-            quote_toml_string(coding.workspace_root.as_deref().unwrap_or_default(),),
+        workspace_root = quote_toml_string(coding.workspace_root.as_deref().unwrap_or_default(),),
     );
 
     std::fs::write(&config_path, toml_content)

@@ -24,7 +24,6 @@ use exoskeleton_core::{
     ThreadSpec, ThreadStatus, VesselId,
 };
 use exoskeleton_host::cognitive_engine::CognitiveHandler;
-use exoskeleton_host::exec_threads::{ExecThreadRegistry, InMemoryExecThreadStore};
 use exoskeleton_host::inbox::InMemoryInbox;
 use exoskeleton_host::kernel::{KernelContext, WiHostSlot};
 use exoskeleton_host::storage::StorageManager;
@@ -146,11 +145,14 @@ impl LlmHttpBackend for FailThenSucceedBackend {
 fn make_thread(name: &str, priority: ThreadPriority, schedule: ThreadSchedule) -> ThreadSpec {
     ThreadSpec {
         thread_id: ThreadId::new(),
+        role: exoskeleton_core::ThreadRole::Other,
+        flavor: exoskeleton_core::ThreadFlavor::Cognitive,
         name: name.into(),
         charter: format!("Charter for {name}"),
         priority,
         token_budget: 4000,
         schedule,
+        workspace_root: None,
     }
 }
 
@@ -171,7 +173,6 @@ fn send_kernel(kernel: &KernelContext) -> KernelContext {
         max_output_tokens: kernel.max_output_tokens,
         master_loop_interval_secs: kernel.master_loop_interval_secs,
         thread_registry: kernel.thread_registry.clone(),
-        exec_thread_registry: kernel.exec_thread_registry.clone(),
         relationship_ledger: kernel.relationship_ledger.clone(),
         conversation_store: kernel.conversation_store.clone(),
         budget_tracker: kernel.budget_tracker.clone(),
@@ -268,9 +269,6 @@ async fn setup_with_threads(
         max_output_tokens: 4096,
         master_loop_interval_secs: 60,
         thread_registry,
-        exec_thread_registry: Arc::new(ExecThreadRegistry::new(Arc::new(
-            InMemoryExecThreadStore::new(),
-        ))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
         conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
@@ -351,9 +349,6 @@ async fn setup_with_threads_custom_backend(
         max_output_tokens: 4096,
         master_loop_interval_secs: 60,
         thread_registry,
-        exec_thread_registry: Arc::new(ExecThreadRegistry::new(Arc::new(
-            InMemoryExecThreadStore::new(),
-        ))),
         relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
         conversation_store: Arc::new(InMemoryConversationStore::new()),
         budget_tracker: None,
@@ -1045,7 +1040,12 @@ fn thread_survives_storage_restart() {
 
     {
         let store = SqliteThreadStore::open(&path).unwrap();
-        store.save(&spec, ThreadStatus::Active).unwrap();
+        store
+            .save(
+                &spec,
+                exoskeleton_threads::RegisteredThreadStatus::Cognitive(ThreadStatus::Active),
+            )
+            .unwrap();
     }
 
     {
@@ -1054,7 +1054,10 @@ fn thread_survives_storage_restart() {
         assert!(result.is_some(), "thread should survive restart");
         let (got_spec, got_status) = result.unwrap();
         assert_eq!(got_spec, spec);
-        assert_eq!(got_status, ThreadStatus::Active);
+        assert_eq!(
+            got_status,
+            exoskeleton_threads::RegisteredThreadStatus::Cognitive(ThreadStatus::Active)
+        );
     }
 }
 
@@ -1273,11 +1276,14 @@ mod proptest_tests {
         ) {
             let spec = ThreadSpec {
                 thread_id: ThreadId::new(),
+                role: exoskeleton_core::ThreadRole::Other,
+                flavor: exoskeleton_core::ThreadFlavor::Cognitive,
                 name,
                 charter,
                 priority: ThreadPriority::Normal,
                 token_budget: budget,
                 schedule: ThreadSchedule::EveryTick,
+                workspace_root: None,
             };
             let json =
                 serde_json::to_string(&spec).unwrap();
@@ -1327,11 +1333,14 @@ mod proptest_tests {
             let counter = ApproximateTokenCounter;
             let spec = ThreadSpec {
                 thread_id: ThreadId::new(),
+                role: exoskeleton_core::ThreadRole::Other,
+                flavor: exoskeleton_core::ThreadFlavor::Cognitive,
                 name: "PropTest Thread".into(),
                 charter: "Analyze for test".into(),
                 priority: ThreadPriority::Normal,
                 token_budget: budget,
                 schedule: ThreadSchedule::EveryTick,
+                workspace_root: None,
             };
             let snapshot = StateSnapshot::initial(
                 VesselId::new(),

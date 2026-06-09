@@ -8,6 +8,39 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{ArtifactId, ThreadId, TickId};
 
+/// High-level behavioral class for a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadFlavor {
+    /// Recommendation-only cognitive analysis thread.
+    Cognitive,
+    /// Proposal-producing executable worker thread.
+    Executable,
+}
+
+/// Semantic responsibility of a thread within the vessel.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadRole {
+    ThreatMonitor,
+    SelfCritique,
+    MemoryConsolidation,
+    MetaCognition,
+    CreativeSynthesis,
+    Initiative,
+    Coding,
+    /// Temporary catch-all while the architecture migrates toward explicit roles only.
+    Other,
+}
+
+fn default_thread_flavor() -> ThreadFlavor {
+    ThreadFlavor::Cognitive
+}
+
+fn default_thread_role() -> ThreadRole {
+    ThreadRole::Other
+}
+
 /// Declaration of a cognitive thread.
 ///
 /// Threads are Cognitive AQ child tasks (IBP §3.1). They produce artifacts
@@ -17,6 +50,12 @@ use crate::id::{ArtifactId, ThreadId, TickId};
 pub struct ThreadSpec {
     /// Unique identity of this thread.
     pub thread_id: ThreadId,
+    /// Semantic responsibility of the thread.
+    #[serde(default = "default_thread_role")]
+    pub role: ThreadRole,
+    /// Behavioral class of the thread.
+    #[serde(default = "default_thread_flavor")]
+    pub flavor: ThreadFlavor,
     /// Human-readable thread name (e.g., "Threat Monitor").
     pub name: String,
     /// Purpose and responsibilities of this thread.
@@ -27,6 +66,9 @@ pub struct ThreadSpec {
     pub token_budget: u64,
     /// When this thread should execute.
     pub schedule: ThreadSchedule,
+    /// Optional workspace root associated with the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
 }
 
 /// Execution priority for cognitive threads.
@@ -103,6 +145,45 @@ pub struct ThreadOutput {
     pub recommendations: Vec<String>,
 }
 
+/// Unified execution wrapper for both thread flavors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadExecutionResult {
+    pub thread_id: ThreadId,
+    pub tick_id: TickId,
+    pub artifact_id: ArtifactId,
+    pub payload: ThreadExecutionPayload,
+}
+
+/// Flavor-specific execution payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadExecutionPayload {
+    Cognitive(ThreadOutput),
+    Executable(crate::ExecThreadOutput),
+}
+
+impl From<ThreadOutput> for ThreadExecutionResult {
+    fn from(output: ThreadOutput) -> Self {
+        Self {
+            thread_id: output.thread_id,
+            tick_id: output.tick_id,
+            artifact_id: output.artifact_id.clone(),
+            payload: ThreadExecutionPayload::Cognitive(output),
+        }
+    }
+}
+
+impl From<crate::ExecThreadOutput> for ThreadExecutionResult {
+    fn from(output: crate::ExecThreadOutput) -> Self {
+        Self {
+            thread_id: output.thread_id,
+            tick_id: output.tick_id,
+            artifact_id: output.artifact_id.clone(),
+            payload: ThreadExecutionPayload::Executable(output),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,11 +194,14 @@ mod tests {
     fn thread_spec_roundtrip() {
         let spec = ThreadSpec {
             thread_id: ThreadId::new(),
+            role: ThreadRole::ThreatMonitor,
+            flavor: ThreadFlavor::Cognitive,
             name: "Threat Monitor".into(),
             charter: "Monitor for alignment threats and adversarial patterns".into(),
             priority: ThreadPriority::High,
             token_budget: 5000,
             schedule: ThreadSchedule::EveryTick,
+            workspace_root: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         let parsed: ThreadSpec = serde_json::from_str(&json).unwrap();
@@ -130,6 +214,20 @@ mod tests {
         assert!(ThreadPriority::Low < ThreadPriority::Normal);
         assert!(ThreadPriority::Normal < ThreadPriority::High);
         assert!(ThreadPriority::High < ThreadPriority::Critical);
+    }
+
+    #[test]
+    fn thread_flavor_roundtrip() {
+        let json = serde_json::to_string(&ThreadFlavor::Executable).unwrap();
+        let parsed: ThreadFlavor = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ThreadFlavor::Executable);
+    }
+
+    #[test]
+    fn thread_role_roundtrip() {
+        let json = serde_json::to_string(&ThreadRole::Coding).unwrap();
+        let parsed: ThreadRole = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ThreadRole::Coding);
     }
 
     #[test]
@@ -198,5 +296,21 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let parsed: ThreadOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(output, parsed);
+    }
+
+    #[test]
+    fn thread_execution_result_from_cognitive_output() {
+        let output = ThreadOutput {
+            thread_id: ThreadId::new(),
+            tick_id: TickId::new(),
+            artifact_id: ArtifactId::from_content(b"cognitive output"),
+            summary: "summary".into(),
+            recommendations: vec!["r1".into()],
+        };
+        let result = ThreadExecutionResult::from(output.clone());
+        assert_eq!(result.thread_id, output.thread_id);
+        assert_eq!(result.tick_id, output.tick_id);
+        assert_eq!(result.artifact_id, output.artifact_id);
+        assert_eq!(result.payload, ThreadExecutionPayload::Cognitive(output));
     }
 }

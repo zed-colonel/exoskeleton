@@ -48,8 +48,14 @@ fn summarize_execution(step: usize, execution: &ActionExecution) -> String {
     let tool = execution.action.tool_name.as_str();
     match &execution.result {
         Ok(value) => match tool {
+            "repo.context" => summarize_repo_context(step, value),
+            "repo.locate" => summarize_repo_locate(step, value),
             "code.read" => summarize_code_read(step, execution, value),
+            "code.read_symbol" => summarize_code_read_symbol(step, value),
             "code.grep" => summarize_code_grep(step, execution, value),
+            "code.symbol" => summarize_code_symbol(step, value),
+            "code.references" => summarize_code_references(step, value),
+            "code.impls" => summarize_code_impls(step, value),
             "code.edit" | "code.write" | "code.apply_patch" => {
                 summarize_code_mutation(step, execution, value)
             }
@@ -72,6 +78,44 @@ fn summarize_code_read(step: usize, execution: &ActionExecution, value: &Value) 
     format!("Step {step}: code.read {file_path}:{start}-{end} -> {lines_read} lines (success)")
 }
 
+fn summarize_code_read_symbol(step: usize, value: &Value) -> String {
+    let file_path = value["file_path"].as_str().unwrap_or("<unknown>");
+    let symbol_name = value["symbol"]["name"].as_str().unwrap_or("<symbol>");
+    let start = value["range"]["start_line"].as_u64().unwrap_or(1);
+    let end = value["range"]["end_line"].as_u64().unwrap_or(start);
+    format!("Step {step}: code.read_symbol {symbol_name} -> {file_path}:{start}-{end} (success)")
+}
+
+fn summarize_repo_locate(step: usize, value: &Value) -> String {
+    let candidates = value["candidates"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let top = value["candidates"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|candidate| candidate["path"].as_str())
+        .unwrap_or("<none>");
+    format!("Step {step}: repo.locate -> {candidates} candidates, top={top} (success)")
+}
+
+fn summarize_repo_context(step: usize, value: &Value) -> String {
+    let files = value["files"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let top = value["files"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|candidate| candidate["path"].as_str())
+        .unwrap_or("<none>");
+    let patterns = value["patterns"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    format!("Step {step}: repo.context -> {files} files, {patterns} patterns, top={top} (success)")
+}
+
 fn summarize_code_grep(step: usize, execution: &ActionExecution, value: &Value) -> String {
     let pattern = execution.action.params["pattern"]
         .as_str()
@@ -79,6 +123,35 @@ fn summarize_code_grep(step: usize, execution: &ActionExecution, value: &Value) 
     let matches = value["total_matches"].as_u64().unwrap_or(0);
     let files = value["files_searched"].as_u64().unwrap_or(0);
     format!("Step {step}: code.grep '{pattern}' -> {matches} matches in {files} files (success)")
+}
+
+fn summarize_code_symbol(step: usize, value: &Value) -> String {
+    let matches = value["matches"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let top = value["matches"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|candidate| candidate["file_path"].as_str())
+        .unwrap_or("<none>");
+    format!("Step {step}: code.symbol -> {matches} matches, top={top} (success)")
+}
+
+fn summarize_code_references(step: usize, value: &Value) -> String {
+    let count = value["references"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    format!("Step {step}: code.references -> {count} references (success)")
+}
+
+fn summarize_code_impls(step: usize, value: &Value) -> String {
+    let count = value["impls"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    format!("Step {step}: code.impls -> {count} impls (success)")
 }
 
 fn summarize_code_mutation(step: usize, execution: &ActionExecution, value: &Value) -> String {
@@ -160,6 +233,11 @@ mod tests {
     fn format_windowed_results_summarizes_older_steps() {
         let executions = vec![
             execution(
+                "repo.locate",
+                json!({"query": "parse_config_line", "path": "/tmp/workspace"}),
+                Ok(json!({"candidates": [{"path": "/tmp/workspace/src/main.rs"}]})),
+            ),
+            execution(
                 "code.read",
                 json!({"file_path": "src/main.rs"}),
                 Ok(json!({"start_line": 1, "end_line": 50, "total_lines": 120})),
@@ -185,12 +263,15 @@ mod tests {
 
         let formatted = format_windowed_results(&executions, 2);
         assert!(formatted.contains("### Earlier Steps"));
-        assert!(formatted.contains("Step 1: code.read src/main.rs:1-50 -> 50 lines (success)"));
+        assert!(formatted.contains(
+            "Step 1: repo.locate -> 1 candidates, top=/tmp/workspace/src/main.rs (success)"
+        ));
+        assert!(formatted.contains("Step 2: code.read src/main.rs:1-50 -> 50 lines (success)"));
         assert!(
-            formatted.contains("Step 2: code.grep 'fn parse' -> 4 matches in 2 files (success)")
+            formatted.contains("Step 3: code.grep 'fn parse' -> 4 matches in 2 files (success)")
         );
-        assert!(formatted.contains("### Step 3: code.edit [SUCCESS]"));
-        assert!(formatted.contains("### Step 4: shell.exec [FAILED]"));
+        assert!(formatted.contains("### Step 4: code.edit [SUCCESS]"));
+        assert!(formatted.contains("### Step 5: shell.exec [FAILED]"));
     }
 
     #[test]

@@ -60,8 +60,8 @@ pub fn test_config(dir: &std::path::Path) -> VesselConfig {
 ///
 /// Uses WorldInterface's `default_registry()` to stay in sync with upstream
 /// connector additions (delay, http.request, fs.read, fs.write, code.read,
-/// code.edit, code.write, code.grep, code.glob, code.ls, code.apply_patch,
-/// shell.exec, sandbox.exec).
+/// code.edit, code.write, code.grep, repo.context, repo.locate, shell.exec,
+/// sandbox.exec, and related code tools).
 pub fn test_registry() -> ConnectorRegistry {
     default_registry()
 }

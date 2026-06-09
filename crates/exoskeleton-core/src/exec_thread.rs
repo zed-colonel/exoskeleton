@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{ArtifactId, ThreadId, TickId};
+use crate::thread::{ThreadFlavor, ThreadRole};
 
 /// Distinguishes executable thread roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
@@ -14,6 +15,29 @@ use crate::id::{ArtifactId, ThreadId, TickId};
 pub enum ExecThreadKind {
     /// Coding and workspace-change proposal thread.
     Coding,
+}
+
+impl ExecThreadKind {
+    pub fn thread_role(self) -> ThreadRole {
+        match self {
+            Self::Coding => ThreadRole::Coding,
+        }
+    }
+
+    pub fn thread_flavor(self) -> ThreadFlavor {
+        ThreadFlavor::Executable
+    }
+}
+
+impl TryFrom<ThreadRole> for ExecThreadKind {
+    type Error = &'static str;
+
+    fn try_from(role: ThreadRole) -> Result<Self, Self::Error> {
+        match role {
+            ThreadRole::Coding => Ok(Self::Coding),
+            _ => Err("thread role is not an executable-thread compatibility kind"),
+        }
+    }
 }
 
 /// Operational status of an executable thread.
@@ -76,6 +100,34 @@ pub struct ExecThreadLocalState {
     pub verification_attempted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_confidence: Option<ExecThreadProposalConfidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_target_file: Option<String>,
+    #[serde(default)]
+    pub inspection_read_streak: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_hypothesis_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_hypothesis_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_symbol_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target_end_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_proposed_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_proposed_target: Option<String>,
+    #[serde(default)]
+    pub repeated_same_proposal_count: u32,
     #[serde(default)]
     pub awaiting_feedback: bool,
     #[serde(default)]
@@ -129,5 +181,14 @@ mod tests {
         assert!(!ExecThreadStatus::Idle.is_terminal());
         assert!(!ExecThreadStatus::Active.is_terminal());
         assert!(!ExecThreadStatus::Blocked.is_terminal());
+    }
+
+    #[test]
+    fn exec_thread_kind_maps_to_unified_role_and_flavor() {
+        assert_eq!(ExecThreadKind::Coding.thread_role(), ThreadRole::Coding);
+        assert_eq!(
+            ExecThreadKind::Coding.thread_flavor(),
+            ThreadFlavor::Executable
+        );
     }
 }

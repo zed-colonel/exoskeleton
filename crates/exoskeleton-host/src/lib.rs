@@ -14,7 +14,6 @@ pub mod benchmark;
 pub mod budget;
 pub mod cognitive_engine;
 pub mod config;
-pub mod exec_threads;
 pub mod inbox;
 pub mod inspect;
 pub mod introspection;
@@ -45,8 +44,8 @@ pub use llm::mock::{
 };
 pub use metrics::ExoMetrics;
 pub use storage::{
-    SqliteArtifactStore, SqliteBudgetStore, SqliteEventLedger, SqliteExecThreadStore,
-    SqliteMemoryStore, SqliteSnapshotStore, SqliteThreadStore, SqliteTickStore, StorageManager,
+    SqliteArtifactStore, SqliteBudgetStore, SqliteEventLedger, SqliteMemoryStore,
+    SqliteSnapshotStore, SqliteThreadStore, SqliteTickStore, StorageManager,
 };
 pub use swe_bench::{
     DatasetSource, SweBenchRunner, SweGrading, SweInstance, SweResult, SweRunOptions,

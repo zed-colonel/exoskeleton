@@ -50,45 +50,6 @@ async fn handler_routes_master_loop() {
 }
 
 #[tokio::test]
-async fn handler_routes_thread() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = common::test_config(dir.path());
-    let vessel = Vessel::start_with_registry(config, common::test_registry())
-        .await
-        .unwrap();
-
-    let payload = CognitivePayload {
-        task_type: CognitiveTaskType::Thread,
-        data: serde_json::Value::Null,
-    };
-    let payload_bytes = serde_json::to_vec(&payload).unwrap();
-
-    use actionqueue_core::ids::TaskId;
-    use actionqueue_core::task::constraints::TaskConstraints;
-    use actionqueue_core::task::metadata::TaskMetadata;
-    use actionqueue_core::task::run_policy::RunPolicy;
-    use actionqueue_core::task::task_spec::{TaskPayload, TaskSpec};
-
-    let spec = TaskSpec::new(
-        TaskId::new(),
-        TaskPayload::with_content_type(payload_bytes, "application/json"),
-        RunPolicy::Once,
-        TaskConstraints::default(),
-        TaskMetadata::default(),
-    )
-    .unwrap();
-
-    {
-        let mut guard = vessel.cognitive_engine_slot().lock().await;
-        let engine = guard.as_mut().unwrap();
-        engine.submit_task(spec).unwrap();
-        let _ = engine.run_until_idle().await.unwrap();
-    }
-
-    vessel.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn handler_routes_llm_call() {
     let dir = tempfile::tempdir().unwrap();
     let config = common::test_config(dir.path());
@@ -189,6 +150,55 @@ async fn handler_rejects_unknown_task_type() {
         let engine = guard.as_mut().unwrap();
         engine.submit_task(spec).unwrap();
         let _ = engine.run_until_idle().await.unwrap();
+    }
+
+    vessel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn handler_rejects_removed_thread_task_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::test_config(dir.path());
+    let vessel = Vessel::start_with_registry(config, common::test_registry())
+        .await
+        .unwrap();
+
+    use actionqueue_core::ids::TaskId;
+    use actionqueue_core::task::constraints::TaskConstraints;
+    use actionqueue_core::task::metadata::TaskMetadata;
+    use actionqueue_core::task::run_policy::RunPolicy;
+    use actionqueue_core::task::task_spec::{TaskPayload, TaskSpec};
+
+    let task_id = TaskId::new();
+    let payload_bytes = br#"{"task_type":"thread"}"#.to_vec();
+    let spec = TaskSpec::new(
+        task_id,
+        TaskPayload::with_content_type(payload_bytes, "application/json"),
+        RunPolicy::Once,
+        TaskConstraints::default(),
+        TaskMetadata::default(),
+    )
+    .unwrap();
+
+    {
+        let mut guard = vessel.cognitive_engine_slot().lock().await;
+        let engine = guard.as_mut().unwrap();
+        engine.submit_task(spec).unwrap();
+        let _ = engine.run_until_idle().await.unwrap();
+    }
+
+    {
+        let guard = vessel.cognitive_engine_slot().lock().await;
+        let engine = guard.as_ref().unwrap();
+        let projection = engine.projection();
+        let runs: Vec<_> = projection.runs_for_task(task_id).collect();
+        let run = runs.last().unwrap();
+        let attempts = projection.get_attempt_history(&run.id()).unwrap();
+        let error = attempts.last().unwrap().error().unwrap();
+        assert!(
+            error.contains("invalid cognitive payload") && error.contains("unknown variant"),
+            "Expected removed task type rejection, got: {error}"
+        );
     }
 
     vessel.shutdown().await.unwrap();
@@ -329,8 +339,8 @@ async fn list_capabilities_returns_registered_connectors() {
         .unwrap();
 
     let caps = vessel.list_capabilities();
-    // 14 default + signal.await + signal.emit = 16
-    assert_eq!(caps.len(), 16);
+    // 21 default + signal.await + signal.emit = 23
+    assert_eq!(caps.len(), 23);
 
     let names: Vec<&str> = caps.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"delay"));
@@ -343,7 +353,14 @@ async fn list_capabilities_returns_registered_connectors() {
     assert!(names.contains(&"code.glob"));
     assert!(names.contains(&"code.ls"));
     assert!(names.contains(&"code.apply_patch"));
+    assert!(names.contains(&"repo.context"));
+    assert!(names.contains(&"repo.locate"));
     assert!(names.contains(&"code.git_diff"));
+    assert!(names.contains(&"code.symbol"));
+    assert!(names.contains(&"code.read_symbol"));
+    assert!(names.contains(&"code.references"));
+    assert!(names.contains(&"code.impls"));
+    assert!(names.contains(&"code.test"));
     assert!(names.contains(&"http.request"));
     assert!(names.contains(&"shell.exec"));
     assert!(names.contains(&"sandbox.exec"));

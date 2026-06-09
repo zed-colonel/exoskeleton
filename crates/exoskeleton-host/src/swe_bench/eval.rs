@@ -1,7 +1,7 @@
 //! Cargo test output parser and SWE-bench grading engine.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -203,6 +203,211 @@ pub fn run_cargo_test(workspace: &Path, timeout: Duration) -> Result<CargoTestOu
     })
 }
 
+/// Run only the SWE-bench FAIL_TO_PASS tests in likely Cargo package roots.
+///
+/// This is intentionally narrower than [`run_cargo_test`]. Local smoke runs need
+/// fast signal on whether the agent fixed the target regression; broad
+/// workspace-level test execution is still available, but it can time out on
+/// large Rust workspaces before producing useful grading evidence.
+pub fn run_cargo_fail_to_pass_tests(
+    workspace: &Path,
+    model_patch: &str,
+    fail_to_pass: &[String],
+    timeout: Duration,
+) -> Result<CargoTestOutput, ExoError> {
+    if fail_to_pass.is_empty() {
+        return Ok(empty_cargo_test_output());
+    }
+
+    let roots = candidate_cargo_roots_from_patch(workspace, model_patch);
+    let mut aggregate = empty_cargo_test_output();
+
+    for expected in fail_to_pass {
+        let filters = test_filters(expected);
+
+        'roots: for root in &roots {
+            for filter in &filters {
+                let output = run_cargo_test_filter(root, filter, timeout)?;
+                let observed = lookup_test(&output.tests, expected);
+                merge_cargo_test_output(&mut aggregate, root, filter, output);
+
+                if observed.is_some() {
+                    break 'roots;
+                }
+            }
+        }
+    }
+
+    Ok(aggregate)
+}
+
+fn run_cargo_test_filter(
+    manifest_root: &Path,
+    filter: &str,
+    timeout: Duration,
+) -> Result<CargoTestOutput, ExoError> {
+    let child = Command::new("cargo")
+        .args(["test", "--no-fail-fast", filter, "--", "--nocapture"])
+        .current_dir(manifest_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ExoError::Engine(format!("cargo test failed to spawn: {e}")))?;
+
+    let output = wait_with_timeout(child, timeout)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+    let tests = parse_cargo_test_output(&stdout);
+    let compilation_failed = exit_code != 0 && tests.is_empty();
+
+    Ok(CargoTestOutput {
+        tests,
+        raw_stdout: stdout,
+        raw_stderr: stderr,
+        exit_code,
+        compilation_failed,
+    })
+}
+
+fn empty_cargo_test_output() -> CargoTestOutput {
+    CargoTestOutput {
+        tests: HashMap::new(),
+        raw_stdout: String::new(),
+        raw_stderr: String::new(),
+        exit_code: 0,
+        compilation_failed: false,
+    }
+}
+
+fn merge_cargo_test_output(
+    aggregate: &mut CargoTestOutput,
+    root: &Path,
+    filter: &str,
+    output: CargoTestOutput,
+) {
+    aggregate.raw_stdout.push_str(&format!(
+        "\n===== cargo test --no-fail-fast {filter} @ {} =====\n",
+        root.display()
+    ));
+    aggregate.raw_stdout.push_str(&output.raw_stdout);
+
+    aggregate.raw_stderr.push_str(&format!(
+        "\n===== cargo test --no-fail-fast {filter} @ {} =====\n",
+        root.display()
+    ));
+    aggregate.raw_stderr.push_str(&output.raw_stderr);
+
+    for (name, outcome) in output.tests {
+        aggregate.tests.insert(name, outcome);
+    }
+    if output.exit_code != 0 {
+        aggregate.exit_code = output.exit_code;
+    }
+    aggregate.compilation_failed |= output.compilation_failed;
+}
+
+fn test_filters(name: &str) -> Vec<String> {
+    let mut filters = vec![name.to_string()];
+    if let Some(short_name) = name.rsplit("::").next() {
+        if short_name != name {
+            filters.push(short_name.to_string());
+        }
+    }
+    filters
+}
+
+fn candidate_cargo_roots_from_patch(workspace: &Path, patch_text: &str) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    for rel_path in modified_paths_from_patch(patch_text) {
+        if let Some(root) = nearest_cargo_root_for_path(workspace, &rel_path) {
+            if !roots.iter().any(|existing| existing == &root) {
+                roots.push(root);
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        roots.push(workspace.to_path_buf());
+    }
+
+    roots
+}
+
+fn modified_paths_from_patch(patch_text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    for line in patch_text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let mut parts = rest.split_whitespace();
+            let _old_path = parts.next();
+            if let Some(new_path) = parts.next().and_then(normalize_patch_path) {
+                push_unique_path(&mut paths, new_path);
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            if let Some(new_path) = rest
+                .split_whitespace()
+                .next()
+                .and_then(normalize_patch_path)
+            {
+                push_unique_path(&mut paths, new_path);
+            }
+        }
+    }
+
+    paths
+}
+
+fn normalize_patch_path(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim().trim_matches('"');
+    if raw.is_empty() || raw == "/dev/null" {
+        return None;
+    }
+    let rel = raw
+        .strip_prefix("a/")
+        .or_else(|| raw.strip_prefix("b/"))
+        .unwrap_or(raw);
+    if rel.is_empty() || Path::new(rel).is_absolute() {
+        return None;
+    }
+    Some(PathBuf::from(rel))
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn nearest_cargo_root_for_path(workspace: &Path, rel_path: &Path) -> Option<PathBuf> {
+    let mut cursor = workspace.join(rel_path);
+    if !cursor.is_dir() {
+        cursor.pop();
+    }
+
+    loop {
+        if cursor.join("Cargo.toml").is_file() {
+            return Some(cursor);
+        }
+        if cursor == workspace {
+            break;
+        }
+        if !cursor.pop() {
+            break;
+        }
+    }
+
+    if workspace.join("Cargo.toml").is_file() {
+        Some(workspace.to_path_buf())
+    } else {
+        None
+    }
+}
+
 /// Wait for a child process to finish, killing it if `timeout` elapses.
 fn wait_with_timeout(
     mut child: std::process::Child,
@@ -397,5 +602,48 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
         assert_eq!(result.f2p_total, 0);
         assert_eq!(result.p2p_passed, 0);
         assert_eq!(result.p2p_total, 0);
+    }
+
+    #[test]
+    fn candidate_roots_select_nearest_cargo_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let crate_dir = dir.path().join("crates/example");
+        std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"example\"\n",
+        )
+        .unwrap();
+
+        let patch = "\
+diff --git a/crates/example/src/lib.rs b/crates/example/src/lib.rs
+--- a/crates/example/src/lib.rs
++++ b/crates/example/src/lib.rs
+";
+
+        let roots = candidate_cargo_roots_from_patch(dir.path(), patch);
+
+        assert_eq!(roots, vec![crate_dir]);
+    }
+
+    #[test]
+    fn candidate_roots_fall_back_to_workspace_for_empty_patch() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let roots = candidate_cargo_roots_from_patch(dir.path(), "");
+
+        assert_eq!(roots, vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn test_filters_try_full_name_then_short_name() {
+        assert_eq!(
+            test_filters("crate::module::tests::fix_regression"),
+            vec![
+                "crate::module::tests::fix_regression".to_string(),
+                "fix_regression".to_string()
+            ]
+        );
     }
 }

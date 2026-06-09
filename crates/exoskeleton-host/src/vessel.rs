@@ -21,7 +21,7 @@ use actionqueue_core::task::task_spec::{TaskPayload, TaskSpec};
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{ArtifactStore, ExoError, LiveEvent, SnapshotStore, VesselId, VesselMode};
 use exoskeleton_memory::{ApproximateTokenCounter, ContextCompiler};
-use exoskeleton_threads::ThreadRegistry;
+use exoskeleton_threads::{register_builtin_coding_thread, ThreadRegistry};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use worldinterface_connector::connectors::{
@@ -39,7 +39,6 @@ use crate::cognitive_engine::{
     CognitivePayload, CognitiveTaskType,
 };
 use crate::config::VesselConfig;
-use crate::exec_threads::{register_builtin_exec_threads, ExecThreadRegistry};
 use crate::inspect::VesselInspector;
 use crate::kernel::{KernelContext, MasterLoopPayload, WiHostSlot};
 use crate::llm::client::LlmClient;
@@ -154,8 +153,6 @@ impl Vessel {
         // 7. Build KernelContext
         let artifact_store: Arc<dyn ArtifactStore> = storage.artifact_store().clone();
         let thread_registry = Arc::new(ThreadRegistry::new(storage.thread_store().clone()));
-        let exec_thread_registry =
-            Arc::new(ExecThreadRegistry::new(storage.exec_thread_store().clone()));
         let relationship_ledger: Arc<dyn exoskeleton_relationship::RelationshipLedger> =
             storage.relationship_store().clone();
         // 7.5 Create budget trackers (Sprint 9)
@@ -202,7 +199,6 @@ impl Vessel {
             max_output_tokens: config.llm_config.max_output_tokens,
             master_loop_interval_secs: config.master_loop_interval_secs,
             thread_registry: thread_registry.clone(),
-            exec_thread_registry: exec_thread_registry.clone(),
             relationship_ledger: relationship_ledger.clone(),
             conversation_store: storage.conversation_store().clone(),
             budget_tracker: budget_tracker.clone(),
@@ -263,8 +259,8 @@ impl Vessel {
             &prompt_registry,
             thread_overrides.as_ref(),
         )?;
-        register_builtin_exec_threads(
-            &kernel_context.exec_thread_registry,
+        register_builtin_coding_thread(
+            &kernel_context.thread_registry,
             &prompt_registry,
             config.coding_thread.workspace_root.clone(),
             config.coding_thread.enabled,
@@ -864,9 +860,9 @@ mod tests {
     // ── E4S1-T17: WI default_registry has built-in connectors ──
 
     #[test]
-    fn default_registry_has_fourteen_connectors() {
+    fn default_registry_has_twenty_one_connectors() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 14, "expected 14 built-in connectors");
+        assert_eq!(registry.len(), 21, "expected 21 built-in connectors");
         assert!(registry.get("delay").is_some());
         assert!(registry.get("http.request").is_some());
         assert!(registry.get("fs.read").is_some());
@@ -879,6 +875,13 @@ mod tests {
         assert!(registry.get("code.ls").is_some());
         assert!(registry.get("code.apply_patch").is_some());
         assert!(registry.get("code.git_diff").is_some());
+        assert!(registry.get("repo.context").is_some());
+        assert!(registry.get("repo.locate").is_some());
+        assert!(registry.get("code.symbol").is_some());
+        assert!(registry.get("code.read_symbol").is_some());
+        assert!(registry.get("code.references").is_some());
+        assert!(registry.get("code.impls").is_some());
+        assert!(registry.get("code.test").is_some());
         assert!(registry.get("shell.exec").is_some());
         assert!(registry.get("sandbox.exec").is_some());
     }
@@ -888,7 +891,7 @@ mod tests {
     #[test]
     fn signal_connectors_registered_at_boot() {
         let registry = default_registry();
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 21);
 
         // Simulate the signal connector registration from start_with_registry_and_backends
         let signal_registry = Arc::new(SignalRegistry::new());
@@ -897,7 +900,7 @@ mod tests {
         ))));
         registry.register(Arc::new(SignalEmitConnector::new(signal_registry)));
 
-        assert_eq!(registry.len(), 16);
+        assert_eq!(registry.len(), 23);
         assert!(registry.get("signal.await").is_some());
         assert!(registry.get("signal.emit").is_some());
     }

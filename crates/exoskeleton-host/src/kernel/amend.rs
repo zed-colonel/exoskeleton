@@ -128,7 +128,7 @@ pub fn amend(
         .thread_summaries()
         .unwrap_or_default();
     new_snapshot.exec_thread_summaries = kernel
-        .exec_thread_registry
+        .thread_registry
         .exec_thread_summaries()
         .unwrap_or_default();
     prune_working_memory_for_bounded_coding_idle(kernel, &mut new_snapshot, perception);
@@ -428,7 +428,10 @@ fn prune_working_memory_for_bounded_coding_idle(
     }
 
     snapshot.working_memory.entries.retain(|entry| {
-        matches!(entry.key.as_str(), "session_status" | "user_question_pending")
+        matches!(
+            entry.key.as_str(),
+            "session_status" | "user_question_pending"
+        )
     });
 }
 
@@ -638,9 +641,6 @@ mod tests {
             max_output_tokens: 4096,
             master_loop_interval_secs: 60,
             thread_registry: Arc::new(ThreadRegistry::new(Arc::new(InMemoryThreadStore::new()))),
-            exec_thread_registry: Arc::new(crate::exec_threads::ExecThreadRegistry::new(Arc::new(
-                crate::exec_threads::InMemoryExecThreadStore::new(),
-            ))),
             relationship_ledger: Arc::new(InMemoryRelationshipLedger::new()),
             conversation_store: Arc::new(InMemoryConversationStore::new()),
             budget_tracker: None,
@@ -844,22 +844,26 @@ mod tests {
         kernel.coding_thread_config.return_to_idle_after_completion = true;
         let thread_id = exoskeleton_core::ThreadId::new();
         kernel
-            .exec_thread_registry
-            .register(exoskeleton_core::ExecThreadSpec {
-                thread_id,
-                kind: exoskeleton_core::ExecThreadKind::Coding,
-                name: "Coding".into(),
-                charter: "charter".into(),
-                token_budget: 1000,
-                workspace_root: None,
-            })
+            .thread_registry
+            .register_with_status(
+                exoskeleton_core::ThreadSpec {
+                    thread_id,
+                    role: exoskeleton_core::ThreadRole::Coding,
+                    flavor: exoskeleton_core::ThreadFlavor::Executable,
+                    name: "Coding".into(),
+                    charter: "charter".into(),
+                    priority: exoskeleton_core::ThreadPriority::High,
+                    token_budget: 1000,
+                    schedule: exoskeleton_core::ThreadSchedule::OnDemand,
+                    workspace_root: None,
+                },
+                exoskeleton_threads::RegisteredThreadStatus::Executable(
+                    exoskeleton_core::ExecThreadStatus::Idle,
+                ),
+            )
             .unwrap();
         kernel
-            .exec_thread_registry
-            .update_status(thread_id, exoskeleton_core::ExecThreadStatus::Idle)
-            .unwrap();
-        kernel
-            .exec_thread_registry
+            .thread_registry
             .save_local_state(
                 thread_id,
                 &exoskeleton_core::ExecThreadLocalState {
@@ -871,26 +875,22 @@ mod tests {
 
         let tick_id = TickId::new();
         let mut snapshot_before = test_snapshot(kernel.vessel_id);
-        snapshot_before
-            .working_memory
-            .apply_op(
-                &exoskeleton_core::WorkingMemoryOp::Set {
-                    key: "session_status".into(),
-                    value: "awaiting_user_direction".into(),
-                    ttl_ticks: None,
-                },
-                0,
-            );
-        snapshot_before
-            .working_memory
-            .apply_op(
-                &exoskeleton_core::WorkingMemoryOp::Set {
-                    key: "task_ready".into(),
-                    value: "ready".into(),
-                    ttl_ticks: None,
-                },
-                0,
-            );
+        snapshot_before.working_memory.apply_op(
+            &exoskeleton_core::WorkingMemoryOp::Set {
+                key: "session_status".into(),
+                value: "awaiting_user_direction".into(),
+                ttl_ticks: None,
+            },
+            0,
+        );
+        snapshot_before.working_memory.apply_op(
+            &exoskeleton_core::WorkingMemoryOp::Set {
+                key: "task_ready".into(),
+                value: "ready".into(),
+                ttl_ticks: None,
+            },
+            0,
+        );
         let snapshot_before_artifact_id = ArtifactId::from_content(b"snap-before");
         let (mut decision, perception, alignment, act_result, reflection) = test_params();
         decision.snapshot_delta.working_memory_ops =

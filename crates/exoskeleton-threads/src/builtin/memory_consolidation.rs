@@ -5,7 +5,7 @@
 //! recommendations only — NEVER invokes tools (IBP §3.4). The master
 //! loop's Amend step processes the output to write to MemoryStore.
 
-use exoskeleton_core::{ThreadPriority, ThreadSchedule, ThreadSpec};
+use exoskeleton_core::{ThreadFlavor, ThreadPriority, ThreadRole, ThreadSchedule, ThreadSpec};
 use serde::{Deserialize, Serialize};
 
 use super::MEMORY_CONSOLIDATION_ID;
@@ -44,11 +44,14 @@ Respond with JSON:
 pub fn spec() -> ThreadSpec {
     ThreadSpec {
         thread_id: MEMORY_CONSOLIDATION_ID,
+        role: ThreadRole::MemoryConsolidation,
+        flavor: ThreadFlavor::Cognitive,
         name: "Memory Consolidation".into(),
         charter: MEMORY_CONSOLIDATION_CHARTER.into(),
         priority: ThreadPriority::Normal,
         token_budget: 6144,
         schedule: ThreadSchedule::EveryNTicks(5),
+        workspace_root: None,
     }
 }
 

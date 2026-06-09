@@ -24,7 +24,6 @@ pub mod artifact_store;
 pub mod budget_store;
 pub mod conversation_store;
 pub mod event_ledger;
-pub mod exec_thread_store;
 pub mod memory_store;
 pub mod relationship_store;
 pub mod snapshot_store;
@@ -39,7 +38,6 @@ pub use artifact_store::SqliteArtifactStore;
 pub use budget_store::SqliteBudgetStore;
 pub use conversation_store::SqliteConversationStore;
 pub use event_ledger::SqliteEventLedger;
-pub use exec_thread_store::SqliteExecThreadStore;
 use exoskeleton_core::ExoError;
 pub use memory_store::SqliteMemoryStore;
 pub use relationship_store::SqliteRelationshipLedger;
@@ -77,7 +75,6 @@ pub struct StorageManager {
     budget_store: Arc<SqliteBudgetStore>,
     conversation_store: Arc<SqliteConversationStore>,
     watch_store: Arc<SqliteWatchStore>,
-    exec_thread_store: Arc<SqliteExecThreadStore>,
 }
 
 impl StorageManager {
@@ -124,9 +121,6 @@ impl StorageManager {
             exo_dir.join("conversations.db"),
         )?);
         let watch_store = Arc::new(SqliteWatchStore::open(exo_dir.join("watches.db"))?);
-        let exec_thread_store = Arc::new(SqliteExecThreadStore::open(
-            exo_dir.join("exec_threads.db"),
-        )?);
 
         Ok(Self {
             artifact_store,
@@ -139,7 +133,6 @@ impl StorageManager {
             budget_store,
             conversation_store,
             watch_store,
-            exec_thread_store,
         })
     }
 
@@ -191,11 +184,6 @@ impl StorageManager {
     /// Access the watch store (E5-S2).
     pub fn watch_store(&self) -> &Arc<SqliteWatchStore> {
         &self.watch_store
-    }
-
-    /// Access the executable thread store.
-    pub fn exec_thread_store(&self) -> &Arc<SqliteExecThreadStore> {
-        &self.exec_thread_store
     }
 }
 
@@ -411,16 +399,21 @@ mod tests {
         // Thread store
         let thread_spec = exoskeleton_core::ThreadSpec {
             thread_id: exoskeleton_core::ThreadId::new(),
+            role: exoskeleton_core::ThreadRole::Other,
+            flavor: exoskeleton_core::ThreadFlavor::Cognitive,
             name: "test thread".into(),
             charter: "Test charter".into(),
             priority: exoskeleton_core::ThreadPriority::Normal,
             token_budget: 4096,
             schedule: exoskeleton_core::ThreadSchedule::EveryTick,
+            workspace_root: None,
         };
         exoskeleton_threads::ThreadStore::save(
             mgr.thread_store().as_ref(),
             &thread_spec,
-            exoskeleton_core::ThreadStatus::Active,
+            exoskeleton_threads::RegisteredThreadStatus::Cognitive(
+                exoskeleton_core::ThreadStatus::Active,
+            ),
         )
         .unwrap();
         let result = exoskeleton_threads::ThreadStore::get(

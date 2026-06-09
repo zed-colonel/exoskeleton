@@ -3,14 +3,14 @@
 //! Provides task spec parsing, workspace preparation, verification execution,
 //! and report/comparison formatting for headless coding benchmarks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use exoskeleton_core::inbox::Inbox;
 use exoskeleton_core::{
-    ActionOutcome, Artifact, ArtifactKind, ArtifactStore, EnvelopeId, EnvelopeKind,
-    ExoError, MessageEnvelope, PrincipalId, TickPhase, VesselId,
+    ActionOutcome, Artifact, ArtifactKind, ArtifactStore, EnvelopeId, EnvelopeKind, ExoError,
+    MessageEnvelope, PrincipalId, TickPhase, VesselId,
 };
 use exoskeleton_memory::CompiledContext;
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,60 @@ pub struct TickMetrics {
     pub completion_reason: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BehaviorMetrics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_search_step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_file_read_step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_mutation_step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_verify_step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_semantic_step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_completion_signal_tick: Option<u32>,
+    #[serde(default)]
+    pub search_steps_total: u32,
+    #[serde(default)]
+    pub semantic_steps_total: u32,
+    #[serde(default)]
+    pub search_steps_before_first_read: u32,
+    #[serde(default)]
+    pub semantic_steps_before_first_edit: u32,
+    #[serde(default)]
+    pub search_steps_after_first_read: u32,
+    #[serde(default)]
+    pub post_edit_search_steps: u32,
+    #[serde(default)]
+    pub distinct_files_read: u32,
+    #[serde(default)]
+    pub distinct_files_modified: u32,
+    #[serde(default)]
+    pub symbol_reads_total: u32,
+    #[serde(default)]
+    pub reference_queries_total: u32,
+    #[serde(default)]
+    pub zero_edit_terminal: bool,
+    #[serde(default)]
+    pub verification_attempted: bool,
+    #[serde(default)]
+    pub verification_after_last_edit: bool,
+    #[serde(default)]
+    pub max_repeated_same_tool_same_target: u32,
+    #[serde(default)]
+    pub exec_thread_originated_steps: u32,
+    #[serde(default)]
+    pub master_only_steps: u32,
+}
+
+impl BehaviorMetrics {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// Result of running a single benchmark task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
@@ -168,6 +222,8 @@ pub struct TaskResult {
     pub context_utilization: ContextUtilization,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tick_details: Vec<TickMetrics>,
+    #[serde(default, skip_serializing_if = "BehaviorMetrics::is_empty")]
+    pub behavior_metrics: BehaviorMetrics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harness_anomalies: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -461,6 +517,296 @@ pub async fn inject_and_poll(
     Ok((completion_reason, vessel.inspector()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BehaviorAction {
+    step: u32,
+    tick: u32,
+    tool_name: String,
+    normalized_target: String,
+    file_target: Option<String>,
+    is_search: bool,
+    is_read: bool,
+    is_mutation: bool,
+    is_verify: bool,
+    is_semantic: bool,
+    is_symbol_read: bool,
+    is_reference_query: bool,
+    exec_thread_originated: bool,
+}
+
+fn is_search_action(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code.grep" | "code.ls" | "code.glob" | "repo.context" | "repo.locate"
+    )
+}
+
+fn is_read_action(tool_name: &str) -> bool {
+    matches!(tool_name, "code.read" | "code.read_symbol" | "fs.read")
+}
+
+fn is_mutation_action(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code.edit" | "code.apply_patch" | "code.write" | "fs.write"
+    )
+}
+
+fn is_semantic_action(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code.symbol" | "code.read_symbol" | "code.references" | "code.impls"
+    )
+}
+
+fn shell_exec_command_line(params: &serde_json::Value) -> Option<String> {
+    let obj = params.as_object()?;
+    let command = obj.get("command")?.as_str()?.to_lowercase();
+    let args = obj
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(|arg| arg.to_lowercase())
+        .collect::<Vec<_>>();
+
+    let mut parts = vec![command];
+    parts.extend(args);
+    Some(parts.join(" "))
+}
+
+fn shell_exec_looks_like_verification(params: &serde_json::Value) -> bool {
+    let Some(command_line) = shell_exec_command_line(params) else {
+        return false;
+    };
+
+    [
+        "cargo test",
+        "cargo nextest",
+        "cargo check",
+        "cargo build",
+        "cargo clippy",
+        "pytest",
+        "py.test",
+        "python -m pytest",
+        "python3 -m pytest",
+        "go test",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "bun test",
+        "deno test",
+        "mvn test",
+        "gradle test",
+        "./gradlew test",
+        "dotnet test",
+        "mix test",
+        "rspec",
+        "jest",
+        "vitest",
+        "phpunit",
+    ]
+    .iter()
+    .any(|needle| command_line.contains(needle))
+}
+
+fn is_verify_action(tool_name: &str, tool_params: &serde_json::Value) -> bool {
+    matches!(tool_name, "code.test" | "code.compile")
+        || (tool_name == "shell.exec" && shell_exec_looks_like_verification(tool_params))
+}
+
+fn action_tool_params(action: &exoskeleton_core::tick::ActionRecord) -> serde_json::Value {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&action.target) {
+        if value.is_object() || value.is_array() {
+            return value;
+        }
+    }
+
+    match action.action_type.as_str() {
+        "code.read" | "code.edit" | "code.apply_patch" | "code.write" => {
+            serde_json::json!({ "file_path": action.target })
+        }
+        "fs.read" | "fs.write" | "code.grep" | "code.ls" | "code.glob" | "repo.context"
+        | "repo.locate" | "code.symbol" | "code.read_symbol" | "code.references" | "code.impls"
+        | "code.test" => {
+            serde_json::json!({ "path": action.target })
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn action_file_target(action: &exoskeleton_core::tick::ActionRecord) -> Option<String> {
+    if action.target.is_empty() {
+        return None;
+    }
+
+    match action.action_type.as_str() {
+        "code.read" | "code.read_symbol" | "code.edit" | "code.apply_patch" | "code.write"
+        | "fs.read" | "fs.write" => Some(action.target.clone()),
+        _ => None,
+    }
+}
+
+fn normalized_action_target(
+    action: &exoskeleton_core::tick::ActionRecord,
+    tool_params: &serde_json::Value,
+) -> String {
+    if action.action_type == "shell.exec" {
+        if let Some(command_line) = shell_exec_command_line(tool_params) {
+            return command_line;
+        }
+    }
+
+    if let Some(file_target) = action_file_target(action) {
+        return file_target;
+    }
+
+    if !action.target.is_empty() {
+        return action.target.clone();
+    }
+
+    action.action_type.clone()
+}
+
+fn compute_behavior_metrics(
+    actions: &[BehaviorAction],
+    first_completion_signal_tick: Option<u32>,
+) -> BehaviorMetrics {
+    let first_search_step = actions
+        .iter()
+        .find(|action| action.is_search)
+        .map(|action| action.step);
+    let first_file_read_step = actions
+        .iter()
+        .find(|action| action.is_read)
+        .map(|action| action.step);
+    let first_mutation_step = actions
+        .iter()
+        .find(|action| action.is_mutation)
+        .map(|action| action.step);
+    let first_verify_step = actions
+        .iter()
+        .find(|action| action.is_verify)
+        .map(|action| action.step);
+    let first_semantic_step = actions
+        .iter()
+        .find(|action| action.is_semantic)
+        .map(|action| action.step);
+    let last_mutation_step = actions
+        .iter()
+        .rev()
+        .find(|action| action.is_mutation)
+        .map(|action| action.step);
+
+    let search_steps_total = actions.iter().filter(|action| action.is_search).count() as u32;
+    let semantic_steps_total = actions.iter().filter(|action| action.is_semantic).count() as u32;
+    let search_steps_before_first_read = actions
+        .iter()
+        .filter(|action| action.is_search)
+        .filter(|action| first_file_read_step.is_none_or(|first_read| action.step < first_read))
+        .count() as u32;
+    let semantic_steps_before_first_edit = actions
+        .iter()
+        .filter(|action| action.is_semantic)
+        .filter(|action| first_mutation_step.is_none_or(|first_edit| action.step < first_edit))
+        .count() as u32;
+    let search_steps_after_first_read = actions
+        .iter()
+        .filter(|action| action.is_search)
+        .filter(|action| first_file_read_step.is_some_and(|first_read| action.step > first_read))
+        .count() as u32;
+    let post_edit_search_steps = actions
+        .iter()
+        .filter(|action| action.is_search)
+        .filter(|action| last_mutation_step.is_some_and(|last_edit| action.step > last_edit))
+        .count() as u32;
+
+    let distinct_files_read = actions
+        .iter()
+        .filter(|action| action.is_read)
+        .filter_map(|action| action.file_target.as_ref())
+        .collect::<HashSet<_>>()
+        .len() as u32;
+    let distinct_files_modified = actions
+        .iter()
+        .filter(|action| action.is_mutation)
+        .filter_map(|action| action.file_target.as_ref())
+        .collect::<HashSet<_>>()
+        .len() as u32;
+    let symbol_reads_total = actions
+        .iter()
+        .filter(|action| action.is_symbol_read)
+        .count() as u32;
+    let reference_queries_total = actions
+        .iter()
+        .filter(|action| action.is_reference_query)
+        .count() as u32;
+
+    let exec_thread_originated_steps = actions
+        .iter()
+        .filter(|action| action.exec_thread_originated)
+        .count() as u32;
+    let master_only_steps = actions.len() as u32 - exec_thread_originated_steps;
+
+    let mut max_repeated_same_tool_same_target = 0_u32;
+    let mut current_run = 0_u32;
+    let mut previous: Option<(&str, &str)> = None;
+    for action in actions {
+        let current = (action.tool_name.as_str(), action.normalized_target.as_str());
+        if previous == Some(current) {
+            current_run += 1;
+        } else {
+            current_run = 1;
+            previous = Some(current);
+        }
+        max_repeated_same_tool_same_target = max_repeated_same_tool_same_target.max(current_run);
+    }
+
+    let verification_attempted = first_verify_step.is_some();
+    let verification_after_last_edit = last_mutation_step
+        .zip(first_verify_step)
+        .is_some_and(|(last_edit, first_verify)| first_verify > last_edit)
+        || actions
+            .iter()
+            .filter(|action| action.is_verify)
+            .any(|action| last_mutation_step.is_some_and(|last_edit| action.step > last_edit));
+
+    BehaviorMetrics {
+        first_search_step,
+        first_file_read_step,
+        first_mutation_step,
+        first_verify_step,
+        first_semantic_step,
+        first_completion_signal_tick,
+        search_steps_total,
+        semantic_steps_total,
+        search_steps_before_first_read,
+        semantic_steps_before_first_edit,
+        search_steps_after_first_read,
+        post_edit_search_steps,
+        distinct_files_read,
+        distinct_files_modified,
+        symbol_reads_total,
+        reference_queries_total,
+        zero_edit_terminal: !actions.is_empty() && first_mutation_step.is_none(),
+        verification_attempted,
+        verification_after_last_edit,
+        max_repeated_same_tool_same_target,
+        exec_thread_originated_steps,
+        master_only_steps,
+    }
+}
+
+fn first_completion_signal_tick(inspector: &VesselInspector) -> Option<u32> {
+    let mut snapshots = inspector.snapshot_history(256).ok()?;
+    snapshots.reverse();
+    snapshots
+        .into_iter()
+        .find(|snapshot| HeadlessRunner::completion_reason_from_snapshot(snapshot).is_some())
+        .map(|snapshot| snapshot.tick_number as u32)
+}
+
 /// Extract comprehensive metrics from a completed benchmark run.
 pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, String> {
     // tick_history() returns newest-first; reverse to iterate oldest-first
@@ -485,6 +831,7 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
     let mut tick_details: Vec<TickMetrics> = Vec::new();
     let mut phase_tokens: HashMap<String, PhaseTokens> = HashMap::new();
     let mut global_step: u32 = 0;
+    let mut behavior_actions: Vec<BehaviorAction> = Vec::new();
 
     for tick in &ticks {
         if !(tick.phase == TickPhase::Amend && tick.completed_at.is_some()) {
@@ -577,6 +924,31 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
             }
 
             global_step += 1;
+            let tool_params = action_tool_params(action);
+            let is_search = is_search_action(&action.action_type);
+            let is_read = is_read_action(&action.action_type);
+            let is_mutation = is_mutation_action(&action.action_type);
+            let is_verify = is_verify_action(&action.action_type, &tool_params);
+            let is_semantic = is_semantic_action(&action.action_type);
+            let normalized_target = normalized_action_target(action, &tool_params);
+            let file_target = action_file_target(action);
+
+            behavior_actions.push(BehaviorAction {
+                step: global_step,
+                tick: tick.tick_number as u32,
+                tool_name: action.action_type.clone(),
+                normalized_target,
+                file_target,
+                is_search,
+                is_read,
+                is_mutation,
+                is_verify,
+                is_semantic,
+                is_symbol_read: action.action_type == "code.read_symbol",
+                is_reference_query: action.action_type == "code.references",
+                exec_thread_originated: action.origin_exec_thread_id.is_some(),
+            });
+
             // NOTE: Per-step token attribution is not yet implemented. Token counts
             // are only available at the tick level (from LlmCallRecord), not per
             // individual tool call. Step trace tokens are always 0 for now.
@@ -584,7 +956,7 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
                 step: global_step,
                 tick: tick.tick_number as u32,
                 tool_name: action.action_type.clone(),
-                tool_params: serde_json::Value::Null,
+                tool_params,
                 outcome: format!("{:?}", action.outcome),
                 output_summary: action.target.clone(),
                 reasoning: String::new(),
@@ -639,8 +1011,9 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
         .unwrap_or_default();
 
     let ticks_used = tick_details.len() as u32;
-    let harness_anomalies =
-        detect_benchmark_harness_anomalies(ticks_used, &context_utilization);
+    let behavior_metrics =
+        compute_behavior_metrics(&behavior_actions, first_completion_signal_tick(inspector));
+    let harness_anomalies = detect_benchmark_harness_anomalies(ticks_used, &context_utilization);
 
     Ok(MetricsSnapshot {
         ticks_used,
@@ -662,6 +1035,7 @@ pub fn extract_metrics(inspector: &VesselInspector) -> Result<MetricsSnapshot, S
         step_trace,
         context_utilization,
         tick_details,
+        behavior_metrics,
         harness_anomalies,
     })
 }
@@ -931,6 +1305,11 @@ impl HeadlessRunner {
         )
         .await?;
 
+        vessel
+            .shutdown()
+            .await
+            .map_err(|e| format!("vessel shutdown failed: {e}"))?;
+
         log_diagnostics(&inspector);
 
         let metrics = extract_metrics(&inspector).unwrap_or_else(|e| {
@@ -941,11 +1320,6 @@ impl HeadlessRunner {
         for anomaly in &metrics.harness_anomalies {
             eprintln!("  [warn] harness anomaly: {anomaly}");
         }
-
-        vessel
-            .shutdown()
-            .await
-            .map_err(|e| format!("vessel shutdown failed: {e}"))?;
 
         // test_patch is already resolved to an absolute path by load_task_spec()
         if let Some(patch_path) = spec.verify.test_patch.as_deref() {
@@ -1006,6 +1380,7 @@ impl HeadlessRunner {
             step_trace: metrics.step_trace,
             context_utilization: metrics.context_utilization,
             tick_details: metrics.tick_details,
+            behavior_metrics: metrics.behavior_metrics,
             harness_anomalies: metrics.harness_anomalies,
             difficulty: spec.task.difficulty.clone(),
             language: spec.task.language.clone(),
@@ -1033,6 +1408,7 @@ pub struct MetricsSnapshot {
     pub step_trace: Vec<StepTrace>,
     pub context_utilization: ContextUtilization,
     pub tick_details: Vec<TickMetrics>,
+    pub behavior_metrics: BehaviorMetrics,
     pub harness_anomalies: Vec<String>,
 }
 
@@ -1053,6 +1429,7 @@ impl Default for MetricsSnapshot {
             step_trace: vec![],
             context_utilization: ContextUtilization::default(),
             tick_details: vec![],
+            behavior_metrics: BehaviorMetrics::default(),
             harness_anomalies: vec![],
         }
     }
@@ -1136,6 +1513,18 @@ fn compiled_context_to_utilization(compiled: CompiledContext) -> ContextUtilizat
 /// Format a suite result as a human-readable report.
 pub fn format_report(result: &SuiteResult) -> String {
     let mut out = String::new();
+    let format_step = |step: Option<u32>| match step {
+        Some(step) => step.to_string(),
+        None => "-".into(),
+    };
+    let median_option = |values: Vec<u32>| -> Option<u32> {
+        if values.is_empty() {
+            return None;
+        }
+        let mut values = values;
+        values.sort_unstable();
+        Some(values[values.len() / 2])
+    };
 
     let model = result
         .tasks
@@ -1152,6 +1541,8 @@ pub fn format_report(result: &SuiteResult) -> String {
 
     let mut total_cost = 0.0_f64;
     let mut total_harness_anomalies = 0_usize;
+    let mut total_search_before_first_read = 0_u32;
+    let mut total_semantic_before_first_edit = 0_u32;
     for task in &result.tasks {
         let status = if task.passed { "PASS" } else { "FAIL" };
         let dots = ".".repeat(40_usize.saturating_sub(task.task_name.len()));
@@ -1161,8 +1552,21 @@ pub fn format_report(result: &SuiteResult) -> String {
             total_harness_anomalies += task.harness_anomalies.len();
             format!("  [anomaly:{}]", task.harness_anomalies.len())
         };
+        total_search_before_first_read += task.behavior_metrics.search_steps_before_first_read;
+        total_semantic_before_first_edit += task.behavior_metrics.semantic_steps_before_first_edit;
+        let behavior_suffix = if task.behavior_metrics.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  [r:{} sem:{} e:{} s<r:{}]",
+                format_step(task.behavior_metrics.first_file_read_step),
+                format_step(task.behavior_metrics.first_semantic_step),
+                format_step(task.behavior_metrics.first_mutation_step),
+                task.behavior_metrics.search_steps_before_first_read,
+            )
+        };
         out.push_str(&format!(
-            "  {} {} {} {:>5.0}s {:>3} steps {:>6} tok  ${:.2}{}\n",
+            "  {} {} {} {:>5.0}s {:>3} steps {:>6} tok  ${:.2}{}{}\n",
             task.task_name,
             dots,
             status,
@@ -1170,6 +1574,7 @@ pub fn format_report(result: &SuiteResult) -> String {
             task.steps_taken,
             task.tokens.total,
             task.llm_cost_cents / 100.0,
+            behavior_suffix,
             anomaly_suffix,
         ));
         total_cost += task.llm_cost_cents;
@@ -1177,8 +1582,29 @@ pub fn format_report(result: &SuiteResult) -> String {
 
     let pass_count = result.tasks.iter().filter(|t| t.passed).count();
     let total = result.tasks.len();
+    let median_first_read = median_option(
+        result
+            .tasks
+            .iter()
+            .filter_map(|task| task.behavior_metrics.first_file_read_step)
+            .collect(),
+    );
+    let median_first_edit = median_option(
+        result
+            .tasks
+            .iter()
+            .filter_map(|task| task.behavior_metrics.first_mutation_step)
+            .collect(),
+    );
+    let median_first_semantic = median_option(
+        result
+            .tasks
+            .iter()
+            .filter_map(|task| task.behavior_metrics.first_semantic_step)
+            .collect(),
+    );
     out.push_str(&format!(
-        "\n{}\n  Pass rate:     {}/{} ({:.0}%)\n  Median time:   {:.1}s\n  Median steps:  {}\n  Median tokens: {}\n  Total cost:    ${:.2}\n  Anomalies:     {}\n{}\n",
+        "\n{}\n  Pass rate:     {}/{} ({:.0}%)\n  Median time:   {:.1}s\n  Median steps:  {}\n  Median tokens: {}\n  Median read:   {}\n  Median semantic: {}\n  Median edit:   {}\n  Search<read:   {}\n  Semantic<edit: {}\n  Total cost:    ${:.2}\n  Anomalies:     {}\n{}\n",
         "-".repeat(64),
         pass_count,
         total,
@@ -1186,6 +1612,11 @@ pub fn format_report(result: &SuiteResult) -> String {
         result.median_time(),
         result.median_steps(),
         result.median_tokens(),
+        format_step(median_first_read),
+        format_step(median_first_semantic),
+        format_step(median_first_edit),
+        total_search_before_first_read,
+        total_semantic_before_first_edit,
         total_cost / 100.0,
         total_harness_anomalies,
         "=".repeat(64),
@@ -1458,6 +1889,30 @@ timeout_secs = 600
                 actions_succeeded: 7,
                 completion_reason: "AgentComplete".into(),
             }],
+            behavior_metrics: BehaviorMetrics {
+                first_search_step: Some(1),
+                first_file_read_step: Some(2),
+                first_mutation_step: Some(3),
+                first_verify_step: Some(4),
+                first_semantic_step: Some(2),
+                first_completion_signal_tick: Some(1),
+                search_steps_total: 2,
+                semantic_steps_total: 1,
+                search_steps_before_first_read: 1,
+                semantic_steps_before_first_edit: 1,
+                search_steps_after_first_read: 1,
+                post_edit_search_steps: 0,
+                distinct_files_read: 1,
+                distinct_files_modified: 1,
+                symbol_reads_total: 0,
+                reference_queries_total: 0,
+                zero_edit_terminal: false,
+                verification_attempted: true,
+                verification_after_last_edit: true,
+                max_repeated_same_tool_same_target: 1,
+                exec_thread_originated_steps: 3,
+                master_only_steps: 5,
+            },
             harness_anomalies: vec!["missing_exec_thread_context".into()],
             difficulty: Some("easy".into()),
             language: Some("rust".into()),
@@ -1474,6 +1929,7 @@ timeout_secs = 600
         assert_eq!(parsed.step_trace.len(), 1);
         assert_eq!(parsed.tick_details.len(), 1);
         assert_eq!(parsed.context_utilization.utilization_pct, 57.5);
+        assert_eq!(parsed.behavior_metrics.first_mutation_step, Some(3));
         assert_eq!(parsed.harness_anomalies.len(), 1);
     }
 
@@ -1516,8 +1972,8 @@ timeout_secs = 600
 
         let workspace = std::path::Path::new("/tmp/workspace");
         let data_dir = std::path::Path::new("/tmp/bench-data");
-        let config = HeadlessRunner::build_vessel_config(&base, &spec, workspace, data_dir)
-            .unwrap();
+        let config =
+            HeadlessRunner::build_vessel_config(&base, &spec, workspace, data_dir).unwrap();
 
         assert!(config.coding_thread.enabled);
         assert_eq!(
@@ -1708,6 +2164,14 @@ timeout_secs = 600
         let mut task = make_task_result("add-test", true, 8, 3500, 12.5);
         task.model_used = "claude-sonnet-4-20250514".into();
         task.llm_cost_cents = 1.5;
+        task.behavior_metrics = BehaviorMetrics {
+            first_file_read_step: Some(2),
+            first_semantic_step: Some(3),
+            first_mutation_step: Some(4),
+            search_steps_before_first_read: 1,
+            semantic_steps_before_first_edit: 1,
+            ..BehaviorMetrics::default()
+        };
         let suite = SuiteResult {
             run_id: "test-123".into(),
             timestamp: Utc::now(),
@@ -1718,7 +2182,159 @@ timeout_secs = 600
         assert!(report.contains("claude-sonnet-4-20250514"));
         assert!(report.contains("$0.02") || report.contains("$0.01"));
         assert!(report.contains("3,500") || report.contains("3500"));
+        assert!(report.contains("[r:2 sem:3 e:4 s<r:1]"));
         assert!(report.contains("Anomalies:"));
+        assert!(report.contains("Median read:"));
+        assert!(report.contains("Median semantic:"));
+        assert!(report.contains("Median edit:"));
+    }
+
+    #[test]
+    fn shell_exec_verification_detection_recognizes_cargo_test() {
+        let params = serde_json::json!({
+            "command": "cargo",
+            "args": ["test", "--lib", "parse_config_line"],
+        });
+
+        assert!(shell_exec_looks_like_verification(&params));
+        assert!(is_verify_action("shell.exec", &params));
+    }
+
+    #[test]
+    fn compute_behavior_metrics_tracks_search_read_edit_and_verify() {
+        let actions = vec![
+            BehaviorAction {
+                step: 1,
+                tick: 1,
+                tool_name: "code.grep".into(),
+                normalized_target: "parse_config_line".into(),
+                file_target: None,
+                is_search: true,
+                is_read: false,
+                is_mutation: false,
+                is_verify: false,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: true,
+            },
+            BehaviorAction {
+                step: 2,
+                tick: 1,
+                tool_name: "code.read".into(),
+                normalized_target: "src/lib.rs".into(),
+                file_target: Some("src/lib.rs".into()),
+                is_search: false,
+                is_read: true,
+                is_mutation: false,
+                is_verify: false,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: true,
+            },
+            BehaviorAction {
+                step: 3,
+                tick: 2,
+                tool_name: "code.edit".into(),
+                normalized_target: "src/lib.rs".into(),
+                file_target: Some("src/lib.rs".into()),
+                is_search: false,
+                is_read: false,
+                is_mutation: true,
+                is_verify: false,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: true,
+            },
+            BehaviorAction {
+                step: 4,
+                tick: 3,
+                tool_name: "shell.exec".into(),
+                normalized_target: "cargo test --lib".into(),
+                file_target: None,
+                is_search: false,
+                is_read: false,
+                is_mutation: false,
+                is_verify: true,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: false,
+            },
+        ];
+
+        let metrics = compute_behavior_metrics(&actions, Some(3));
+        assert_eq!(metrics.first_search_step, Some(1));
+        assert_eq!(metrics.first_file_read_step, Some(2));
+        assert_eq!(metrics.first_mutation_step, Some(3));
+        assert_eq!(metrics.first_verify_step, Some(4));
+        assert_eq!(metrics.search_steps_before_first_read, 1);
+        assert_eq!(metrics.search_steps_after_first_read, 0);
+        assert_eq!(metrics.post_edit_search_steps, 0);
+        assert_eq!(metrics.distinct_files_read, 1);
+        assert_eq!(metrics.distinct_files_modified, 1);
+        assert!(metrics.verification_attempted);
+        assert!(metrics.verification_after_last_edit);
+        assert_eq!(metrics.exec_thread_originated_steps, 3);
+        assert_eq!(metrics.master_only_steps, 1);
+        assert!(!metrics.zero_edit_terminal);
+    }
+
+    #[test]
+    fn compute_behavior_metrics_detects_repeated_same_tool_and_target() {
+        let actions = vec![
+            BehaviorAction {
+                step: 1,
+                tick: 1,
+                tool_name: "code.grep".into(),
+                normalized_target: "src".into(),
+                file_target: None,
+                is_search: true,
+                is_read: false,
+                is_mutation: false,
+                is_verify: false,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: false,
+            },
+            BehaviorAction {
+                step: 2,
+                tick: 2,
+                tool_name: "code.grep".into(),
+                normalized_target: "src".into(),
+                file_target: None,
+                is_search: true,
+                is_read: false,
+                is_mutation: false,
+                is_verify: false,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: false,
+            },
+            BehaviorAction {
+                step: 3,
+                tick: 3,
+                tool_name: "code.grep".into(),
+                normalized_target: "src".into(),
+                file_target: None,
+                is_search: true,
+                is_read: false,
+                is_mutation: false,
+                is_verify: false,
+                is_semantic: false,
+                is_symbol_read: false,
+                is_reference_query: false,
+                exec_thread_originated: false,
+            },
+        ];
+
+        let metrics = compute_behavior_metrics(&actions, None);
+        assert_eq!(metrics.max_repeated_same_tool_same_target, 3);
+        assert!(metrics.zero_edit_terminal);
     }
 
     #[test]
@@ -1753,8 +2369,12 @@ timeout_secs = 600
         );
 
         assert_eq!(anomalies.len(), 2);
-        assert!(anomalies.iter().any(|a| a.contains("missing_conversations_context")));
-        assert!(anomalies.iter().any(|a| a.contains("missing_exec_thread_context")));
+        assert!(anomalies
+            .iter()
+            .any(|a| a.contains("missing_conversations_context")));
+        assert!(anomalies
+            .iter()
+            .any(|a| a.contains("missing_exec_thread_context")));
     }
 
     #[test]
@@ -2044,6 +2664,7 @@ command = "true"
             step_trace: vec![],
             context_utilization: ContextUtilization::default(),
             tick_details: vec![],
+            behavior_metrics: BehaviorMetrics::default(),
             harness_anomalies: vec![],
             difficulty: None,
             language: None,

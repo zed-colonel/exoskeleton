@@ -763,12 +763,12 @@ fn handle_ws_event(app: &mut App, event: LiveEvent) -> Vec<SideEffect> {
                     }
 
                     if let Some(reason) = &detail.completion_reason {
-                        let severity = if detail.status == exoskeleton_core::ExecThreadStatus::Failed
-                        {
-                            NoteSeverity::Warning
-                        } else {
-                            NoteSeverity::Info
-                        };
+                        let severity =
+                            if detail.status == exoskeleton_core::ExecThreadStatus::Failed {
+                                NoteSeverity::Warning
+                            } else {
+                                NoteSeverity::Info
+                            };
                         app.conversation.add_block(Block::SystemNote {
                             text: format!("Coding thread {}: {}", detail.name, reason),
                             severity,
@@ -1703,8 +1703,12 @@ mod tests {
         app.activity.is_streaming = true;
         app.activity.streaming_tokens = 10;
 
-        let event =
-            coding_exec_event(ExecThreadStatus::Idle, "Completed", None, Some("agent_complete"));
+        let event = coding_exec_event(
+            ExecThreadStatus::Idle,
+            "Completed",
+            None,
+            Some("agent_complete"),
+        );
         update(&mut app, Message::WsEvent(event));
 
         let last_agent = app
@@ -2348,8 +2352,12 @@ mod tests {
             highlighted: true,
         });
 
-        let event =
-            coding_exec_event(ExecThreadStatus::Idle, "Inner work complete", None, Some("done"));
+        let event = coding_exec_event(
+            ExecThreadStatus::Idle,
+            "Inner work complete",
+            None,
+            Some("done"),
+        );
 
         update(&mut app, Message::WsEvent(event));
 

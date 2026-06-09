@@ -4,7 +4,7 @@
 //! quality, tool usage, budget consumption, and thrashing patterns. Can
 //! propose charter modifications through the governance workflow.
 
-use exoskeleton_core::{ThreadPriority, ThreadSchedule, ThreadSpec};
+use exoskeleton_core::{ThreadFlavor, ThreadPriority, ThreadRole, ThreadSchedule, ThreadSpec};
 use serde::{Deserialize, Serialize};
 
 use super::META_COGNITION_ID;
@@ -67,11 +67,14 @@ Respond with JSON:
 pub fn spec() -> ThreadSpec {
     ThreadSpec {
         thread_id: META_COGNITION_ID,
+        role: ThreadRole::MetaCognition,
+        flavor: ThreadFlavor::Cognitive,
         name: "Meta-Cognition".into(),
         charter: META_COGNITION_CHARTER.into(),
         priority: ThreadPriority::Normal,
         token_budget: 8192,
         schedule: ThreadSchedule::EveryNTicks(10),
+        workspace_root: None,
     }
 }
 

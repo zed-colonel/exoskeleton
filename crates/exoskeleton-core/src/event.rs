@@ -565,7 +565,10 @@ mod tests {
         assert_eq!(detail, parsed);
         assert_eq!(parsed.name, "Coding");
         assert_eq!(parsed.work_phase.as_deref(), Some("editing"));
-        assert_eq!(parsed.proposed_action_summary.as_deref(), Some("code.edit: src/lib.rs"));
+        assert_eq!(
+            parsed.proposed_action_summary.as_deref(),
+            Some("code.edit: src/lib.rs")
+        );
         assert!(parsed.completion_reason.is_none());
 
         // Optional fields omitted when None

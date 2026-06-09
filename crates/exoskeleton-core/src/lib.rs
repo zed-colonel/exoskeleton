@@ -68,7 +68,10 @@ pub use relationship::{
 pub use snapshot::{
     BudgetStatus, ExecThreadSummary, SnapshotStore, StateSnapshot, ThreadSummary, VesselStatus,
 };
-pub use thread::{ThreadOutput, ThreadPriority, ThreadSchedule, ThreadSpec, ThreadStatus};
+pub use thread::{
+    ThreadExecutionPayload, ThreadExecutionResult, ThreadFlavor, ThreadOutput, ThreadPriority,
+    ThreadRole, ThreadSchedule, ThreadSpec, ThreadStatus,
+};
 pub use tick::{
     ActionOutcome, ActionRecord, ExecThreadContribution, LlmCallRecord, ThreadContribution,
     TickPhase, TickRecord, TickStore,

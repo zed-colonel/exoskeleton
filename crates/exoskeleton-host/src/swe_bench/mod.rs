@@ -232,7 +232,7 @@ impl SweBenchRunner {
         let per_tick_budget_secs = 1800_u64;
         let timeout =
             std::time::Duration::from_secs(per_tick_budget_secs * options.max_ticks as u64 + 120);
-        let (completion_reason, inspector) = inject_and_poll(
+        let (mut completion_reason, inspector) = inject_and_poll(
             &vessel,
             &instance.problem_statement,
             workspace,
@@ -241,17 +241,17 @@ impl SweBenchRunner {
         )
         .await?;
 
-        // 7. Extract metrics
-        if options.verbose {
-            log_diagnostics(&inspector);
-        }
-        let metrics = extract_metrics(&inspector).unwrap_or_default();
-
         // 8. Shutdown
         vessel
             .shutdown()
             .await
             .map_err(|e| format!("shutdown failed: {e}"))?;
+
+        // 7. Extract metrics
+        if options.verbose {
+            log_diagnostics(&inspector);
+        }
+        let metrics = extract_metrics(&inspector).unwrap_or_default();
 
         for anomaly in &metrics.harness_anomalies {
             eprintln!("  [warn] harness anomaly: {anomaly}");
@@ -267,37 +267,68 @@ impl SweBenchRunner {
             }
         }
 
-        // 11. Run cargo test
-        let test_output = eval::run_cargo_test(workspace, options.test_timeout)
-            .map_err(|e| format!("cargo test failed: {e}"))?;
-
-        // 12. Grade
-        let grading = eval::grade(
-            &test_output.tests,
+        // 11. Run targeted FAIL_TO_PASS tests. If grading infrastructure fails,
+        // keep the agent's diff and metrics instead of collapsing the run into
+        // an adapter error.
+        let test_output = match eval::run_cargo_fail_to_pass_tests(
+            workspace,
+            &model_patch,
             &instance.fail_to_pass,
-            &instance.pass_to_pass,
+            options.test_timeout,
+        ) {
+            Ok(output) => Some(output),
+            Err(e) => {
+                let error = format!("cargo test failed: {e}");
+                eprintln!("  [warn] {error}");
+                completion_reason = format!("{completion_reason}; GradingError: {error}");
+                None
+            }
+        };
+
+        // 12. Grade, or synthesize an unresolved grading result when test
+        // execution failed before producing usable output.
+        let grading = test_output.as_ref().map_or_else(
+            || SweGrading {
+                resolved: false,
+                f2p_passed: 0,
+                f2p_total: instance.fail_to_pass.len() as u32,
+                p2p_passed: 0,
+                p2p_total: instance.pass_to_pass.len() as u32,
+            },
+            |output| {
+                eval::grade(
+                    &output.tests,
+                    &instance.fail_to_pass,
+                    &instance.pass_to_pass,
+                )
+            },
         );
 
-        // Determine which tests resolved/maintained
-        let f2p_resolved: Vec<String> = instance
-            .fail_to_pass
-            .iter()
-            .filter(|name| {
-                eval::lookup_test_pub(&test_output.tests, name) == Some(eval::TestOutcome::Passed)
-            })
-            .cloned()
-            .collect();
-        let p2p_maintained: Vec<String> = instance
-            .pass_to_pass
-            .iter()
-            .filter(|name| {
-                matches!(
-                    eval::lookup_test_pub(&test_output.tests, name),
-                    Some(eval::TestOutcome::Passed) | None
-                )
-            })
-            .cloned()
-            .collect();
+        // Determine which tests resolved/maintained.
+        let f2p_resolved: Vec<String> = test_output.as_ref().map_or_else(Vec::new, |output| {
+            instance
+                .fail_to_pass
+                .iter()
+                .filter(|name| {
+                    eval::lookup_test_pub(&output.tests, name) == Some(eval::TestOutcome::Passed)
+                })
+                .cloned()
+                .collect()
+        });
+        let p2p_maintained: Vec<String> = test_output.as_ref().map_or_else(Vec::new, |output| {
+            instance
+                .pass_to_pass
+                .iter()
+                .filter(|name| {
+                    matches!(
+                        eval::lookup_test_pub(&output.tests, name),
+                        Some(eval::TestOutcome::Passed) | None
+                    )
+                })
+                .cloned()
+                .collect()
+        });
+        let verification_exit_code = test_output.as_ref().map(|output| output.exit_code);
 
         // Preserve worktree on failure
         if !grading.resolved {
@@ -312,7 +343,7 @@ impl SweBenchRunner {
             task_result: TaskResult {
                 task_name: instance.instance_id.clone(),
                 passed: grading.resolved,
-                verification_exit_code: Some(test_output.exit_code),
+                verification_exit_code,
                 completion_reason,
                 wall_time_secs: start.elapsed().as_secs_f64(),
                 steps_taken: metrics.steps_taken,
@@ -329,6 +360,7 @@ impl SweBenchRunner {
                 step_trace: metrics.step_trace,
                 context_utilization: metrics.context_utilization,
                 tick_details: metrics.tick_details,
+                behavior_metrics: metrics.behavior_metrics,
                 harness_anomalies: metrics.harness_anomalies,
                 difficulty: None,
                 language: Some("rust".into()),
@@ -394,6 +426,7 @@ impl SweBenchRunner {
                 step_trace: vec![],
                 context_utilization: ContextUtilization::default(),
                 tick_details: vec![],
+                behavior_metrics: crate::benchmark::BehaviorMetrics::default(),
                 harness_anomalies: vec![],
                 difficulty: None,
                 language: Some("rust".into()),

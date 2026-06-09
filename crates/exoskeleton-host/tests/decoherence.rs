@@ -131,11 +131,14 @@ fn dc_t22_grace_period_preamble_injected_during_bootstrap() {
 
     let thread = exoskeleton_core::ThreadSpec {
         thread_id: THREAT_MONITOR_ID,
+        role: exoskeleton_core::ThreadRole::ThreatMonitor,
+        flavor: exoskeleton_core::ThreadFlavor::Cognitive,
         name: "Threat Monitor".into(),
         charter: "Test charter".into(),
         priority: exoskeleton_core::ThreadPriority::Critical,
         token_budget: 5000,
         schedule: ThreadSchedule::EveryTick,
+        workspace_root: None,
     };
     let snapshot = StateSnapshot::initial(VesselId::new(), "test".into());
 
@@ -167,11 +170,14 @@ fn dc_t23_grace_period_preamble_absent_after_grace() {
     let counter = ApproximateTokenCounter;
     let thread = exoskeleton_core::ThreadSpec {
         thread_id: THREAT_MONITOR_ID,
+        role: exoskeleton_core::ThreadRole::ThreatMonitor,
+        flavor: exoskeleton_core::ThreadFlavor::Cognitive,
         name: "Threat Monitor".into(),
         charter: "Test charter".into(),
         priority: exoskeleton_core::ThreadPriority::Critical,
         token_budget: 5000,
         schedule: ThreadSchedule::EveryTick,
+        workspace_root: None,
     };
     let snapshot = StateSnapshot::initial(VesselId::new(), "test".into());
 
@@ -202,11 +208,14 @@ fn dc_t24_grace_period_zero_never_injects_preamble() {
     let counter = ApproximateTokenCounter;
     let thread = exoskeleton_core::ThreadSpec {
         thread_id: THREAT_MONITOR_ID,
+        role: exoskeleton_core::ThreadRole::ThreatMonitor,
+        flavor: exoskeleton_core::ThreadFlavor::Cognitive,
         name: "Threat Monitor".into(),
         charter: "Test charter".into(),
         priority: exoskeleton_core::ThreadPriority::Critical,
         token_budget: 5000,
         schedule: ThreadSchedule::EveryTick,
+        workspace_root: None,
     };
     let snapshot = StateSnapshot::initial(VesselId::new(), "test".into());
 

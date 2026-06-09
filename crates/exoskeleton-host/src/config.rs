@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use exoskeleton_core::llm::LlmBackend;
 use exoskeleton_core::{ExoError, VesselId};
+use exoskeleton_threads::CodingPolicyProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::policy::ToolPolicyConfig;
@@ -157,6 +158,9 @@ pub struct CodingThreadConfig {
     /// exploratory work on their own.
     #[serde(default)]
     pub return_to_idle_after_completion: bool,
+    /// Deterministic policy knobs for the built-in coding thread.
+    #[serde(default)]
+    pub policy_profile: CodingPolicyProfile,
 }
 
 impl Default for CodingThreadConfig {
@@ -165,6 +169,7 @@ impl Default for CodingThreadConfig {
             enabled: false,
             workspace_root: None,
             return_to_idle_after_completion: false,
+            policy_profile: CodingPolicyProfile::default(),
         }
     }
 }
@@ -179,6 +184,7 @@ impl CodingDefaults {
             enabled: true,
             workspace_root,
             return_to_idle_after_completion: true,
+            policy_profile: CodingPolicyProfile::default(),
         }
     }
 
@@ -2258,6 +2264,11 @@ max_decide_turns = 0
         assert!(!config.enabled);
         assert_eq!(config.workspace_root, None);
         assert!(!config.return_to_idle_after_completion);
+        assert_eq!(config.policy_profile.exploratory_stall_threshold, 3);
+        assert_eq!(config.policy_profile.semantic_lookup_stall_threshold, 2);
+        assert_eq!(config.policy_profile.same_file_inspection_threshold, 3);
+        assert!(config.policy_profile.prefer_semantic_navigation);
+        assert!(config.policy_profile.prefer_trait_module_targets);
     }
 
     // ── E8S1-T17: coding_thread_config_toml_roundtrip ──
@@ -2268,12 +2279,14 @@ max_decide_turns = 0
             enabled: true,
             workspace_root: None,
             return_to_idle_after_completion: true,
+            ..CodingThreadConfig::default()
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: CodingThreadConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.enabled);
         assert_eq!(parsed.workspace_root, None);
         assert!(parsed.return_to_idle_after_completion);
+        assert_eq!(parsed.policy_profile.exploratory_stall_threshold, 3);
 
         // Also verify full vessel config with the [coding_thread] section.
         let vessel_toml = r#"
@@ -2283,12 +2296,45 @@ data_dir = "/tmp/exo"
 
 [coding_thread]
 enabled = true
+
+[coding_thread.policy_profile]
+exploratory_stall_threshold = 4
+semantic_lookup_stall_threshold = 2
+same_file_inspection_threshold = 2
+prefer_trait_module_targets = false
 "#;
         let file: VesselConfigFile = toml::from_str(vessel_toml).unwrap();
         let vessel_config = VesselConfig::try_from(file).unwrap();
         assert!(vessel_config.coding_thread.enabled);
         assert_eq!(vessel_config.coding_thread.workspace_root, None);
         assert!(!vessel_config.coding_thread.return_to_idle_after_completion);
+        assert_eq!(
+            vessel_config
+                .coding_thread
+                .policy_profile
+                .exploratory_stall_threshold,
+            4
+        );
+        assert_eq!(
+            vessel_config
+                .coding_thread
+                .policy_profile
+                .semantic_lookup_stall_threshold,
+            2
+        );
+        assert_eq!(
+            vessel_config
+                .coding_thread
+                .policy_profile
+                .same_file_inspection_threshold,
+            2
+        );
+        assert!(
+            !vessel_config
+                .coding_thread
+                .policy_profile
+                .prefer_trait_module_targets
+        );
     }
 
     #[test]

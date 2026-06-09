@@ -8,6 +8,7 @@
 //! - **Creative Synthesis** (Background, EveryNTicks(15)): cross-domain pattern discovery
 //! - **Initiative** (High, EveryNTicks(3)): self-directed behavior and engagement generation
 
+pub mod coding;
 pub mod creative_synthesis;
 pub mod initiative;
 pub mod memory_consolidation;
@@ -15,6 +16,10 @@ pub mod meta_cognition;
 pub mod self_critique;
 pub mod threat_monitor;
 
+pub use coding::{
+    execute_coding_thread, register_builtin_coding_thread, should_run_coding_thread,
+    CodingPolicyProfile, CODING_THREAD_ID,
+};
 pub use creative_synthesis::{CreativeSynthesis, Hypothesis, NovelConnection};
 use exoskeleton_core::prompt::PromptRegistry;
 use exoskeleton_core::ThreadSchedule;

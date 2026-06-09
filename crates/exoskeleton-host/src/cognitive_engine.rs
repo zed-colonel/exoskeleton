@@ -1,9 +1,8 @@
 //! Cognitive AQ engine: handler, task types, and bootstrap.
 //!
-//! The Cognitive AQ handles exactly three kinds of work (IBP §3.1):
-//! - Master loop ticks (PODAARA cycles) — Sprint 5
-//! - Cognitive thread executions — Sprint 6
-//! - LLM inference calls — Sprint 4
+//! The Cognitive AQ handles exactly two kinds of work:
+//! - Master loop ticks (PODAARA cycles)
+//! - LLM inference calls
 //!
 //! Tool invocations are NEVER submitted to this engine (I9). They go through
 //! the WI Host's Tool AQ via the Act step boundary.
@@ -30,9 +29,8 @@ use crate::llm::http::{
 /// JSON payload. The `CognitiveHandler` routes to the appropriate handler based
 /// on this field.
 ///
-/// Only three task types are permitted on the Cognitive AQ (IBP §3.1):
+/// Only two task types are permitted on the Cognitive AQ:
 /// - Master loop ticks (PODAARA cycles)
-/// - Cognitive Thread executions
 /// - LLM inference calls
 ///
 /// Tool invocations are NEVER submitted to the Cognitive AQ (I9).
@@ -41,8 +39,6 @@ use crate::llm::http::{
 pub enum CognitiveTaskType {
     /// A master loop tick (one PODAARA cycle). Sprint 5.
     MasterLoop,
-    /// A cognitive thread execution. Sprint 6.
-    Thread,
     /// An LLM inference call (local or frontier). Sprint 4.
     LlmCall,
 }
@@ -56,9 +52,8 @@ pub struct CognitivePayload {
     /// Which kind of cognitive work this task represents.
     pub task_type: CognitiveTaskType,
     /// Type-specific payload data. Structure varies by `task_type`:
-    /// - `MasterLoop`: tick parameters (Sprint 5)
-    /// - `Thread`: thread ID + context slice (Sprint 6)
-    /// - `LlmCall`: LlmRequest (Sprint 4)
+    /// - `MasterLoop`: tick parameters
+    /// - `LlmCall`: LlmRequest
     #[serde(default)]
     pub data: serde_json::Value,
 }
@@ -69,12 +64,12 @@ pub type CognitiveEngine = BootstrappedEngine<CognitiveHandler, SystemClock>;
 /// ExecutorHandler for the Cognitive AQ engine.
 ///
 /// Routes tasks based on `CognitiveTaskType` in the JSON payload.
-/// - Sprint 4: `LlmCall` handler (makes HTTP calls to LLM APIs)
-/// - Sprint 5: `MasterLoop` handler
-/// - Sprint 6: `Thread` handler
+/// - `LlmCall` handler (makes HTTP calls to LLM APIs)
+/// - `MasterLoop` handler
 ///
 /// This handler runs exclusively on the Cognitive AQ. It NEVER executes tool
-/// invocations (I9, IBP §3.1).
+/// invocations (I9). Thread execution is orchestrated inside the master loop,
+/// not dispatched as a separate AQ task.
 pub struct CognitiveHandler {
     /// Shared HTTP client for LLM API calls (connection pooling).
     pub(crate) http_client: reqwest::Client,
@@ -226,65 +221,6 @@ impl CognitiveHandler {
         Ok(Some(backend))
     }
 
-    /// Handle a thread execution task on the Cognitive AQ.
-    fn handle_thread(&self, ctx: &ExecutorContext, payload: &CognitivePayload) -> HandlerOutput {
-        // 1. Deserialize ThreadPayload
-        let thread_payload: super::kernel::types::ThreadPayload =
-            match serde_json::from_value(payload.data.clone()) {
-                Ok(p) => p,
-                Err(e) => {
-                    return HandlerOutput::terminal_failure(format!("invalid thread payload: {e}"))
-                }
-            };
-
-        // 2. Check kernel
-        let kernel = match &self.kernel {
-            Some(k) => k,
-            None => return HandlerOutput::terminal_failure("kernel not configured for threads"),
-        };
-
-        // 3. Load thread spec from registry
-        let (spec, _status) = match kernel.thread_registry.get(thread_payload.thread_id) {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return HandlerOutput::terminal_failure(format!(
-                    "thread not found: {}",
-                    thread_payload.thread_id
-                ))
-            }
-            Err(e) => return HandlerOutput::terminal_failure(format!("thread lookup failed: {e}")),
-        };
-
-        // 4. Load latest snapshot
-        let snapshot = match kernel.snapshot_store.latest() {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                exoskeleton_core::StateSnapshot::initial(kernel.vessel_id, kernel.mission.clone())
-            }
-            Err(e) => {
-                return HandlerOutput::retryable_failure(format!("snapshot load failed: {e}"))
-            }
-        };
-
-        // 5. Execute thread
-        let cancellation = ctx.input.cancellation_context.token();
-        match super::kernel::threads::execute_thread(
-            self,
-            kernel,
-            &spec,
-            &snapshot,
-            thread_payload.tick_id,
-            cancellation,
-            None, // Bootstrap preamble handled by execute_due_threads path
-        ) {
-            Ok(output) => match serde_json::to_vec(&output) {
-                Ok(bytes) => HandlerOutput::success_with_output(bytes),
-                Err(e) => HandlerOutput::terminal_failure(format!("serialize thread output: {e}")),
-            },
-            Err(e) => HandlerOutput::retryable_failure(format!("thread execution failed: {e}")),
-        }
-    }
-
     /// Handle an LlmCall task.
     fn handle_llm_call(&self, ctx: &ExecutorContext, payload: &CognitivePayload) -> HandlerOutput {
         // 1. Deserialize LlmRequest from payload.data
@@ -394,7 +330,6 @@ impl ExecutorHandler for CognitiveHandler {
                 }
                 None => HandlerOutput::terminal_failure("master loop kernel not configured"),
             },
-            CognitiveTaskType::Thread => self.handle_thread(&ctx, &payload),
             CognitiveTaskType::LlmCall => self.handle_llm_call(&ctx, &payload),
         }
     }
@@ -475,11 +410,7 @@ mod tests {
 
     #[test]
     fn cognitive_task_type_roundtrip() {
-        let types = [
-            CognitiveTaskType::MasterLoop,
-            CognitiveTaskType::Thread,
-            CognitiveTaskType::LlmCall,
-        ];
+        let types = [CognitiveTaskType::MasterLoop, CognitiveTaskType::LlmCall];
         for t in &types {
             let json = serde_json::to_string(t).unwrap();
             let parsed: CognitiveTaskType = serde_json::from_str(&json).unwrap();
@@ -512,9 +443,9 @@ mod tests {
 
     #[test]
     fn cognitive_payload_data_defaults_to_null() {
-        let json = r#"{"task_type": "thread"}"#;
+        let json = r#"{"task_type": "llm_call"}"#;
         let payload: CognitivePayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.task_type, CognitiveTaskType::Thread);
+        assert_eq!(payload.task_type, CognitiveTaskType::LlmCall);
         assert!(payload.data.is_null());
     }
 }
